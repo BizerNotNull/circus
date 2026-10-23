@@ -21,7 +21,7 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 | `circus-sandbox/src/` | 已初始化 `api`、`lifecycle`、`infrastructure`、`runtime`、`environment`、`workspace`、`pool` 职责目录；尚无 Rust 模块。 |
 | `circus-sandbox/tests/` | 预留跨模块契约与后端集成测试目录。 |
 | `circus-paseo/` | 已有 npm workspace 应用；内部结构与开发流程交由其 `CLAUDE.md` 说明。 |
-| `.github/workflows/` | 现有 Paseo CI；不代表沙箱已有构建或测试流水线。 |
+| `.github/workflows/` | Paseo CI 与独立 Sandbox security；后者不代表沙箱已有 Rust 构建或隔离能力。 |
 
 ## Development Commands
 
@@ -51,6 +51,7 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 - `circus-paseo/package.json`、`circus-paseo/package-lock.json`：现有 npm workspace 命令及依赖锁。
 - `circus-paseo/.tool-versions`：Paseo 工具版本声明，不作为沙箱 Rust 版本依据。
 - `lefthook.yml`：根提交钩子目前仅覆盖 Paseo 的格式、lint 与类型检查，不覆盖沙箱。
+- [.github/sandbox-security.md](.github/sandbox-security.md)：Gitleaks、Dependency review、Actions CodeQL、工具前提和受保护审查边界。安全相关目录由 `.github/CODEOWNERS` 管理。
 
 ## Runtime/Tooling Preferences
 
@@ -87,7 +88,7 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 ### 3. CI 与 Sourcery 审查闭环
 
 - PR 提交后并行关注 GitHub Actions CI 和 Sourcery review；两者职责不同，不能互相替代。准备合并前，必须确认审查覆盖最新改动；Sourcery 未触发或未覆盖新增改动时，按其实际支持的方式请求审查，不假定它已经完成。
-- 当前 `Paseo CI` 按路径触发，并按受影响领域选择检查，规则见 `.github/workflows/paseo-ci.yml` 与 `.github/paseo-ci-paths.yml`。根文档或沙箱改动可能不触发该 CI；未触发或跳过不等于通过，也不能据此宣称沙箱已有 CI。PR 中说明适用的本地验证及覆盖缺口，不为“变绿”修改无关文件。
+- `Paseo CI` 按路径触发，规则见 `.github/workflows/paseo-ci.yml` 与 `.github/paseo-ci-paths.yml`。独立安全门禁见 [.github/sandbox-security.md](.github/sandbox-security.md)，仅扫描器与配置已落地，不代表沙箱已有 Rust 构建或真实后端测试。未触发或跳过不等于实际覆盖，不为“变绿”修改无关文件。
 - CI 失败先读失败 job 的日志，区分代码问题与基础设施故障。代码问题修复并补做针对性验证；明确的临时基础设施故障可重跑并记录原因，不靠反复重跑或放宽检查掩盖失败。
 - 逐条判断 Sourcery 和人工审查意见：有效问题修复并说明验证；不采纳时回复技术理由、证据或取舍。安全、隔离、生命周期及资源回收问题必须明确处理，不盲从建议，也不无说明地关闭讨论。
 - 审查修复默认追加提交，便于查看增量；只有明确需要整理历史时才重写已推送提交，且不得覆盖他人提交。每轮修复完成本地验证后集中推送，再检查新一轮 CI 与审查；旧提交的绿灯不能为新提交背书。
