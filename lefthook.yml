@@ -1,0 +1,17 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - name: format
+      root: "circus-paseo/"
+      glob: "*.{css,js,json,jsonc,jsx,md,ts,tsx,yaml,yml}"
+      exclude:
+        - "package-lock.json"
+        - "**/package-lock.json"
+      run: npm run format:check:files -- {staged_files}
+    - name: lint
+      root: "circus-paseo/"
+      glob: "*.{js,jsx,ts,tsx}"
+      run: npm run lint -- {staged_files}
+    - name: typecheck
+      root: "circus-paseo/"
+      run: npm run typecheck

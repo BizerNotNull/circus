@@ -1,0 +1,2 @@
+# Paseo dev scripts resolve local state relative to the Git root.
+/.dev/

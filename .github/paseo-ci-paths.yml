@@ -1,0 +1,100 @@
+# Pull-request checks are routed by the behavior they prove. Package consumers
+# do not inherit their dependencies' test suites; main and manual runs execute
+# every contract regardless of these paths.
+#
+# Patterns are relative to the circus repository root. circus-paseo is a subdirectory,
+# so product globs stay under circus-paseo/. Unprefixed ** globs would select circus
+# files and must not be added. dorny/paths-filter (picomatch) matches these
+# lists; a file selects a filter when any pattern matches.
+routing:
+  - ".github/paseo-ci-paths.yml"
+
+# merge_group cannot use workflow path filters. This list is the gate for
+# running the full suite on a merge queue commit.
+paseo:
+  - "circus-paseo/**"
+  - ".github/workflows/paseo-ci.yml"
+  - ".github/paseo-ci-paths.yml"
+
+workspace:
+  - "circus-paseo/.mise.toml"
+  - "circus-paseo/.tool-versions"
+  - "circus-paseo/package.json"
+  - "circus-paseo/package-lock.json"
+  - "circus-paseo/patches/**"
+  - "circus-paseo/scripts/**"
+  - "circus-paseo/tsconfig.json"
+  - "circus-paseo/tsconfig.base.json"
+  - "circus-paseo/vitest.config.ts"
+
+ci:
+  - "circus-paseo/.github/actions/**"
+  - ".github/workflows/paseo-ci.yml"
+
+format:
+  - "circus-paseo/.agents/**/*.{cjs,css,html,js,json,jsonc,jsx,md,mjs,ts,tsx,yaml,yml}"
+  - "circus-paseo/.github/**/*.{cjs,css,html,js,json,jsonc,jsx,md,mjs,ts,tsx,yaml,yml}"
+  - "circus-paseo/**/*.{cjs,css,html,js,json,jsonc,jsx,md,mjs,ts,tsx,yaml,yml}"
+  - "circus-paseo/packages/expo-two-way-audio/**"
+
+quality:
+  - "circus-paseo/**/*.{cjs,js,json,jsx,mjs,ts,tsx}"
+  - "circus-paseo/packages/expo-two-way-audio/**"
+
+hub:
+  - "circus-paseo/packages/cli/src/commands/hub/**"
+  - "circus-paseo/packages/server/src/server/hub/**"
+
+server:
+  - "circus-paseo/plugins/**"
+  - "circus-paseo/packages/server/**"
+  - "circus-paseo/packages/app/e2e/support/fixtures/recording.*"
+
+desktop:
+  - "circus-paseo/packages/desktop/**"
+  - "circus-paseo/packages/app/src/desktop/**"
+  - "circus-paseo/packages/app/src/**/*.electron.{ts,tsx}"
+  - "circus-paseo/packages/server/src/server/browser-tools/**"
+  - "circus-paseo/packages/app/e2e/support/**"
+  - "circus-paseo/packages/app/*config.{cjs,js,ts}"
+  - "circus-paseo/packages/app/package.json"
+
+app:
+  - "circus-paseo/packages/app/**"
+  - "circus-paseo/packages/expo-two-way-audio/**"
+
+sdk:
+  - "circus-paseo/packages/plugin/**"
+  - "circus-paseo/plugin-examples/**"
+  - "circus-paseo/public-docs/plugins/**"
+  - "circus-paseo/packages/client/**"
+  - "circus-paseo/packages/highlight/**"
+  - "circus-paseo/packages/protocol/**"
+
+browser:
+  - "circus-paseo/packages/server/src/server/agent/provider-snapshot-manager.ts"
+  - "circus-paseo/packages/server/src/server/session/provider/provider-catalog-session.ts"
+  - "circus-paseo/packages/client/src/compat/normalize-provider-models.ts"
+  - "circus-paseo/packages/protocol/src/client-capabilities.ts"
+  - "circus-paseo/packages/server/src/server/agent/provider-registry.ts"
+  - "circus-paseo/packages/server/src/server/agent/agent-sdk-types.ts"
+  - "circus-paseo/packages/server/src/server/agent/providers/codex-app-server-agent.ts"
+  - "circus-paseo/packages/server/src/server/agent/providers/claude/agent.ts"
+  - "circus-paseo/packages/server/src/server/agent/plugin-provider.ts"
+  - "circus-paseo/packages/server/src/server/plugins/{index,plugin-process,plugin-process-protocol,runtime}.ts"
+  - "circus-paseo/packages/server/src/executable-resolution/**"
+  - "circus-paseo/packages/plugin/src/server/provider.ts"
+  - "circus-paseo/packages/app/src/!(desktop)/**"
+  - "circus-paseo/packages/app/e2e/browser/**"
+  - "circus-paseo/packages/app/e2e/support/**"
+  - "circus-paseo/packages/app/assets/**"
+  - "circus-paseo/packages/app/public/**"
+  - "circus-paseo/packages/app/index.ts"
+  - "circus-paseo/packages/app/*config.{cjs,js,ts}"
+  - "circus-paseo/packages/app/package.json"
+
+relay:
+  - "circus-paseo/packages/relay/**"
+
+cli:
+  - "circus-paseo/packages/cli/**"
