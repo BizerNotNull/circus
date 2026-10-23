@@ -1,0 +1,6 @@
+{
+  "proseWrap": "preserve",
+  "embeddedLanguageFormatting": "off",
+  "endOfLine": "auto",
+  "printWidth": 80
+}

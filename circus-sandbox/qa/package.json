@@ -1,0 +1,23 @@
+{
+  "name": "circus-sandbox-qa",
+  "private": true,
+  "type": "module",
+  "description": "检查 circus-sandbox 文档格式、本地链接和手写 Rust 文件规模。不构建、不运行、不验证隔离。",
+  "engines": {
+    "node": "24.18.0"
+  },
+  "scripts": {
+    "check": "node check.mjs",
+    "test": "node --test check.test.mjs",
+    "format": "node check.mjs --format"
+  },
+  "dependencies": {
+    "github-slugger": "2.0.0",
+    "markdownlint": "0.42.0",
+    "mdast-util-from-markdown": "2.1.0",
+    "prettier": "3.9.10"
+  },
+  "overrides": {
+    "katex": "0.18.2"
+  }
+}
