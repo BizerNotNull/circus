@@ -22,6 +22,7 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 | `circus-sandbox/`       | Rust library crate。已实现 workspace 文件 API、`examples/workspace.rs`、`tests/workspace.rs`、Apache-2.0 `LICENSE` 与 `deny.toml`。                                                                        |
 | `circus-sandbox/src/`   | 已导出 `workspace`。`api`、`lifecycle`、`infrastructure`、`runtime`、`environment`、`pool` 仍是占位目录，不是已实现模块。                                                                                  |
 | `circus-sandbox/tests/` | `workspace.rs` 用真实临时目录验证公开文件 API。                                                                                                                                                            |
+| `circus-sandbox/docs/`  | 交付计划与工程事实。架构细节不在根指南复制。                                                                                                                                                               |
 | `circus-paseo/`         | 已有 npm workspace 应用；内部结构与开发流程交由其 `CLAUDE.md` 说明。                                                                                                                                       |
 | `.github/workflows/`    | Paseo CI 仍按路径触发。沙箱包含 `sandbox-quality.yml`、`sandbox-security.yml` 和 `sandbox-rust.yml`。质量、密钥/依赖、actions/QA/Rust CodeQL 与 Cargo 检查各自的范围见工程说明；它们不证明进程或容器隔离。 |
 
@@ -76,6 +77,7 @@ QA 固定 Node.js 24.18.0 与 npm，不继承 Paseo 的 Node 版本。`ci` 和 `
 - `circus-paseo/package.json`、`circus-paseo/package-lock.json`：现有 npm workspace 命令及依赖锁。
 - `circus-paseo/.tool-versions`：Paseo 工具版本声明，不作为沙箱 Rust 版本依据。
 - `lefthook.yml`：根提交钩子目前仅覆盖 Paseo 的格式、lint 与类型检查，不覆盖沙箱。
+- [.github/sandbox-security.md](.github/sandbox-security.md)：Gitleaks、Dependency review、Actions CodeQL、工具前提和受保护审查边界。安全相关目录由 `.github/CODEOWNERS` 管理。
 
 ## Runtime/Tooling Preferences
 
