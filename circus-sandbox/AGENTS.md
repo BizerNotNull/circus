@@ -2,22 +2,40 @@
 
 ## 状态与边界
 
-`circus-sandbox` 是计划用 Rust 实现的 Agent 沙箱核心。本检出只有职责目录与测试目录，没有 `Cargo.toml`、可运行入口或后端实现。并行的 `feat/capability-workspace` 才会加入首个真实 crate，且不依赖本质量基线合并；未合并前不要把它写成已有能力。开发约定不是已交付功能。Paseo 接入另行开发，本次不修改 `../circus-paseo/`。交付顺序见 [docs/delivery-plan.md](docs/delivery-plan.md)。
+`circus-sandbox` 是 Rust library crate（包名 `circus-sandbox`，edition 2024）。当前已经实现并导出的只有 workspace 文件能力：在 tempfile 新建的临时目录上，用 cap-std 目录句柄做相对路径读写。这不是进程沙箱，不提供容器、运行时隔离或 Paseo 接入。
+
+已实现：
+
+- `Workspace` 同步 API：`new`、`write_file`、`read_file`、`create_dir_all`、`remove_file`、`cleanup`。方法会阻塞调用线程。
+- 临时工作区由 tempfile 新建，不接受宿主目录，公开 API 不暴露工作区根路径。
+- 跨平台拒绝空路径、绝对路径、`..`、Windows 盘符/UNC 前缀和反斜杠；通过后的访问走 cap-std，防止符号链接逃逸和基于路径字符串的 TOCTOU。
+- 读写使用同一个 `max_file_bytes`。它是单个文件的上限：`new` 拒绝 `0` 和 `usize::MAX`，以便读取 `limit + 1` 时不溢出，也不按该上限预分配。它不是工作区总字节配额、文件数配额或宿主磁盘配额，当前也没有总配额 API。写满临时目录是宿主磁盘耗尽，不是 `LimitExceeded`。不要把这个参数写成沙箱配额，也不要在本 crate 增加总配额 API。后续真实进程或容器后端必须显式限制资源。
+- `write_file` 不是原子替换。已关闭、非法路径、超限、缺失父目录和非普通文件在截断前返回，这些失败不修改已有文件。打开普通文件后先把长度设为 0 再写入；此后的 I/O 失败可能截断或留下不完整内容。不要写成原子写入，也不要为此增加原子 API。
+- Unix 上 `read_file` / `write_file` 通过 cap-std `OpenOptions` 设置 `nonblock(true)` 再打开，因此 `open` 本身不等待 FIFO 对端。句柄级 `is_file` 在任何读取或 `set_len`/写入之前执行。路径 metadata 预检不是这个修复：工作区内指向 FIFO 的符号链接，以及打开前普通文件被换成 FIFO，都不得阻塞，并返回 `NotRegularFile`（保留调用方路径）。指向普通文件的工作区符号链接仍跟随。逃出工作区的符号链接仍是 cap-std 的 I/O 错误，不是新错误变体。Windows 不设置该标志；CreateFile 保持 write+create 且不预先 truncate，读取是只读打开。目录、FIFO、设备及其他非普通节点，包括指向它们的工作区符号链接，都是 `NotRegularFile`。
+- `cleanup` 可重复调用；成功后文件操作返回 `Closed`。清理失败保留工作区归属，可重试，且不会标成已关闭。`Drop` 只做尽力清理，错误只有显式 `cleanup` 能观察到。
+- `remove_file` 是 cap-std `Dir::remove_file`：对最终组件 unlink，不跟随该符号链接。非目录项都会删，包括普通文件、符号链接、FIFO 和 socket。目录返回 `Io` 且保留。文档若写成“只删除普通文件”，纠正文档；不要加删除前的类型预检，那会和 unlink 竞态。`NotRegularFile` 只属于读写。
+- 同一 `Workspace` 的并发读写由内部 `RwLock` 保护。这只序列化本进程内对这一个值的调用，不是外部进程隔离，也不是 crash-safe 原子写。不要把这把锁写成原子替换或磁盘配额，也不要为此增加原子写入 API。
+
+未实现，不得写成现有能力：命令执行、生命周期状态机、Docker/Kubernetes/containerd、runc/gVisor/Kata/Firecracker、OCI 镜像、Git clone/worktree、沙箱池、HTTP/RPC、工作区总配额、宿主磁盘配额、进程隔离。`src/api`、`lifecycle`、`infrastructure`、`runtime`、`environment`、`pool` 仍只是占位目录。不修改 `../circus-paseo/`。
+
+用户说明见 [README.md](README.md)，工程命令与门禁边界见 [docs/engineering.md](docs/engineering.md)，完整目标及交付记录入口见 [docs/delivery-plan.md](docs/delivery-plan.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。当前检出已有 Workspace crate、许可证策略、质量/安全/Rust 工作流，但开发约定和工作流存在仍然不是“全部领域已交付”或检查已通过。
 
 ## Architecture & Data Flow
 
-规划调用链：调用方 → `api` → `lifecycle` → `infrastructure` → `runtime`。`environment` 与 `workspace` 准备执行环境，`pool` 复用同一生命周期入口优化启动。后端通过适配器隔离；领域层不依赖 Docker/Kubernetes SDK。
+当前可调用路径只有库内的 `Workspace`：调用方 → `circus_sandbox::Workspace` → cap-std `Dir`（根为 tempfile 新建的目录）。没有 `api` / `lifecycle` 门面。
 
-| 目录                  | 职责与边界                                                                                |
-| --------------------- | ----------------------------------------------------------------------------------------- |
-| `src/api/`            | 统一创建、执行命令、文件操作、销毁入口；不泄露后端类型，不预设 HTTP、RPC 或进程内传输。   |
-| `src/lifecycle/`      | 创建、启动、运行、暂停、恢复、销毁的状态转换与资源回收；状态只能由此修改。                |
-| `src/infrastructure/` | Docker、Kubernetes、containerd 等部署与调度适配；负责资源分配，不承担隔离机制实现。       |
-| `src/runtime/`        | runc、gVisor、Kata Containers、Firecracker 等运行时能力与隔离策略；不支持的能力明确报错。 |
-| `src/environment/`    | OCI 镜像、基础环境、依赖准备与可复现环境标识。                                            |
-| `src/workspace/`      | Git clone、worktree、代码副本的创建与回收；限定文件操作边界，防止路径逃逸。               |
-| `src/pool/`           | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。                  |
-| `tests/`              | 未来的跨模块契约与真实后端集成测试。                                                      |
+规划中的调用链仍是：调用方 → `api` → `lifecycle` → `infrastructure` → `runtime`。在对应模块真实实现之前，下表是职责边界，不是已交付后端。
+
+| 目录                  | 职责与边界                                                                                                                                     |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/api/`            | 统一创建、执行命令、文件操作、销毁入口；不泄露后端类型，不预设 HTTP、RPC 或进程内传输。                                                        |
+| `src/lifecycle/`      | 创建、启动、运行、暂停、恢复、销毁的状态转换与资源回收；状态只能由此修改。                                                                     |
+| `src/infrastructure/` | Docker、Kubernetes、containerd 等部署与调度适配；负责资源分配，不承担隔离机制实现。                                                            |
+| `src/runtime/`        | runc、gVisor、Kata Containers、Firecracker 等运行时能力与隔离策略；不支持的能力明确报错。                                                      |
+| `src/environment/`    | OCI 镜像、基础环境、依赖准备与可复现环境标识。                                                                                                 |
+| `src/workspace/`      | 已实现：能力目录内的相对文件读写、建目录、删除与回收。尚未实现 Git clone、worktree 或代码副本管理。                                            |
+| `src/pool/`           | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。                                                                       |
+| `tests/`              | `tests/workspace.rs` 用真实临时目录验证公开文件 API。符号链接逃逸放在 crate 私有测试，避免为测试暴露工作区根。需要容器或虚拟化的测试尚未存在。 |
 
 这些后端是候选目标，不代表全部同时支持；实现时按需求选择，禁止用空适配器声称支持。运行时必须先消费 workspace 文件契约再开发。池与快照仍保留，支持策略只写在交付计划。
 
@@ -27,15 +45,14 @@
 - API 使用领域请求、结果和错误；预期失败返回 `Result`，禁止用 panic 处理外部输入或吞掉清理失败。
 - 生命周期显式建模合法转换；失败与取消必须有资源归属及回收路径，销毁应可重复调用。
 - 通过构造参数注入后端、配置及外部服务；trait 只用于真实替换边界，不引入全局可变状态。
-- 异步运行时统一使用 Tokio；阻塞 Git/文件/进程操作不得阻塞异步执行线程。取消与超时不得遗留孤儿资源。
+- 当前 workspace API 是同步且阻塞的。将来从异步上下文调用时必须 `spawn_blocking`；计划中的异步运行时仍只有 Tokio，不引入 async-std/smol 或第二套运行时。取消与超时不得遗留孤儿资源。阻塞任务开始后不能靠 abort 终止。
 - 隔离级别、资源限制和权限由显式配置决定；禁止静默降级隔离，禁止默认把宿主目录或凭据暴露给沙箱。
 
 ## Rust 工具链基线
 
-选型核对日期：2026-10-24。本检出尚无 `rust-toolchain.toml` 或 Cargo 工程；以下基线在首个真实 crate 中落地。
+选型核对日期：2026-10-24。开发基线仍是 Rust 1.99.1 stable、edition 2024。本目录已有 `rust-toolchain.toml` 与 `Cargo.toml`；这不表示每台开发机已经安装该工具链。
 
-- **Rust 1.99.1 stable、edition 2024**。采用较新的稳定补丁版，不使用浮动 `stable`、beta 或 nightly 作为构建基线。[官方发布说明](https://blog.rust-lang.org/2026/10/15/Rust-1.99.1/)与[stable 分发清单](https://static.rust-lang.org/dist/channel-rust-stable.toml)为版本依据。
-- 首次创建真实 crate 时，在本目录提交以下 `rust-toolchain.toml`；Cargo、rustc、标准库、rustfmt、Clippy 使用该发布配套组件，不单独升级或混用版本。管理器采用 rustup 稳定版；其版本不替代项目编译器锁定。
+- 本目录的 `rust-toolchain.toml` 必须保持下列内容。Cargo、rustc、标准库、rustfmt、Clippy 使用该发布配套组件，不单独升级或混用版本。管理器采用 rustup 稳定版；其版本不替代项目编译器锁定。
 
   ```toml
   [toolchain]
@@ -44,13 +61,13 @@
   components = ["rustfmt", "clippy"]
   ```
 
-- `Cargo.toml` 显式设置 `edition = "2024"`、`rust-version = "1.99.1"`；提交 `Cargo.lock`。构建使用 `--locked`，依赖 feature 按需开启，避免默认启用 `full`。多 crate 出现后再统一 workspace 依赖，不预建 workspace。
+- `Cargo.toml` 显式设置 `edition = "2024"`、`rust-version = "1.99.1"`、`license = "Apache-2.0"`。crate 禁止 unsafe。提交由 Cargo 生成的 `Cargo.lock`，不手写、不手改锁文件来绕过解析。构建使用 `--locked`，依赖 feature 按需开启，避免默认启用 `full`。多 crate 出现后再统一 workspace 依赖，不预建 workspace。
 - Windows 本机开发使用 `x86_64-pc-windows-msvc`，需要 Visual Studio Build Tools 的 C++ 工具与 Windows SDK；Linux 隔离后端在 Linux 主机/虚拟机验证，不能把 Windows 编译成功视为隔离通过。仅为实际支持的平台安装 target；编辑器按需安装 rust-analyzer，不把它作为构建依赖。
 - 工具链升级通过显式修改版本、核对依赖 MSRV、运行受影响检查及真实后端 smoke 验证完成；不自动追踪最新版本。[rustup 配置依据](https://rust-lang.github.io/rustup/overrides.html#the-toolchain-file)。
 
 ## 第三方库选型与去重
 
-以下是按职责确定的默认选择，不是已安装的依赖清单；只有实现需要该能力时才加入 `Cargo.toml`。优先标准库，其次选择有持续维护、公开源码和实际采用的库；不为降低流行度放弃成熟生态，也不以 stars 或下载量代替性能证据。crate 版本在首次引入时选择兼容上述工具链的较新非预发布版，核对 MSRV、许可证与安全公告，并由 `Cargo.lock` 固定实际解析版本。
+以下是按职责确定的默认选择。只有实现需要该能力时才加入 `Cargo.toml`。当前直接依赖只有 [`cap-std` 4.0.3](https://github.com/bytecodealliance/cap-std)、[`cap-fs-ext` 4.0.3](https://github.com/bytecodealliance/cap-std)（Unix 上 `OpenOptionsSyncExt::nonblock`，不开 default features）、[`tempfile` 3.x](https://docs.rs/tempfile/latest/tempfile/)、[`thiserror` 2.x](https://github.com/dtolnay/thiserror)（均为非预发布）。表中其余库仍未引入。优先标准库，其次选择有持续维护、公开源码和实际采用的库；不为降低流行度放弃成熟生态，也不以 stars 或下载量代替性能证据。crate 版本在首次引入时选择兼容上述工具链的较新非预发布版，核对 MSRV、许可证与安全公告，并由 `Cargo.lock` 固定实际解析版本。
 
 | 类别                    | 默认选择                                                                                                                 | 选择依据与使用边界                                                                                                                                                                                  |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -64,7 +81,7 @@
 | HTTP 服务（确认传输后） | [`axum`](https://github.com/tokio-rs/axum)                                                                               | 确需 HTTP API 时作为唯一默认框架，复用 Tokio/Hyper 生态；当前不引入，不据此改变传输未定的架构边界。                                                                                                 |
 | CLI（需要时）           | [`clap` 4.x](https://docs.rs/clap/latest/clap/)                                                                          | 有命令行入口时才引入，统一解析与帮助信息；纯库不依赖 CLI 框架。性能侧关注启动时间与二进制体积，而非请求吞吐。                                                                                       |
 | 临时目录                | [`tempfile` 3.x](https://docs.rs/tempfile/latest/tempfile/)                                                              | 管理临时工作区；检查权限与清理失败，不能只依靠 Drop 处理崩溃后的残留，也不能把随机路径当租户隔离。                                                                                                  |
-| 受限文件访问            | [`cap-std`](https://github.com/bytecodealliance/cap-std)                                                                 | 从已授权目录句柄做相对访问；避免“字符串检查后再打开”的路径竞态。它不替代进程隔离、挂载策略或租户权限控制。                                                                                          |
+| 受限文件访问            | [`cap-std`](https://github.com/bytecodealliance/cap-std) 与 [`cap-fs-ext`](https://github.com/bytecodealliance/cap-std)  | 从已授权目录句柄做相对访问；避免“字符串检查后再打开”的路径竞态。`cap-fs-ext` 只提供 cap-std 未放进 `std` 形状的打开标志（当前是 Unix nonblocking open）。它不替代进程隔离、挂载策略或租户权限控制。 |
 | 底层 Linux 系统接口     | [`rustix` 1.x](https://docs.rs/rustix/latest/rustix/)                                                                    | 仅当标准库/能力式文件 API 缺少所需 syscall 时使用；隔离在 runtime 适配器中，不再并用 nix 提供同一接口，检查内核能力且不静默降级。                                                                   |
 | Docker Engine 适配      | [`bollard`](https://github.com/fussybeaver/bollard)                                                                      | 仅实现 Docker 后端时引入异步 SDK，不重复手写 Docker REST 客户端；daemon socket 属高权限管理面，禁止暴露给沙箱。                                                                                     |
 | Kubernetes 适配         | [`kube`（kube-rs）](https://github.com/kube-rs/kube)                                                                     | 仅实现 Kubernetes 后端时引入；按需开启 client/runtime，限定凭据与 RBAC，不因 SDK 存在而引入控制器或第二套调度状态。                                                                                 |
@@ -72,7 +89,7 @@
 
 ### 性能依据与兼容边界
 
-- “性能最好”限定为目标平台、真实数据与相同语义下的测量结果；当前没有可运行沙箱，**没有本项目最快库的实测结论**。表中选型综合性能机制、维护与生态适配；网络/后端 SDK 不存在可脱离负载比较的统一性能排名。
+- “性能最好”限定为目标平台、真实数据与相同语义下的测量结果。workspace 文件 API 可以运行，但尚无进程或容器沙箱，**没有本项目最快库的实测结论**。表中选型综合性能机制、维护与生态适配；网络/后端 SDK 不存在可脱离负载比较的统一性能排名。
 - JSON 的具体取舍：sonic-rs 上游 README 提供 Xeon Platinum 8260 上 twitter/citm_catalog/canada 数据的基准，安全 `from_slice` 在这些结构体解析用例中快于 serde_json/simd-json；这是**上游结果，非本项目测量**。调研时仓库约 937 stars，是有实际采用但非最大众的性能型选择；stars 仅作采用度信号。[基准与运行条件](https://github.com/cloudwego/sonic-rs#benchmark)。
 - sonic-rs 并非 serde_json 的无条件替代：非类型化 Value 的重复键行为存在差异，SDK 暴露的 serde_json 类型不能直接互换。[兼容说明](https://github.com/cloudwego/sonic-rs/blob/main/docs/serdejson_compatibility.md)。业务 JSON 默认只选 sonic-rs；遇到硬性兼容要求时先评估全局改选，而非任意新增第二套解析路径。
 - 不把上游建议的 `-C target-cpu=native` 无条件用于分发产物；构建机与部署 CPU 可能不同，须明确目标指令集并验证可移植性。首次实现 JSON 路径时测量真实负载的吞吐、分配与尾延迟，同时验证重复键、数值精度、非法 UTF-8 和资源上限；不靠 unchecked API 或放松语义获得“更快”。
@@ -81,13 +98,29 @@
 
 - **尽可能避免使用两个同一类的第三方库：同一职责默认只保留一个直接依赖与一套业务使用方式。** 新增前检查现有依赖、标准库和已选生态能否满足；替换时迁移所有调用点并删除旧直接依赖，不保留双实现或兼容别名。
 - 配套且职责互补的 crate 不算重复，例如 serde + sonic-rs、tracing + tracing-subscriber、tokio + tokio-util；后端 SDK 内部的 HTTP/JSON 实现也不等于允许业务层任意并用同类库。
-- 无法消除的 SDK 类型约束、平台差异或传递依赖例外，必须在引入说明中记录原因、使用边界及去重不可行的证据；不能为去重破坏第三方兼容性，也不能以“传递依赖已存在”为由扩大直接使用。Cargo 工程建立后用 `cargo tree --duplicates` 与 `cargo tree -e features` 检查重复版本和 feature 来源；不同名称的同类库还需人工检查，命令输出不自动证明无重复。
+- 无法消除的 SDK 类型约束、平台差异或传递依赖例外，必须在引入说明中记录原因、使用边界及去重不可行的证据；不能为去重破坏第三方兼容性，也不能以“传递依赖已存在”为由扩大直接使用。用 `cargo tree --duplicates` 与 `cargo tree -e features` 检查重复版本和 feature 来源；不同名称的同类库还需人工检查，命令输出不自动证明无重复。
 
 ## Runtime, Commands & QA
 
-- Rust 核心使用上述 Cargo 工具链，不继承 Paseo 的工具链版本。服务入口尚未配置。本检出没有 `sandbox-rust.yml`。质量工作流范围见 [docs/engineering.md](docs/engineering.md)，独立安全门禁见 [安全工程说明](../.github/sandbox-security.md)。它们不能代替后端行为与隔离测试。
-- 本检出没有 `Cargo.toml`，不能在这里执行 Cargo。首个真实 crate 属于并行的 `feat/capability-workspace`：cap-std 受限临时工作区、有界读写、可重试幂等清理、真实 example 与测试、Apache-2.0，无容器或服务。不创建空壳入口。未合并不算本检出已有实现。
-- Cargo 工程建立后的检查以该 crate 分支为准。本检出不把未运行的 Cargo 写成已通过。
-- 单元测试与模块共置；`tests/` 验证 API 行为、非法状态转换、失败回收、路径边界及隔离能力。需要容器或虚拟化的测试应显式标注环境要求并隔离资源。
-- 手写 `.rs` 单文件不超过 1200 行，含 1200 行。文档 QA 的命令、白名单和 `format` 脚本只写在 [docs/engineering.md](docs/engineering.md)。检查结果记在 PR，不记在指南里。
-- 启动优化必须测量冷启动与复用路径，并验证复用不泄露状态。没有覆盖率百分比门槛；实际后端行为必须有运行证据，不能仅靠 mock。
+- Rust 核心使用上述 Cargo 工具链，不继承 Paseo 的工具链版本。服务入口尚未配置。`.github/workflows/sandbox-rust.yml` 显示名为 `Sandbox Rust`，检查名为 `rust (ubuntu-latest)`、`rust (windows-latest)`、`dependencies` 和 `codeql`。没有路径过滤，不调用 Paseo CI；`main` push、所有 pull request、merge queue 和 `workflow_dispatch` 都会启动。结果只记在对应 PR，不在本文声称当前提交已通过。命令在 `circus-sandbox/` 执行，rustup 读取本目录 `rust-toolchain.toml`。工作流存在不是服务可运行、隔离通过或分支保护已配置。
+- 本 crate 不允许 unsafe。库只导出已实现的 `workspace` 模块，不预建其他空模块，也不创建空壳二进制来假装后端可用。
+- 格式检查：`cargo fmt --check`（写回用 `cargo fmt`）。
+- Clippy：`cargo clippy --locked --all-targets -- -D warnings`。
+- 构建：`cargo build --locked`。
+- 测试：`cargo test --locked`。公开文件 API 集成测试是 `cargo test --locked --test workspace`。连示例一起编译用 `cargo test --locked --all-targets`。
+- 文档：`RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`。与 CI 的文档检查一致。
+- 示例：`cargo run --locked --example workspace`。示例必须实际写、读、删除并 `cleanup`，打印读到的字节，不能打印与 `Result` 无关的成功字样。
+- 单元测试与模块共置，可覆盖符号链接逃逸、大于上限的已有文件读取，以及清理失败后的重试。读取超限时 `LimitExceeded.actual` 是探测到的 `limit + 1`，不是未知总长。公开 API 不能制造超限文件，所以 `tests/` 只验证写上限、恰好等于上限的读取、非法路径、嵌套目录/删除、重复 `cleanup` 与 `Closed`。符号链接用例的必要前提是进程能创建符号链接。Windows 需要开发者模式，或持有 `SeCreateSymbolicLinkPrivilege`。缺少该权限时对应用例必须失败，不能把 `PermissionDenied` 当成跳过并静默返回成功。不要修改宿主安全设置、组策略或开发者模式来让测试通过。需要容器或虚拟化的测试应显式标注环境要求并隔离资源；当前没有这类测试。
+- 启动优化必须测量冷启动与复用路径，并验证复用不泄露状态。没有覆盖率百分比门槛。实际后端行为必须有运行证据，不能仅靠 mock；workspace 文件测试使用真实临时目录。Windows 编译成功不能当成隔离或 Linux 后端通过，也不能把缺少符号链接权限时的静默跳过当成符号链接约束已验证。
+- 已合并质量门禁继续使用 `circus-sandbox/qa` 的现有 checker 与锁文件，Node.js 固定 24.18.0。手写 `.rs` 单文件不超过 1200 行（含 1200）。文档白名单、QA 回归测试、npm audit、actionlint、`CodeQL QA` 和已合并安全门禁的精确范围统一见工程说明；不重新引入 markdownlint-cli2/braces，不把 QA 当作 Rust 或隔离测试。
+- 合并使用 PR，不要求非作者批准；任务明确授权后可在最新 CI 通过、适用审查问题闭环且无冲突时自动 squash merge，不使用管理员绕过或强推。提交流程见根指南，安全扫描范围见安全说明。
+
+### CI 检查内容
+
+- `rust`：两个平台都在 `circus-sandbox/` 安装 Rust 1.99.1（minimal，含 rustfmt 与 clippy），然后跑 `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`、`cargo test --locked`、`RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`、`cargo run --locked --example workspace`。`fail-fast` 为 false。这是源码级检查，不是容器或进程隔离验证。
+- `dependencies`：只在 `ubuntu-latest`。`cargo install --locked --version 0.20.2 cargo-deny`，然后 `cargo deny --locked check`。本地复现使用同一安装版本，并在 `circus-sandbox/` 执行检查。
+- `codeql`：只在 `ubuntu-latest`。语言 `rust`，`build-mode: none`，配置 `.github/codeql/sandbox-rust.yml`。只分析 `circus-sandbox`，忽略 `circus-paseo` 与 `circus-sandbox/target`。它不编译 crate，不能代替 `cargo test`。
+
+`deny.toml` 的许可证 allow 只有 `Apache-2.0`、`MIT`、`Apache-2.0 WITH LLVM-exception`（winx 0.36.4 只声明这一表达式，不是 Apache-2.0 的别名）、`Unicode-3.0`（unicode-ident 1.0.27 是 `(MIT OR Apache-2.0) AND Unicode-3.0`）。`exceptions` 为空。未列出的许可证失败。漏洞公告失败，且不得写入 ignore。yanked 为 deny，unsound 为 all，unmaintained 不忽略，unused-ignored-advisory 为 deny。来源只允许 crates.io；未知 registry 与 git 失败。通配版本 deny。`multiple-versions` 是 warn，不是 deny。
+
+当前 `Cargo.lock` 中，不 fork 上游就去不掉的传递重复：`io-lifetimes` 2.0.4（`fs-set-times` 0.20.3）与 3.0.1（cap-std、cap-primitives、cap-fs-ext、io-extras）；`windows-sys`（Windows SDK 绑定）0.59.0（`fs-set-times`、winx 0.36.4）、0.60.2（io-extras 0.19.0）、0.61.2（cap-primitives、cap-fs-ext、rustix 1.1.5、errno）。它们来自 cap-std 4.0.3 / cap-fs-ext 4.0.3 的依赖闭包，不是本 crate 的第二套直接依赖。不要为此再引入同名 crate，也不要把这条 warn 写成检查已通过或已失败。

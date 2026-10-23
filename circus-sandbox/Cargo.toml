@@ -1,0 +1,18 @@
+[package]
+name = "circus-sandbox"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "Apache-2.0"
+description = "Capability-scoped temporary workspace files. Not a process sandbox or container runtime."
+
+[dependencies]
+cap-std = { version = "=4.0.3", default-features = false }
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+
+[target.'cfg(unix)'.dependencies]
+cap-fs-ext = { version = "=4.0.3", default-features = false }
+
+[lints.rust]
+unsafe_code = "forbid"

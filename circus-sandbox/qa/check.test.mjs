@@ -69,8 +69,8 @@ function withRepo(run) {
   }
 }
 
-function runCheck(temp) {
-  return spawnSync(process.execPath, [path.join(temp, "circus-sandbox", "qa", "check.mjs")], {
+function runCheck(temp, ...args) {
+  return spawnSync(process.execPath, [path.join(temp, "circus-sandbox", "qa", "check.mjs"), ...args], {
     cwd: temp,
     encoding: "utf8",
     timeout: 60_000,
@@ -202,5 +202,17 @@ test("a .rs symlink counts even when its payload is not named .rs", () => {
       );
     }
     assertExit(runCheck(root), 1);
+  });
+});
+
+test("Cargo documentation artifacts are excluded and remain untouched by formatting", () => {
+  withRepo((temp) => {
+    const artifact = path.join(temp, "circus-sandbox", "target", "doc", "generated.md");
+    const contents = "#Generated\n\n[unresolved](missing.md)\n";
+    write(artifact, contents);
+
+    assertExit(runCheck(temp, "--format"), 0);
+    assert.equal(fs.readFileSync(artifact, "utf8"), contents);
+    assertExit(runCheck(temp), 0);
   });
 });

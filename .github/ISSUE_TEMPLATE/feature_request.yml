@@ -8,7 +8,7 @@ body:
       value: |
         本表单用于把问题、期望和验收标准写清楚，**不表示该建议已被接受、排期或承诺实现**。
 
-        请区分已有行为与新增能力。`circus-sandbox` 当前尚无 Cargo 工程或可运行实现，也尚未与 Paseo 集成。
+        请区分已有行为与新增能力。`circus-sandbox` 当前只有受限临时文件 API，没有进程、容器或 Paseo 接入。可以用真实 Cargo 结果描述现状；不要把未实现的后端写成已经存在，也不要把单文件上限写成完整沙箱。
 
         仅针对 Paseo 产品的功能建议，请按 `circus-paseo/CONTRIBUTING.md` 先到[上游 Discussions](https://github.com/getpaseo/paseo/discussions) 讨论。该规则不扩展为根仓库政策；沙箱及其集成、仓库文档或 CI 的建议仍可使用本表单。
 
@@ -52,7 +52,7 @@ body:
     id: acceptance
     attributes:
       label: 可验证的验收标准
-      description: 写出可观察、可判断对错的完成条件。不要把实现步骤，或尚未落地的规划，当作已经满足的前提。
+      description: 写出可观察、可判断对错的完成条件。不要把实现步骤，或尚未落地的规划，当作已经满足的前提。涉及沙箱时，验收可以要求真实 Cargo 结果，但不能把进程、容器或 Paseo 接入写成当前已有能力。
       placeholder: |
         - 给定…时，结果是…
         - 不出现…

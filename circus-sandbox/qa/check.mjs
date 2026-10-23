@@ -139,7 +139,7 @@ function markdownFiles(errors) {
   }
   walkTree(sandboxRoot, (full, name) => {
     if (name.endsWith(".md")) files.add(path.resolve(full));
-  }, new Set(["node_modules"]), errors);
+  }, new Set(["node_modules", "target"]), errors);
   return [...files].sort(byDisplay);
 }
 
