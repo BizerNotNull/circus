@@ -2,7 +2,8 @@ name: Sandbox security
 
 # Gitleaks has no path filter so it can be a required check.
 # Dependency review is pull_request only: the action compares a PR diff.
-# Do not require "Dependency review" on merge_group; a skipped job does not pass.
+# Do not require it on merge_group: GitHub treats a skipped job as successful,
+# but no dependency review occurred. This job only gates individual PRs.
 # CodeQL runs on every trigger. It analyzes GitHub Actions in
 # .github/workflows/sandbox-security.yml only. It does not analyze JavaScript,
 # Rust, circus-sandbox/qa, or circus-paseo. Rust CodeQL is a separate change.
