@@ -24,7 +24,7 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 | `circus-sandbox/tests/` | `workspace.rs` 用真实临时目录验证公开文件 API。                                                                                                                                                            |
 | `circus-sandbox/docs/`  | 交付计划与工程事实。架构细节不在根指南复制。                                                                                                                                                               |
 | `circus-paseo/`         | 已有 npm workspace 应用；内部结构与开发流程交由其 `CLAUDE.md` 说明。                                                                                                                                       |
-| `.github/workflows/`    | Paseo CI 仍按路径触发。沙箱包含 `sandbox-quality.yml`、`sandbox-security.yml` 和 `sandbox-rust.yml`。质量、密钥/依赖、actions/QA/Rust CodeQL 与 Cargo 检查各自的范围见工程说明；它们不证明进程或容器隔离。 |
+| `.github/workflows/`    | Paseo CI 仍按路径触发。沙箱包含 `sandbox-metadata.yml`、`sandbox-quality.yml`、`sandbox-security.yml` 和 `sandbox-rust.yml`。标题、质量、安全和 Cargo 检查各自的范围见工程说明；它们不证明进程或容器隔离。 |
 
 ## Development Commands
 
@@ -49,7 +49,7 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 npm --prefix circus-sandbox/qa ci
 npm --prefix circus-sandbox/qa audit --audit-level=low
 npm --prefix circus-sandbox/qa run check
-node --test circus-sandbox/qa/check.test.mjs
+node --test circus-sandbox/qa/check.test.mjs circus-sandbox/qa/pr-title.test.mjs
 ```
 
 QA 固定 Node.js 24.18.0 与 npm，不继承 Paseo 的 Node 版本。`ci` 和 `audit` 是 npm 内置命令，不是 package script。检查使用现有 `check.mjs`、markdownlint promise API 与锁文件，不重新引入 markdownlint-cli2/braces。白名单、`format` 和安全扫描入口统一见工程说明。
@@ -109,14 +109,15 @@ QA 固定 Node.js 24.18.0 与 npm，不继承 Paseo 的 Node 版本。`ci` 和 `
 
 - 提交按逻辑拆分，每个提交保持可理解、可验证；推荐 `type(scope): 简述`，如 `fix(lifecycle): 修复销毁时的资源回收`、`docs(workflow): 补充 PR 流程`。提交说明交代必要的原因与约束，不只复述文件列表。
 - 推送前完成本地自审：检查遗漏的调用方、失败路径、测试与文档，以及密钥、临时文件和调试代码。不得用跳过 hooks 的方式掩盖失败。
-- PR 标题描述结果；正文包含：问题与改动、作用域/非目标、验证命令与结果、风险及必要的回滚方式；有关联 issue 时链接。未完成实现或验证时保留 Draft，不声明可合并。
+- PR 标题必须使用 `type: 简述` 或 `type(scope): 简述`：type 以小写 ASCII 字母开头，后续只允许小写 ASCII 字母、数字和连字符，不设类型白名单；scope 可含中文，只要求非空且无括号或换行。冒号后恰好一个空格，随后必须是非空白开头的单行描述。正文包含：问题与改动、作用域/非目标、验证命令与结果、风险及必要的回滚方式；有关联 issue 时链接。未完成实现或验证时保留 Draft，不声明可合并。
 - 只有任务明确授权时才执行 commit、push、创建 PR 或合并；要求修改文件不等于授权发布。不得直接推送目标分支。
 
 ### 3. CI 与 Sourcery 审查闭环
 
 - PR 提交后并行关注 GitHub Actions CI 和 Sourcery review；两者职责不同，不能互相替代。准备合并前，必须确认审查覆盖最新改动；Sourcery 未触发或未覆盖新增改动时，按其实际支持的方式请求审查，不假定它已经完成。
 - Paseo CI 按路径触发，规则见 `.github/workflows/paseo-ci.yml` 与 `.github/paseo-ci-paths.yml`。根文档或沙箱改动可能不触发它；未触发或跳过不等于 Paseo 通过，也不能代替沙箱检查。
-- 沙箱三套工作流均在本检出，范围见 [工程说明](circus-sandbox/docs/engineering.md)：质量门禁含 npm audit、文档/行数检查、QA 测试、actionlint 和 `CodeQL QA`；安全门禁含全历史 Gitleaks、PR-only `Dependency review` 和仅分析安全工作流的 `CodeQL (actions)`；`Sandbox Rust` 在 Windows/Linux 上运行 fmt、clippy、build、test、严格 rustdoc 和 example，并在 Ubuntu 运行 cargo-deny 与 Rust CodeQL。结果以对应提交的 Actions 为准，本文不记录某次检查通过，也不以旧提交结果为新提交背书。不为“变绿”修改无关文件。
+- 沙箱四套工作流均在本检出，范围见 [工程说明](circus-sandbox/docs/engineering.md)：元数据门禁为 `PR title`；质量门禁含 npm audit、文档/行数检查、QA 测试、actionlint 和 `CodeQL QA`；安全门禁含全历史 Gitleaks、PR-only `Dependency review` 和 `CodeQL (actions)`；`Sandbox Rust` 在 Windows/Linux 上运行 fmt、clippy、build、test、严格 rustdoc 和 example，并在 Ubuntu 运行 cargo-deny 与 Rust CodeQL。结果以对应提交的 Actions 为准，本文不记录某次检查通过，也不以旧提交结果为新提交背书。不为“变绿”修改无关文件。
+- `sandbox-metadata.yml` 只在 PR 的 `opened`、`reopened`、`synchronize`、`edited` 事件运行；按 PR 号取消旧元数据任务。`PR title` 用固定版本 Node.js 直接执行 CLI，不安装依赖，标题只通过 `PR_TITLE` 环境变量传入且不回显。仅编辑标题不会触发质量、安全或 Rust 工作流的重型检查；工作流存在不等于已设为 required check。
 - CI 失败先读失败 job 的日志，区分代码问题与基础设施故障。代码问题修复并补做针对性验证；明确的临时基础设施故障可重跑并记录原因，不靠反复重跑或放宽检查掩盖失败。
 - 逐条判断 Sourcery 和人工审查意见：有效问题修复并说明验证；不采纳时回复技术理由、证据或取舍。安全、隔离、生命周期及资源回收问题必须明确处理，不盲从建议，也不无说明地关闭讨论。
 - 审查修复默认追加提交，便于查看增量；只有明确需要整理历史时才重写已推送提交，且不得覆盖他人提交。每轮修复完成本地验证后集中推送，再检查新一轮 CI 与审查；旧提交的绿灯不能为新提交背书。
