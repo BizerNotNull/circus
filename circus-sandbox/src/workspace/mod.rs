@@ -1,0 +1,460 @@
+use std::io::{self, Read, Write};
+use std::path::{Component, Path, PathBuf};
+
+#[cfg(unix)]
+use cap_fs_ext::OpenOptionsSyncExt;
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir, File, OpenOptions};
+
+/// Why [`Workspace`] rejected a path before touching the filesystem.
+///
+/// Illegal paths are empty, contain `\`, have a Windows drive prefix
+/// (`^[A-Za-z]:`) or a leading `//`, are absolute (a leading `/` or
+/// [`Path::is_absolute`]), or contain a `..` component. `.` and `foo/./bar`
+/// are allowed. Separators in accepted paths must be `/`. A successful
+/// cleanup is [`WorkspaceError::Closed`], not one of these path categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathRejectReason {
+    /// The path was empty.
+    Empty,
+    /// The path was absolute.
+    Absolute,
+    /// The path contained a `..` component.
+    ParentComponent,
+    /// The path had a Windows drive prefix or started with `//`.
+    WindowsPrefix,
+    /// The path contained `\`.
+    Backslash,
+}
+
+impl std::fmt::Display for PathRejectReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Empty => "empty",
+            Self::Absolute => "absolute",
+            Self::ParentComponent => "parent component",
+            Self::WindowsPrefix => "Windows prefix",
+            Self::Backslash => "backslash",
+        })
+    }
+}
+
+/// Failure of a workspace constructor or filesystem operation.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkspaceError {
+    /// [`Workspace::cleanup`] already succeeded. Further file operations fail
+    /// with this error, including operations whose paths would otherwise be
+    /// rejected. A failed cleanup does **not** produce this error.
+    #[error("workspace is closed")]
+    Closed,
+
+    /// `max_file_bytes` was `0` or [`usize::MAX`]. The cap must be in
+    /// `1..=usize::MAX - 1` so a one-byte over-limit read probe cannot overflow.
+    #[error("max_file_bytes must be in 1..=usize::MAX - 1, got {max_file_bytes}")]
+    InvalidLimit {
+        /// The rejected cap.
+        max_file_bytes: usize,
+    },
+
+    /// The path is not a workspace-relative path. `path` is the original value,
+    /// not a canonicalized or rooted path.
+    #[error("path rejected ({reason}): {}", path.display())]
+    PathRejected {
+        /// The caller-supplied path.
+        path: PathBuf,
+        /// Which check failed.
+        reason: PathRejectReason,
+    },
+
+    /// A write was longer than the cap, or a read proved the file is longer
+    /// than the cap. For writes, `actual` is `contents.len()`. For reads,
+    /// `actual` is the number of bytes observed before stopping (`limit + 1`),
+    /// not the unknown full file size.
+    #[error("byte length {actual} exceeds workspace file limit {limit}")]
+    LimitExceeded {
+        /// Configured maximum file size in bytes.
+        limit: usize,
+        /// Write length, or the read probe length that exceeded `limit`.
+        actual: usize,
+    },
+
+    /// The path exists but is not a regular file. Directories, devices, FIFOs,
+    /// and other non-regular nodes are not read or truncated. An in-workspace
+    /// symlink is followed; a non-regular target is rejected from the opened
+    /// handle and the open does not wait for a FIFO peer.
+    #[error("not a regular file: {}", path.display())]
+    NotRegularFile {
+        /// The caller-supplied path.
+        path: PathBuf,
+    },
+
+    /// An underlying filesystem error. Missing files and missing parents are
+    /// reported here, typically with [`std::io::ErrorKind::NotFound`].
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+/// A temporary directory opened as a capability handle.
+///
+/// File operations use that handle and block the calling thread. Async callers
+/// must use `spawn_blocking` (or an equivalent) on their own runtime. Drop
+/// deletes the directory on a best-effort basis and ignores errors; call
+/// [`Workspace::cleanup`] to observe removal failures.
+///
+/// This type does not sandbox a process and does not claim container support.
+pub struct Workspace {
+    dir: Option<Dir>,
+    temp: Option<tempfile::TempDir>,
+    max_file_bytes: usize,
+}
+
+impl std::fmt::Debug for Workspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Workspace")
+            .field("max_file_bytes", &self.max_file_bytes)
+            .field("closed", &self.temp.is_none())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        // Close the capability before the temp directory so Windows can delete it.
+        // Errors are intentionally discarded; `cleanup` is the observable path.
+        self.dir.take();
+        self.temp.take();
+    }
+}
+
+impl Workspace {
+    /// Creates a private temporary directory and opens it with ambient authority.
+    ///
+    /// `max_file_bytes` must be in `1..=usize::MAX - 1`. This does not allocate
+    /// a buffer of that size and does not expose the directory path or any host
+    /// project directory.
+    ///
+    /// Blocks the calling thread.
+    pub fn new(max_file_bytes: usize) -> Result<Self, WorkspaceError> {
+        if max_file_bytes == 0 || max_file_bytes.checked_add(1).is_none() {
+            return Err(WorkspaceError::InvalidLimit { max_file_bytes });
+        }
+        let temp = tempfile::Builder::new()
+            .prefix("circus-sandbox-")
+            .tempdir()?;
+        let dir = Dir::open_ambient_dir(temp.path(), ambient_authority())?;
+        Ok(Self {
+            dir: Some(dir),
+            temp: Some(temp),
+            max_file_bytes,
+        })
+    }
+
+    /// Creates `path` and any missing parents inside the workspace.
+    ///
+    /// Does not create parents for [`Self::write_file`]. Blocks the calling thread.
+    pub fn create_dir_all(&self, path: impl AsRef<Path>) -> Result<(), WorkspaceError> {
+        let dir = self.capability()?;
+        let path = check_path(path.as_ref())?;
+        dir.create_dir_all(path)?;
+        Ok(())
+    }
+
+    /// Writes `contents` to a regular file, overwriting one that already exists.
+    ///
+    /// Closed is checked first, then the path, then the byte length. An
+    /// over-long write does not create or truncate. Missing parents are
+    /// [`std::io::ErrorKind::NotFound`] and are not created implicitly. A
+    /// directory, FIFO, or other non-regular node, including one reached
+    /// through an in-workspace symlink, is [`WorkspaceError::NotRegularFile`]
+    /// and is left unchanged. On Unix the open is nonblocking, so a regular
+    /// file replaced by a FIFO after the path check cannot stall this call.
+    ///
+    /// Blocks the calling thread.
+    pub fn write_file(
+        &self,
+        path: impl AsRef<Path>,
+        contents: &[u8],
+    ) -> Result<(), WorkspaceError> {
+        let dir = self.capability()?;
+        let path = check_path(path.as_ref())?;
+        if contents.len() > self.max_file_bytes {
+            return Err(WorkspaceError::LimitExceeded {
+                limit: self.max_file_bytes,
+                actual: contents.len(),
+            });
+        }
+        require_writable_node(dir, path)?;
+        let file = open_writable(dir, path)?;
+        write_regular(file, path, contents)
+    }
+
+    /// Reads a regular file, refusing directories and other non-regular nodes.
+    ///
+    /// An in-workspace symlink is followed. A FIFO target, or a regular file
+    /// replaced by a FIFO before the open, is [`WorkspaceError::NotRegularFile`].
+    /// On Unix that open is nonblocking and does not wait for a FIFO peer.
+    /// The size is not taken from metadata. At most `max_file_bytes + 1` bytes
+    /// are read; a longer file returns [`WorkspaceError::LimitExceeded`].
+    /// Blocks the calling thread.
+    pub fn read_file(&self, path: impl AsRef<Path>) -> Result<Vec<u8>, WorkspaceError> {
+        let dir = self.capability()?;
+        let path = check_path(path.as_ref())?;
+        require_readable_node(dir, path)?;
+        let file = open_readable(dir, path)?;
+        read_regular(file, path, self.max_file_bytes)
+    }
+
+    /// Removes a file or symlink at `path`. Does not remove directories.
+    ///
+    /// Blocks the calling thread.
+    pub fn remove_file(&self, path: impl AsRef<Path>) -> Result<(), WorkspaceError> {
+        let dir = self.capability()?;
+        let path = check_path(path.as_ref())?;
+        dir.remove_file(path)?;
+        Ok(())
+    }
+
+    /// Deletes the owned temporary directory and releases its capability.
+    ///
+    /// Idempotent. A root that is already gone is success. On failure the same
+    /// value keeps the directory so cleanup can be retried, and file operations
+    /// do not return [`WorkspaceError::Closed`]. After success, file operations
+    /// return `Closed` even for illegal paths.
+    ///
+    /// Blocks the calling thread. Drop remains best-effort and does not report
+    /// the error this method returns.
+    pub fn cleanup(&mut self) -> Result<(), WorkspaceError> {
+        if self.temp.is_none() {
+            self.dir = None;
+            return Ok(());
+        }
+        // Release the handle first so Windows can remove the directory.
+        self.dir.take();
+        let Some(temp) = self.temp.as_ref() else {
+            return Ok(());
+        };
+        match std::fs::remove_dir_all(temp.path()) {
+            Ok(()) => {
+                self.mark_closed();
+                Ok(())
+            }
+            Err(_) if self.root_is_absent() => {
+                self.mark_closed();
+                Ok(())
+            }
+            Err(err) => {
+                let _ = self.reopen();
+                Err(err.into())
+            }
+        }
+    }
+
+    fn capability(&self) -> Result<&Dir, WorkspaceError> {
+        if self.temp.is_none() {
+            return Err(WorkspaceError::Closed);
+        }
+        self.dir.as_ref().ok_or_else(|| {
+            io::Error::other(
+                "workspace directory handle is unavailable after a failed cleanup; retry cleanup",
+            )
+            .into()
+        })
+    }
+
+    fn mark_closed(&mut self) {
+        self.dir = None;
+        if let Some(mut temp) = self.temp.take() {
+            temp.disable_cleanup(true);
+        }
+    }
+
+    fn reopen(&mut self) -> io::Result<()> {
+        let Some(temp) = self.temp.as_ref() else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "workspace directory is gone",
+            ));
+        };
+        let dir = Dir::open_ambient_dir(temp.path(), ambient_authority())?;
+        self.dir = Some(dir);
+        Ok(())
+    }
+
+    fn root_is_absent(&self) -> bool {
+        let Some(temp) = self.temp.as_ref() else {
+            return true;
+        };
+        matches!(
+            std::fs::symlink_metadata(temp.path()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound
+        )
+    }
+}
+
+fn check_path(path: &Path) -> Result<&Path, WorkspaceError> {
+    let raw = path.as_os_str().as_encoded_bytes();
+    let reason = if raw.is_empty() {
+        Some(PathRejectReason::Empty)
+    } else if raw.contains(&b'\\') {
+        Some(PathRejectReason::Backslash)
+    } else if is_windows_prefix(raw) {
+        Some(PathRejectReason::WindowsPrefix)
+    } else if raw.starts_with(b"/") || path.is_absolute() {
+        Some(PathRejectReason::Absolute)
+    } else if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        Some(PathRejectReason::ParentComponent)
+    } else {
+        None
+    };
+    match reason {
+        Some(reason) => Err(WorkspaceError::PathRejected {
+            path: path.to_path_buf(),
+            reason,
+        }),
+        None => Ok(path),
+    }
+}
+
+fn is_windows_prefix(raw: &[u8]) -> bool {
+    raw.starts_with(b"//") || (raw.len() >= 2 && raw[0].is_ascii_alphabetic() && raw[1] == b':')
+}
+
+fn require_readable_node(dir: &Dir, path: &Path) -> Result<(), WorkspaceError> {
+    match dir.symlink_metadata(path) {
+        Ok(meta) if is_followable(meta.file_type()) => Ok(()),
+        Ok(_) => Err(not_regular(path)),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn require_writable_node(dir: &Dir, path: &Path) -> Result<(), WorkspaceError> {
+    match dir.symlink_metadata(path) {
+        Ok(meta) if is_followable(meta.file_type()) => Ok(()),
+        Ok(_) => Err(not_regular(path)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+// A symlink is not proof of a regular file. In-directory links to regular
+// files must still open. This precheck cannot close the window where the
+// target is a FIFO, or a regular file is replaced by one before `open`.
+fn is_followable(file_type: cap_std::fs::FileType) -> bool {
+    file_type.is_file() || file_type.is_symlink()
+}
+
+fn read_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    // `OpenOptionsSyncExt::nonblock` is cap-std's open-time `O_NONBLOCK`.
+    // A later `fstat` cannot help if `open` already waits for a FIFO peer.
+    // Windows keeps its normal CreateFile flags.
+    #[cfg(unix)]
+    {
+        options.nonblock(true);
+    }
+    options
+}
+
+fn write_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        options.nonblock(true);
+    }
+    options
+}
+
+fn open_readable(dir: &Dir, path: &Path) -> Result<File, WorkspaceError> {
+    match dir.open_with(path, &read_options()) {
+        Ok(file) => Ok(file),
+        Err(err) => Err(failed_open(dir, path, err)),
+    }
+}
+
+fn open_writable(dir: &Dir, path: &Path) -> Result<File, WorkspaceError> {
+    match dir.open_with(path, &write_options()) {
+        Ok(file) => Ok(file),
+        Err(err) => Err(failed_open(dir, path, err)),
+    }
+}
+
+fn failed_open(dir: &Dir, path: &Path, err: io::Error) -> WorkspaceError {
+    if is_dir(dir, path) {
+        return not_regular(path);
+    }
+    // `O_WRONLY|O_NONBLOCK` on a FIFO with no reader fails before a handle
+    // exists. Classify with a nonblocking read open, which does not wait for
+    // a writer, and keep the regular-file decision on that handle. If that
+    // open also fails, `stat` does not wait for a peer and only classifies
+    // the already-failed open.
+    #[cfg(unix)]
+    {
+        if let Ok(file) = dir.open_with(path, &read_options()) {
+            if matches!(file.metadata(), Ok(meta) if !meta.is_file()) {
+                return not_regular(path);
+            }
+        } else if matches!(dir.metadata(path), Ok(meta) if !meta.is_file()) {
+            return not_regular(path);
+        }
+    }
+    err.into()
+}
+
+fn is_dir(dir: &Dir, path: &Path) -> bool {
+    matches!(dir.metadata(path), Ok(meta) if meta.is_dir())
+}
+
+fn not_regular(path: &Path) -> WorkspaceError {
+    WorkspaceError::NotRegularFile {
+        path: path.to_path_buf(),
+    }
+}
+
+fn write_regular(mut file: File, path: &Path, contents: &[u8]) -> Result<(), WorkspaceError> {
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(not_regular(path));
+    }
+    file.set_len(0)?;
+    file.write_all(contents)?;
+    Ok(())
+}
+
+fn read_regular(mut file: File, path: &Path, limit: usize) -> Result<Vec<u8>, WorkspaceError> {
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(not_regular(path));
+    }
+    let Some(probe) = limit.checked_add(1) else {
+        return Err(WorkspaceError::InvalidLimit {
+            max_file_bytes: limit,
+        });
+    };
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8 * 1024];
+    while buf.len() < probe {
+        let want = (probe - buf.len()).min(chunk.len());
+        let n = file.read(&mut chunk[..want])?;
+        if n == 0 {
+            break;
+        }
+        buf.try_reserve(n)
+            .map_err(|err| io::Error::new(io::ErrorKind::OutOfMemory, err))?;
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    if buf.len() > limit {
+        return Err(WorkspaceError::LimitExceeded {
+            limit,
+            actual: buf.len(),
+        });
+    }
+    Ok(buf)
+}
+
+#[cfg(test)]
+mod tests;

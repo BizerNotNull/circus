@@ -1,0 +1,38 @@
+# cargo-deny 0.20.2. Unlisted licenses fail. Vulnerability advisories always
+# fail and must not be listed under ignore. Unknown registries and git sources fail.
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+all-features = false
+
+[advisories]
+yanked = "deny"
+unsound = "all"
+# Maintenance notices are not vulnerability advisories. Do not ignore either.
+unmaintained = "all"
+unused-ignored-advisory = "deny"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "MIT",
+    # winx 0.36.4 declares only this expression; it is not an alias of Apache-2.0.
+    "Apache-2.0 WITH LLVM-exception",
+    # unicode-ident 1.0.27 is (MIT OR Apache-2.0) AND Unicode-3.0.
+    "Unicode-3.0",
+]
+exceptions = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

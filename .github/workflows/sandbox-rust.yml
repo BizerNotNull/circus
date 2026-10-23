@@ -1,0 +1,205 @@
+name: Sandbox Rust
+
+# Standalone gate for circus-sandbox. It does not call Paseo CI, and it does
+# not depend on another branch's security or QA workflows.
+#
+# No path filters. A skipped workflow stays pending when a ruleset requires
+# this check; every pull request, main push, merge queue, and manual run
+# executes the jobs below.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: sandbox-rust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: circus-sandbox
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.99.1 (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
+          sh "$RUNNER_TEMP/rustup-init.sh" -y \
+            --default-toolchain 1.99.1 \
+            --profile minimal \
+            --component rustfmt,clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust 1.99.1 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ProgressPreference = 'SilentlyContinue'
+          $init = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
+          Invoke-WebRequest -Uri https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe -OutFile $init
+          & $init -y --default-toolchain 1.99.1 --profile minimal --component rustfmt,clippy
+          if ($LASTEXITCODE -ne 0) { throw "rustup-init exited $LASTEXITCODE" }
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:USERPROFILE '.cargo\bin')
+
+      - name: Require Rust 1.99.1
+        id: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="$(rustc --version)"
+          printf '%s\n' "$ver"
+          cargo --version
+          rustfmt --version
+          cargo clippy --version
+          rustup show active-toolchain
+          case "$ver" in
+            *" 1.99.1 "*) ;;
+            *) echo "expected rustc 1.99.1, got: $ver" >&2; exit 1 ;;
+          esac
+          comps="$(rustup component list --installed)"
+          printf '%s\n' "$comps"
+          case "$comps" in
+            *rustfmt*) ;;
+            *) echo "rustfmt is not installed" >&2; exit 1 ;;
+          esac
+          case "$comps" in
+            *clippy*) ;;
+            *) echo "clippy is not installed" >&2; exit 1 ;;
+          esac
+
+      # A failed check still fails the job. Later checks keep running so one
+      # failure does not hide the next; nothing here forces success.
+      - name: Check formatting
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        run: cargo fmt --check
+
+      - name: Clippy
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Build
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        run: cargo build --locked
+
+      - name: Test
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        run: cargo test --locked
+
+      - name: Check documentation
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps
+
+      - name: Run example
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        run: cargo run --locked --example workspace
+
+  dependencies:
+    name: dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: circus-sandbox
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.99.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
+          sh "$RUNNER_TEMP/rustup-init.sh" -y \
+            --default-toolchain 1.99.1 \
+            --profile minimal \
+            --component rustfmt,clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Require Rust 1.99.1
+        id: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="$(rustc --version)"
+          printf '%s\n' "$ver"
+          case "$ver" in
+            *" 1.99.1 "*) ;;
+            *) echo "expected rustc 1.99.1, got: $ver" >&2; exit 1 ;;
+          esac
+
+      - name: Install cargo-deny 0.20.2
+        id: deny
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install --locked --version 0.20.2 cargo-deny
+          ver="$(cargo deny --version)"
+          printf '%s\n' "$ver"
+          case "$ver" in
+            *"cargo-deny 0.20.2"*) ;;
+            *) echo "expected cargo-deny 0.20.2, got: $ver" >&2; exit 1 ;;
+          esac
+
+      - name: Check advisories, licenses, bans, and sources
+        if: ${{ !cancelled() && steps.deny.outcome == 'success' }}
+        shell: bash
+        run: cargo deny --locked check
+
+  codeql:
+    name: codeql
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: rust
+          build-mode: none
+          config-file: ./.github/codeql/sandbox-rust.yml
+
+      - name: Analyze Rust
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:rust

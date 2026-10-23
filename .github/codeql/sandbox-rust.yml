@@ -1,0 +1,8 @@
+name: circus-sandbox Rust
+
+# Only the sandbox crate. Paseo is Node and is not part of this analysis.
+paths:
+  - circus-sandbox/**
+paths-ignore:
+  - circus-paseo/**
+  - circus-sandbox/target/**
