@@ -1,0 +1,72 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-issue-forms.json
+name: 功能与改进建议
+description: 说明使用场景、期望行为与可验证标准。提交不表示会被接受或实现。
+title: "功能："
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本表单用于把问题、期望和验收标准写清楚，**不表示该建议已被接受、排期或承诺实现**。
+
+        请区分已有行为与新增能力。`circus-sandbox` 当前尚无 Cargo 工程或可运行实现，也尚未与 Paseo 集成。
+
+        仅针对 Paseo 产品的功能建议，请按 `circus-paseo/CONTRIBUTING.md` 先到[上游 Discussions](https://github.com/getpaseo/paseo/discussions) 讨论。该规则不扩展为根仓库政策；沙箱及其集成、仓库文档或 CI 的建议仍可使用本表单。
+
+        提交前请先搜索现有 Issue。不要包含凭证、个人信息或未公开的漏洞细节。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题、使用场景与影响
+      description: 想完成什么、当前如何处理、在哪里受阻，以及影响哪些用户或工作流。
+      placeholder: |
+        场景：…
+        当前阻碍：…
+        影响：…
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 受影响范围
+      description: 选择建议的主要落点。只影响 Paseo 产品、与本仓库无关的功能，请改走上游 Discussions。
+      options:
+        - 沙箱当前目录 / 设计
+        - Paseo
+        - 仓库文档 / CI
+        - 跨模块 / 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 描述用户或调用方应当能够观察到的行为，以及不在本建议范围内的内容。
+      placeholder: 当…时，可以…
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 可验证的验收标准
+      description: 写出可观察、可判断对错的完成条件。不要把实现步骤，或尚未落地的规划，当作已经满足的前提。
+      placeholder: |
+        - 给定…时，结果是…
+        - 不出现…
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 方案、替代与取舍
+      description: 可选。若已有倾向，请同时写下考虑过的替代方案和主要取舍。没有方案也可以提交。
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 相关上下文
+      description: 可选。相关 Issue、讨论、文档或约束。请脱敏，不要包含凭证或未公开的漏洞细节。

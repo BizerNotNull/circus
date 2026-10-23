@@ -1,0 +1,110 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-issue-forms.json
+name: Bug 问题报告
+description: 报告与当前已有行为不符的缺陷。规划中尚未实现的能力请改用功能建议。
+title: "缺陷："
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先搜索现有 Issue。本表单只收集**已经可以观察到**的错误行为，不用于尚未实现的规划。
+
+        `circus-sandbox` 当前尚无 Cargo 工程或可运行实现，也尚未接入 Paseo。请区分已有行为的缺陷与新增能力的建议。
+
+        **请勿公开安全细节。** 不要粘贴凭证、令牌、密钥、个人信息、未公开的漏洞细节或利用步骤。日志和截图请先脱敏。
+
+        安全漏洞请私下报告：若仓库 Security 页面提供私密报告入口，请使用该入口；否则先向维护者确认私密渠道。仅涉及 Paseo 的漏洞按 `circus-paseo/SECURITY.md` 处理，该渠道不作为根仓库的通用联系人。
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: 提交前确认
+      description: 两项都需要勾选。安全问题不要用本表单公开提交。
+      options:
+        - label: 我已搜索现有 Issue，未发现相同或已被跟踪的问题。
+          required: true
+        - label: 我没有在本 Issue 中包含凭证、令牌、个人信息或未公开的漏洞细节。
+          required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 受影响范围
+      description: 选择最接近的一项。沙箱项指当前目录与设计约定，不是已交付的运行时。
+      options:
+        - 沙箱当前目录 / 设计
+        - Paseo
+        - 仓库文档 / CI
+        - 跨模块 / 不确定
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本或 commit
+      description: 相关版本、git commit，或文档/工作流标识。未知请写明未知，不要猜测。纯文档问题可写不适用。
+      placeholder: 例如 abc1234、未知，或不适用
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: 操作系统及版本、相关运行时或工具版本、客户端/浏览器和工作目录；只填与问题有关的项。纯文档问题可写“不适用”。
+      placeholder: |
+        系统与架构：…
+        客户端 / 浏览器 / 工具版本：…
+        工作目录 / 部署方式：…
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 最小复现
+      description: 用最短步骤说明前置条件、操作或命令、如何观察到问题。偶发问题请写明频率与已有证据；无法稳定复现也可提交。
+      placeholder: |
+        1. …
+        2. …
+        若不能稳定复现：大约每 N 次出现一次；已有证据是…
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 按当前已有能力，你预期会看到什么。不要把规划中的行为写成已经应当存在的功能。
+      placeholder: 预期看到…
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为与影响
+      description: 实际看到了什么，影响了谁或哪条路径。
+      placeholder: 实际看到…，因此无法…
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏日志
+      description: 可选。只粘贴与问题相关、已去除凭证和个人信息的日志。没有可留空。
+      render: text
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图或录屏
+      description: 可选。可将已打码的图片或录屏拖入此栏。没有可留空。
+
+  - type: textarea
+    id: regression
+    attributes:
+      label: 回归信息
+      description: 可选。若知道从哪个版本或 commit 开始出现，或最后一次正常的标识，请写明。不确定可留空，不要猜测。
+      placeholder: 例如：在 abc1234 之前正常；更早的标识未知

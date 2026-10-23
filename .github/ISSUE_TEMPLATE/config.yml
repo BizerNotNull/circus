@@ -1,0 +1,4 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-issue-config.json
+# 保留空白 Issue，供模板未覆盖的任务、文档修订和讨论使用。
+# 不设置 contact_links：根仓库没有已确认的统一外部联系渠道，不编造地址。
+blank_issues_enabled: true
