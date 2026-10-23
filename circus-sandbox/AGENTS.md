@@ -85,7 +85,7 @@
 
 ## Runtime, Commands & QA
 
-- Rust 核心使用上述 Cargo 工具链；服务入口与 CI 尚未配置，不继承 Paseo 的工具链版本。
+- Rust 核心使用上述 Cargo 工具链，不继承 Paseo 的工具链版本。本检出尚无 Cargo 构建 CI 或服务入口；独立安全门禁见 [安全工程说明](../.github/sandbox-security.md)，不能代替后端行为与隔离测试。
 - 当前不能运行 Cargo 构建、测试或服务。首次实现时创建真实 crate 与 `Cargo.toml`，落地上述工具链配置并更新本节及根指南；不创建空壳入口。
 - Cargo 工程建立后，基础检查采用 `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`；测试按受影响用例运行 `cargo test --locked <filter>`。
 - 单元测试与模块共置；`tests/` 验证 API 行为、非法状态转换、失败回收、路径边界及隔离能力。需要容器或虚拟化的测试应显式标注环境要求并隔离资源。
