@@ -37,7 +37,7 @@ jobs:
         # git/refs/tags/v7.1.0 type=commit, same SHA; action.yml runs.using=node24.
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: circus-sandbox/qa/.node-version
           cache: npm
           cache-dependency-path: circus-sandbox/qa/package-lock.json
 
@@ -52,6 +52,10 @@ jobs:
       - name: Check sandbox docs and sources
         shell: bash
         run: npm --prefix circus-sandbox/qa run check
+
+      - name: Test sandbox QA boundaries
+        shell: bash
+        run: npm --prefix circus-sandbox/qa test
 
       - name: Lint sandbox quality workflow
         shell: bash

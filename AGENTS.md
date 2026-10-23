@@ -16,13 +16,13 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 
 ## Key Directories
 
-| 路径                    | 用途                                                                                                                                    |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `circus-sandbox/src/`   | 已初始化 `api`、`lifecycle`、`infrastructure`、`runtime`、`environment`、`workspace`、`pool` 职责目录；尚无 Rust 模块。                 |
-| `circus-sandbox/tests/` | 预留跨模块契约与后端集成测试目录。                                                                                                      |
-| `circus-sandbox/docs/`  | 交付计划与工程事实。架构细节不在根指南复制。                                                                                            |
-| `circus-paseo/`         | 已有 npm workspace 应用；内部结构与开发流程交由其 `CLAUDE.md` 说明。                                                                    |
-| `.github/workflows/` | Paseo CI 与沙箱文档质量工作流。本检出没有 `sandbox-rust.yml`。安全门禁范围见工程说明。它们不代表沙箱已能构建或隔离。 |
+| 路径                    | 用途                                                                                                                    |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `circus-sandbox/src/`   | 已初始化 `api`、`lifecycle`、`infrastructure`、`runtime`、`environment`、`workspace`、`pool` 职责目录；尚无 Rust 模块。 |
+| `circus-sandbox/tests/` | 预留跨模块契约与后端集成测试目录。                                                                                      |
+| `circus-sandbox/docs/`  | 交付计划与工程事实。架构细节不在根指南复制。                                                                            |
+| `circus-paseo/`         | 已有 npm workspace 应用；内部结构与开发流程交由其 `CLAUDE.md` 说明。                                                    |
+| `.github/workflows/`    | Paseo CI 与沙箱文档质量工作流。本检出没有 `sandbox-rust.yml`。安全门禁范围见工程说明。它们不代表沙箱已能构建或隔离。    |
 
 ## Development Commands
 
@@ -34,7 +34,7 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 | 审计 QA 依赖，low 及以上失败                      | `npm --prefix circus-sandbox/qa audit --audit-level=low` |
 | 检查显式文档、内部链接、Markdown 与手写 Rust 行数 | `npm --prefix circus-sandbox/qa run check`               |
 
-QA 使用 Node.js >= 22 与 npm。`ci` 是 npm 内置装锁命令，不是 `npm run ci`。它不证明沙箱可运行。检查范围、`format` 脚本和行数规则只写在[工程说明](circus-sandbox/docs/engineering.md)。提交依赖锁，安装使用 `npm ci`。
+QA 使用 Node.js 24.18.0 与 npm，不是 `>=22`。固定该版本是为了让 Prettier 的 Unicode 表格列宽可复现。`ci` 是 npm 内置装锁命令，不是 `npm run ci`。它不证明沙箱可运行。检查范围、`format` 脚本和行数规则只写在[工程说明](circus-sandbox/docs/engineering.md)。提交依赖锁，安装使用 `npm ci`。
 
 以下仅是已有 Paseo 命令，**在 `circus-paseo/` 下执行，且仅用于明确要求的 Paseo 任务**：
 

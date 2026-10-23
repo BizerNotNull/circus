@@ -1,7 +1,7 @@
 name: Sandbox QA CodeQL
 paths:
-  - circus-sandbox/qa
+  - circus-sandbox/qa/**
 paths-ignore:
-  - circus-sandbox/qa/node_modules
-  - circus-paseo
-  - .omp
+  - circus-sandbox/qa/node_modules/**
+  - circus-paseo/**
+  - .omp/**
