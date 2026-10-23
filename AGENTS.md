@@ -2,16 +2,16 @@
 
 ## Project Overview
 
-Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心，`circus-paseo` 作为前端调用方。沙箱目前只有 workspace 文件库，没有 Paseo—沙箱集成，也没有进程或容器隔离；不要把规划写成现有能力。
+Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心，`circus-paseo` 作为前端调用方。沙箱目前提供 workspace 文件库和后端中立的资源请求校验，没有 Paseo—沙箱集成，也没有进程或容器隔离；不要把规划写成现有能力。
 
 - **当前开发阶段**：现在处于沙箱开发阶段，工作聚焦 `circus-sandbox`，不需要改动 `circus-paseo`；除非用户明确要求，不主动修改 Paseo。
 - **Paseo 暂不开发**：说明与开发规则见 [circus-paseo/CLAUDE.md](circus-paseo/CLAUDE.md)。除非任务明确要求，不修改其源码、依赖或配置。
-- **沙箱开发入口**：[circus-sandbox/AGENTS.md](circus-sandbox/AGENTS.md)，用户说明见 [circus-sandbox/README.md](circus-sandbox/README.md)。七个领域的职责边界仍由沙箱指南维护；其中只有 workspace 文件 API 已实现。完整交付目标见 [交付计划](circus-sandbox/docs/delivery-plan.md)，当前门禁与命令见 [工程说明](circus-sandbox/docs/engineering.md)，安全扫描约定见 [安全说明](.github/sandbox-security.md)。按当前检出描述实现，不以规划或工作流存在代替交付与运行证据。
+- **沙箱开发入口**：[circus-sandbox/AGENTS.md](circus-sandbox/AGENTS.md)，用户说明见 [circus-sandbox/README.md](circus-sandbox/README.md)。七个领域的职责边界仍由沙箱指南维护；目前实现 workspace 文件 API 和 `runtime::ResourceLimits` 请求校验，不含资源强制或聚合准入。完整交付目标见 [交付计划](circus-sandbox/docs/delivery-plan.md)，当前门禁与命令见 [工程说明](circus-sandbox/docs/engineering.md)，安全扫描约定见 [安全说明](.github/sandbox-security.md)。按当前检出描述实现，不以规划或工作流存在代替交付与运行证据。
 
 ## Architecture & Data Flow
 
 - 现有 Paseo：移动端/Web/桌面/CLI → 客户端协议层 → Node.js daemon，负责 Agent 管理及实时输出；这不是已接入 Rust 沙箱的链路。
-- 当前沙箱：库调用方 → `Workspace` → cap-std `Dir`。只有临时目录内的相对文件操作，没有统一执行 API、生命周期或后端适配器。
+- 当前沙箱：库调用方 → `Workspace` → cap-std `Dir`，以及独立的 `runtime::ResourceLimits` 值校验。资源模型尚未接入文件 API 或后端；没有统一执行 API、生命周期或后端适配器。
 - 目标沙箱：统一 API → 生命周期管理 → 基础设施调度 → 运行时隔离；镜像环境、代码工作区提供执行资源，预启动/快照/沙箱池优化启动。
 - 目标约束：对外 API 屏蔽后端差异；领域层与部署、隔离适配器分离。生命周期统一拥有状态与回收逻辑，调用方不得绕过它直接操作后端。在这些模块实现之前，不能按这条链路调用。
 
@@ -19,8 +19,8 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 
 | 路径                    | 用途                                                                                                                                                                                                       |
 | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `circus-sandbox/`       | Rust library crate。已实现 workspace 文件 API、`examples/workspace.rs`、`tests/workspace.rs`、Apache-2.0 `LICENSE` 与 `deny.toml`。                                                                        |
-| `circus-sandbox/src/`   | 已导出 `workspace`。`api`、`lifecycle`、`infrastructure`、`runtime`、`environment`、`pool` 仍是占位目录，不是已实现模块。                                                                                  |
+| `circus-sandbox/`       | Rust library crate。已实现 workspace 文件 API、资源请求校验及对应 examples/tests、Apache-2.0 `LICENSE` 与 `deny.toml`。                                                                                    |
+| `circus-sandbox/src/`   | 已实现 `workspace` 和公开 `runtime` 资源值模型。`api`、`lifecycle`、`infrastructure`、`environment`、`pool` 仍是占位目录，不是已实现模块。                                                                 |
 | `circus-sandbox/tests/` | `workspace.rs` 用真实临时目录验证公开文件 API。                                                                                                                                                            |
 | `circus-sandbox/docs/`  | 交付计划与工程事实。架构细节不在根指南复制。                                                                                                                                                               |
 | `circus-paseo/`         | 已有 npm workspace 应用；内部结构与开发流程交由其 `CLAUDE.md` 说明。                                                                                                                                       |
@@ -38,6 +38,7 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 | 测试              | `cargo test --locked`                                                                                            |
 | 文档              | `RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`                                                          |
 | 运行示例          | `cargo run --locked --example workspace`                                                                         |
+| 资源请求示例      | `cargo run --locked --example resource_policy`                                                                   |
 | 依赖策略          | 先 `cargo install --locked --version 0.20.2 cargo-deny`，再在 `circus-sandbox/` 执行 `cargo deny --locked check` |
 
 上表的 fmt、clippy、build、test、doc 与 example 也是 `Sandbox Rust` 在 Windows 与 Linux 上的源码检查。cargo-deny 与 CodeQL 的范围、许可证 allow，以及 `io-lifetimes` / `windows-sys` 传递重复见[沙箱指南](circus-sandbox/AGENTS.md)。

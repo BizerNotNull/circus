@@ -121,6 +121,10 @@ jobs:
         if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
         run: cargo run --locked --example workspace
 
+      - name: Run resource policy example
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        run: cargo run --locked --example resource_policy
+
   dependencies:
     name: dependencies
     runs-on: ubuntu-latest
