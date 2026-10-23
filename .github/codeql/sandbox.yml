@@ -1,0 +1,12 @@
+name: Sandbox CodeQL
+# Actions path filter. Does not select languages.
+# This change has no circus-sandbox/qa JavaScript, so that tree is not a path.
+# Rust is a separate change and is not listed here.
+# circus-paseo is never analyzed by this config.
+paths:
+  - .github/workflows/sandbox-security.yml
+paths-ignore:
+  - circus-paseo
+  - circus-sandbox
+  - .omp
+  - .github/workflows/paseo-ci.yml

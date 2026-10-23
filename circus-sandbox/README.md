@@ -6,6 +6,8 @@ Rust 库，包名 `circus-sandbox`。当前只提供 workspace 文件能力：�
 
 工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖是 cap-std **4.0.3**、cap-fs-ext **4.0.3**（仅 Unix `OpenOptionsSyncExt::nonblock`，不开 default features）、tempfile **3.27.0**、thiserror **2.0.21**（非预发布）。`Cargo.lock` 固定解析版本；检查和运行都加 `--locked`。
 
+这里描述当前检出的真实实现，不以文件或工作流存在代替发布、合并和运行证据。完整目标及交付记录入口见 [交付计划](docs/delivery-plan.md)，QA、安全和 Rust 门禁的实际范围见 [工程说明](docs/engineering.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。
+
 ## 同步文件 API
 
 ```rust
@@ -77,6 +79,10 @@ Windows 本机目标是 `x86_64-pc-windows-msvc`。这里的编译成功不表�
 
 许可证 allow 只有 Apache-2.0、MIT、`Apache-2.0 WITH LLVM-exception`（winx 0.36.4）和 Unicode-3.0（unicode-ident 1.0.27）。没有例外列表。`multiple-versions` 只警告。当前 lock 里去不掉的传递重复是 `io-lifetimes` 2.0.4 与 3.0.1，以及 Windows SDK 绑定 `windows-sys` 0.59.0、0.60.2 与 0.61.2，都来自 cap-std / cap-fs-ext 4.0.3 的依赖闭包。细节见 [AGENTS.md](AGENTS.md)。工作流已配置不等于这些检查已经通过；结果看对应 PR 的 Actions。
 
+当前检出还包含质量与安全门禁：`Sandbox quality` 检查文档、链接、1200 行手写 Rust 上限和 QA 回归测试，并运行 npm audit 与 actionlint；`CodeQL QA` 分析 QA JavaScript；`Gitleaks` 扫描完整 Git 历史；`Dependency review` 只审查 PR 依赖差异；`CodeQL (actions)` 只分析安全工作流。Dependabot 当前只更新 GitHub Actions，未配置 QA npm 或 Cargo 更新。QA 固定 Node.js 24.18.0，使用现有 checker 与锁文件；根目录命令见工程说明。这些门禁不等于隔离测试，也不等于仓库全部漏洞已解决。
+
+合并使用 PR，不要求非作者批准；任务授权后的自动 squash merge 仍须最新 CI 通过、适用审查问题闭环且无冲突，不绕过保护。
+
 ## 路径
 
 拒绝发生在打开句柄之前，并且 Windows 与 Linux 使用同一规则。非法路径是：空路径（`Empty`）、含 `\`（`Backslash`）、以盘符 `A:`–`Z:` 开头或以 `//` 开头（`WindowsPrefix`）、以 `/` 开头或 `Path::is_absolute()`（`Absolute`）、任一组件是 `..`（`ParentComponent`）。`cleanup` 成功后的文件操作是 `Closed`，不是这些路径类别。
@@ -104,7 +110,7 @@ Windows 本机目标是 `x86_64-pc-windows-msvc`。这里的编译成功不表�
 
 ### 0.1.0
 
-这是当前 crate 版本，也是 workspace 文件能力第一次对调用方可用的范围。它不是进程沙箱或容器。
+这是当前 crate 版本及其 workspace 文件能力范围，不是进程沙箱或容器。发布与验证记录以对应提交和发布说明为准。
 
 可用：
 

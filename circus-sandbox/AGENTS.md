@@ -18,7 +18,7 @@
 
 未实现，不得写成现有能力：命令执行、生命周期状态机、Docker/Kubernetes/containerd、runc/gVisor/Kata/Firecracker、OCI 镜像、Git clone/worktree、沙箱池、HTTP/RPC、工作区总配额、宿主磁盘配额、进程隔离。`src/api`、`lifecycle`、`infrastructure`、`runtime`、`environment`、`pool` 仍只是占位目录。不修改 `../circus-paseo/`。
 
-用户说明见 [README.md](README.md)。开发约定仍然不是“全部领域已交付”。
+用户说明见 [README.md](README.md)，工程命令与门禁边界见 [docs/engineering.md](docs/engineering.md)，完整目标及交付记录入口见 [docs/delivery-plan.md](docs/delivery-plan.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。当前检出已有 Workspace crate、许可证策略、质量/安全/Rust 工作流，但开发约定和工作流存在仍然不是“全部领域已交付”或检查已通过。
 
 ## Architecture & Data Flow
 
@@ -37,7 +37,7 @@
 | `src/pool/`           | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。                                                                       |
 | `tests/`              | `tests/workspace.rs` 用真实临时目录验证公开文件 API。符号链接逃逸放在 crate 私有测试，避免为测试暴露工作区根。需要容器或虚拟化的测试尚未存在。 |
 
-这些后端是候选目标，不代表全部同时支持；实现时按需求选择，禁止用空适配器声称支持。
+这些后端是候选目标，不代表全部同时支持；实现时按需求选择，禁止用空适配器声称支持。运行时必须先消费 workspace 文件契约再开发。池与快照仍保留，支持策略只写在交付计划。
 
 ## Code Conventions & Common Patterns
 
@@ -102,7 +102,7 @@
 
 ## Runtime, Commands & QA
 
-- Rust 核心使用上述 Cargo 工具链，不继承 Paseo 的工具链版本。服务入口尚未配置。CI 工作流是 `.github/workflows/sandbox-rust.yml`，显示名 `Sandbox Rust`，检查名是 `rust (ubuntu-latest)`、`rust (windows-latest)`、`dependencies` 和 `codeql`。没有路径过滤，不调用 Paseo CI；`main` push、所有 pull request、merge queue 和 `workflow_dispatch` 都会启动。没有运行记录，也不改分支保护。命令在 `circus-sandbox/` 执行，rustup 读取本目录 `rust-toolchain.toml`。工作流存在不是服务已可运行，不是隔离通过，也不是检查已通过。
+- Rust 核心使用上述 Cargo 工具链，不继承 Paseo 的工具链版本。服务入口尚未配置。`.github/workflows/sandbox-rust.yml` 显示名为 `Sandbox Rust`，检查名为 `rust (ubuntu-latest)`、`rust (windows-latest)`、`dependencies` 和 `codeql`。没有路径过滤，不调用 Paseo CI；`main` push、所有 pull request、merge queue 和 `workflow_dispatch` 都会启动。结果只记在对应 PR，不在本文声称当前提交已通过。命令在 `circus-sandbox/` 执行，rustup 读取本目录 `rust-toolchain.toml`。工作流存在不是服务可运行、隔离通过或分支保护已配置。
 - 本 crate 不允许 unsafe。库只导出已实现的 `workspace` 模块，不预建其他空模块，也不创建空壳二进制来假装后端可用。
 - 格式检查：`cargo fmt --check`（写回用 `cargo fmt`）。
 - Clippy：`cargo clippy --locked --all-targets -- -D warnings`。
@@ -112,6 +112,8 @@
 - 示例：`cargo run --locked --example workspace`。示例必须实际写、读、删除并 `cleanup`，打印读到的字节，不能打印与 `Result` 无关的成功字样。
 - 单元测试与模块共置，可覆盖符号链接逃逸、大于上限的已有文件读取，以及清理失败后的重试。读取超限时 `LimitExceeded.actual` 是探测到的 `limit + 1`，不是未知总长。公开 API 不能制造超限文件，所以 `tests/` 只验证写上限、恰好等于上限的读取、非法路径、嵌套目录/删除、重复 `cleanup` 与 `Closed`。符号链接用例的必要前提是进程能创建符号链接。Windows 需要开发者模式，或持有 `SeCreateSymbolicLinkPrivilege`。缺少该权限时对应用例必须失败，不能把 `PermissionDenied` 当成跳过并静默返回成功。不要修改宿主安全设置、组策略或开发者模式来让测试通过。需要容器或虚拟化的测试应显式标注环境要求并隔离资源；当前没有这类测试。
 - 启动优化必须测量冷启动与复用路径，并验证复用不泄露状态。没有覆盖率百分比门槛。实际后端行为必须有运行证据，不能仅靠 mock；workspace 文件测试使用真实临时目录。Windows 编译成功不能当成隔离或 Linux 后端通过，也不能把缺少符号链接权限时的静默跳过当成符号链接约束已验证。
+- 已合并质量门禁继续使用 `circus-sandbox/qa` 的现有 checker 与锁文件，Node.js 固定 24.18.0。手写 `.rs` 单文件不超过 1200 行（含 1200）。文档白名单、QA 回归测试、npm audit、actionlint、`CodeQL QA` 和已合并安全门禁的精确范围统一见工程说明；不重新引入 markdownlint-cli2/braces，不把 QA 当作 Rust 或隔离测试。
+- 合并使用 PR，不要求非作者批准；任务明确授权后可在最新 CI 通过、适用审查问题闭环且无冲突时自动 squash merge，不使用管理员绕过或强推。提交流程见根指南，安全扫描范围见安全说明。
 
 ### CI 检查内容
 
