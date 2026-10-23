@@ -2,24 +2,24 @@
 
 ## 状态与边界
 
-`circus-sandbox` 是计划用 Rust 实现的 Agent 沙箱核心。当前仅初始化职责目录与测试目录；没有 `Cargo.toml`、可运行入口或后端实现。以下是开发约定，不是已交付功能。Paseo 接入另行开发，本次不修改 `../circus-paseo/`。
+`circus-sandbox` 是计划用 Rust 实现的 Agent 沙箱核心。本检出只有职责目录与测试目录，没有 `Cargo.toml`、可运行入口或后端实现。并行的 `feat/capability-workspace` 才会加入首个真实 crate，且不依赖本质量基线合并；未合并前不要把它写成已有能力。开发约定不是已交付功能。Paseo 接入另行开发，本次不修改 `../circus-paseo/`。交付顺序见 [docs/delivery-plan.md](docs/delivery-plan.md)。
 
 ## Architecture & Data Flow
 
 规划调用链：调用方 → `api` → `lifecycle` → `infrastructure` → `runtime`。`environment` 与 `workspace` 准备执行环境，`pool` 复用同一生命周期入口优化启动。后端通过适配器隔离；领域层不依赖 Docker/Kubernetes SDK。
 
-| 目录 | 职责与边界 |
-| --- | --- |
-| `src/api/` | 统一创建、执行命令、文件操作、销毁入口；不泄露后端类型，不预设 HTTP、RPC 或进程内传输。 |
-| `src/lifecycle/` | 创建、启动、运行、暂停、恢复、销毁的状态转换与资源回收；状态只能由此修改。 |
-| `src/infrastructure/` | Docker、Kubernetes、containerd 等部署与调度适配；负责资源分配，不承担隔离机制实现。 |
-| `src/runtime/` | runc、gVisor、Kata Containers、Firecracker 等运行时能力与隔离策略；不支持的能力明确报错。 |
-| `src/environment/` | OCI 镜像、基础环境、依赖准备与可复现环境标识。 |
-| `src/workspace/` | Git clone、worktree、代码副本的创建与回收；限定文件操作边界，防止路径逃逸。 |
-| `src/pool/` | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。 |
-| `tests/` | 未来的跨模块契约与真实后端集成测试。 |
+| 目录                  | 职责与边界                                                                                |
+| --------------------- | ----------------------------------------------------------------------------------------- |
+| `src/api/`            | 统一创建、执行命令、文件操作、销毁入口；不泄露后端类型，不预设 HTTP、RPC 或进程内传输。   |
+| `src/lifecycle/`      | 创建、启动、运行、暂停、恢复、销毁的状态转换与资源回收；状态只能由此修改。                |
+| `src/infrastructure/` | Docker、Kubernetes、containerd 等部署与调度适配；负责资源分配，不承担隔离机制实现。       |
+| `src/runtime/`        | runc、gVisor、Kata Containers、Firecracker 等运行时能力与隔离策略；不支持的能力明确报错。 |
+| `src/environment/`    | OCI 镜像、基础环境、依赖准备与可复现环境标识。                                            |
+| `src/workspace/`      | Git clone、worktree、代码副本的创建与回收；限定文件操作边界，防止路径逃逸。               |
+| `src/pool/`           | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。                  |
+| `tests/`              | 未来的跨模块契约与真实后端集成测试。                                                      |
 
-这些后端是候选目标，不代表全部同时支持；实现时按需求选择，禁止用空适配器声称支持。
+这些后端是候选目标，不代表全部同时支持；实现时按需求选择，禁止用空适配器声称支持。运行时必须先消费 workspace 文件契约再开发。池与快照仍保留，支持策略只写在交付计划。
 
 ## Code Conventions & Common Patterns
 
@@ -32,7 +32,7 @@
 
 ## Rust 工具链基线
 
-选型核对日期：2026-10-24。当前只确定开发基线，尚未安装工具链或创建 Cargo 配置。
+选型核对日期：2026-10-24。本检出尚无 `rust-toolchain.toml` 或 Cargo 工程；以下基线在首个真实 crate 中落地。
 
 - **Rust 1.99.1 stable、edition 2024**。采用较新的稳定补丁版，不使用浮动 `stable`、beta 或 nightly 作为构建基线。[官方发布说明](https://blog.rust-lang.org/2026/10/15/Rust-1.99.1/)与[stable 分发清单](https://static.rust-lang.org/dist/channel-rust-stable.toml)为版本依据。
 - 首次创建真实 crate 时，在本目录提交以下 `rust-toolchain.toml`；Cargo、rustc、标准库、rustfmt、Clippy 使用该发布配套组件，不单独升级或混用版本。管理器采用 rustup 稳定版；其版本不替代项目编译器锁定。
@@ -52,23 +52,23 @@
 
 以下是按职责确定的默认选择，不是已安装的依赖清单；只有实现需要该能力时才加入 `Cargo.toml`。优先标准库，其次选择有持续维护、公开源码和实际采用的库；不为降低流行度放弃成熟生态，也不以 stars 或下载量代替性能证据。crate 版本在首次引入时选择兼容上述工具链的较新非预发布版，核对 MSRV、许可证与安全公告，并由 `Cargo.lock` 固定实际解析版本。
 
-| 类别 | 默认选择 | 选择依据与使用边界 |
-| --- | --- | --- |
-| 异步 I/O、任务与同步 | [`tokio` 1.x](https://tokio.rs/tokio) | 统一运行时、计时器、进程和异步同步原语，避免跨运行时适配开销；不同时引入 async-std/smol。阻塞任务开始后不能靠 abort 终止，生命周期必须负责回收。 |
-| 协作取消 | [`tokio-util::sync::CancellationToken`](https://docs.rs/tokio-util/latest/tokio_util/sync/struct.CancellationToken.html) | 需要跨任务取消时引入；与 Tokio 互补，不另建取消框架。取消通知不等于资源已经回收。 |
-| 序列化模型 | [`serde` 1.x](https://serde.rs/) | 统一结构化数据的 Serialize/Deserialize；优先具体类型与借用，避免无必要的中间树和复制。 |
-| JSON 编解码 | [`sonic-rs`](https://github.com/cloudwego/sonic-rs) | 性能优先的默认 JSON 实现，复用 Serde 模型；SIMD 优化主要面向 x86_64/aarch64。采用安全解析 API，不为吞吐绕过 UTF-8 校验；兼容边界见下文。 |
-| 领域错误 | [`thiserror` 2.x](https://github.com/dtolnay/thiserror) | 为显式错误枚举生成标准 Error 实现，不额外引入动态错误封装；公开 API 保留可匹配的错误类型及来源链。 |
-| 结构化日志与追踪 | [`tracing`](https://github.com/tokio-rs/tracing) | 事件与 span 统一入口；实际可执行入口按需配套 tracing-subscriber，库模块不设置全局 subscriber。过滤未启用日志，避免预先格式化字段；不再并用独立日志框架。 |
-| 出站 HTTP | [`reqwest`](https://github.com/seanmonstar/reqwest) | 复用连接池 Client，采用异步接口；只为独立出站请求引入，不重写后端 SDK 的 HTTP 层。裁剪 TLS/features，并限制不可信 URL、重定向与代理的权限边界。 |
-| HTTP 服务（确认传输后） | [`axum`](https://github.com/tokio-rs/axum) | 确需 HTTP API 时作为唯一默认框架，复用 Tokio/Hyper 生态；当前不引入，不据此改变传输未定的架构边界。 |
-| CLI（需要时） | [`clap` 4.x](https://docs.rs/clap/latest/clap/) | 有命令行入口时才引入，统一解析与帮助信息；纯库不依赖 CLI 框架。性能侧关注启动时间与二进制体积，而非请求吞吐。 |
-| 临时目录 | [`tempfile` 3.x](https://docs.rs/tempfile/latest/tempfile/) | 管理临时工作区；检查权限与清理失败，不能只依靠 Drop 处理崩溃后的残留，也不能把随机路径当租户隔离。 |
-| 受限文件访问 | [`cap-std`](https://github.com/bytecodealliance/cap-std) | 从已授权目录句柄做相对访问；避免“字符串检查后再打开”的路径竞态。它不替代进程隔离、挂载策略或租户权限控制。 |
-| 底层 Linux 系统接口 | [`rustix` 1.x](https://docs.rs/rustix/latest/rustix/) | 仅当标准库/能力式文件 API 缺少所需 syscall 时使用；隔离在 runtime 适配器中，不再并用 nix 提供同一接口，检查内核能力且不静默降级。 |
-| Docker Engine 适配 | [`bollard`](https://github.com/fussybeaver/bollard) | 仅实现 Docker 后端时引入异步 SDK，不重复手写 Docker REST 客户端；daemon socket 属高权限管理面，禁止暴露给沙箱。 |
-| Kubernetes 适配 | [`kube`（kube-rs）](https://github.com/kube-rs/kube) | 仅实现 Kubernetes 后端时引入；按需开启 client/runtime，限定凭据与 RBAC，不因 SDK 存在而引入控制器或第二套调度状态。 |
-| Git、普通集合与配置 | 标准库与宿主 Git；暂不加专用 crate | Git clone/worktree 使用受控 Git 进程，参数分开传递，不拼接 shell；异步路径使用 Tokio 进程 API 并明确终止/等待责任。集合与同步先用 std/Tokio；配置格式及持久化未定，不预引入配置框架、数据库或 ORM。 |
+| 类别                    | 默认选择                                                                                                                 | 选择依据与使用边界                                                                                                                                                                                  |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 异步 I/O、任务与同步    | [`tokio` 1.x](https://tokio.rs/tokio)                                                                                    | 统一运行时、计时器、进程和异步同步原语，避免跨运行时适配开销；不同时引入 async-std/smol。阻塞任务开始后不能靠 abort 终止，生命周期必须负责回收。                                                    |
+| 协作取消                | [`tokio-util::sync::CancellationToken`](https://docs.rs/tokio-util/latest/tokio_util/sync/struct.CancellationToken.html) | 需要跨任务取消时引入；与 Tokio 互补，不另建取消框架。取消通知不等于资源已经回收。                                                                                                                   |
+| 序列化模型              | [`serde` 1.x](https://serde.rs/)                                                                                         | 统一结构化数据的 Serialize/Deserialize；优先具体类型与借用，避免无必要的中间树和复制。                                                                                                              |
+| JSON 编解码             | [`sonic-rs`](https://github.com/cloudwego/sonic-rs)                                                                      | 性能优先的默认 JSON 实现，复用 Serde 模型；SIMD 优化主要面向 x86_64/aarch64。采用安全解析 API，不为吞吐绕过 UTF-8 校验；兼容边界见下文。                                                            |
+| 领域错误                | [`thiserror` 2.x](https://github.com/dtolnay/thiserror)                                                                  | 为显式错误枚举生成标准 Error 实现，不额外引入动态错误封装；公开 API 保留可匹配的错误类型及来源链。                                                                                                  |
+| 结构化日志与追踪        | [`tracing`](https://github.com/tokio-rs/tracing)                                                                         | 事件与 span 统一入口；实际可执行入口按需配套 tracing-subscriber，库模块不设置全局 subscriber。过滤未启用日志，避免预先格式化字段；不再并用独立日志框架。                                            |
+| 出站 HTTP               | [`reqwest`](https://github.com/seanmonstar/reqwest)                                                                      | 复用连接池 Client，采用异步接口；只为独立出站请求引入，不重写后端 SDK 的 HTTP 层。裁剪 TLS/features，并限制不可信 URL、重定向与代理的权限边界。                                                     |
+| HTTP 服务（确认传输后） | [`axum`](https://github.com/tokio-rs/axum)                                                                               | 确需 HTTP API 时作为唯一默认框架，复用 Tokio/Hyper 生态；当前不引入，不据此改变传输未定的架构边界。                                                                                                 |
+| CLI（需要时）           | [`clap` 4.x](https://docs.rs/clap/latest/clap/)                                                                          | 有命令行入口时才引入，统一解析与帮助信息；纯库不依赖 CLI 框架。性能侧关注启动时间与二进制体积，而非请求吞吐。                                                                                       |
+| 临时目录                | [`tempfile` 3.x](https://docs.rs/tempfile/latest/tempfile/)                                                              | 管理临时工作区；检查权限与清理失败，不能只依靠 Drop 处理崩溃后的残留，也不能把随机路径当租户隔离。                                                                                                  |
+| 受限文件访问            | [`cap-std`](https://github.com/bytecodealliance/cap-std)                                                                 | 从已授权目录句柄做相对访问；避免“字符串检查后再打开”的路径竞态。它不替代进程隔离、挂载策略或租户权限控制。                                                                                          |
+| 底层 Linux 系统接口     | [`rustix` 1.x](https://docs.rs/rustix/latest/rustix/)                                                                    | 仅当标准库/能力式文件 API 缺少所需 syscall 时使用；隔离在 runtime 适配器中，不再并用 nix 提供同一接口，检查内核能力且不静默降级。                                                                   |
+| Docker Engine 适配      | [`bollard`](https://github.com/fussybeaver/bollard)                                                                      | 仅实现 Docker 后端时引入异步 SDK，不重复手写 Docker REST 客户端；daemon socket 属高权限管理面，禁止暴露给沙箱。                                                                                     |
+| Kubernetes 适配         | [`kube`（kube-rs）](https://github.com/kube-rs/kube)                                                                     | 仅实现 Kubernetes 后端时引入；按需开启 client/runtime，限定凭据与 RBAC，不因 SDK 存在而引入控制器或第二套调度状态。                                                                                 |
+| Git、普通集合与配置     | 标准库与宿主 Git；暂不加专用 crate                                                                                       | Git clone/worktree 使用受控 Git 进程，参数分开传递，不拼接 shell；异步路径使用 Tokio 进程 API 并明确终止/等待责任。集合与同步先用 std/Tokio；配置格式及持久化未定，不预引入配置框架、数据库或 ORM。 |
 
 ### 性能依据与兼容边界
 
@@ -85,8 +85,9 @@
 
 ## Runtime, Commands & QA
 
-- Rust 核心使用上述 Cargo 工具链；服务入口与 CI 尚未配置，不继承 Paseo 的工具链版本。
-- 当前不能运行 Cargo 构建、测试或服务。首次实现时创建真实 crate 与 `Cargo.toml`，落地上述工具链配置并更新本节及根指南；不创建空壳入口。
-- Cargo 工程建立后，基础检查采用 `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`；测试按受影响用例运行 `cargo test --locked <filter>`。
+- Rust 核心使用上述 Cargo 工具链，不继承 Paseo 的工具链版本。服务入口尚未配置。本检出没有 `sandbox-rust.yml`。质量工作流和安全门禁的范围只写在 [docs/engineering.md](docs/engineering.md)。工作流存在不是服务已可运行，也不是隔离通过。
+- 本检出没有 `Cargo.toml`，不能在这里执行 Cargo。首个真实 crate 属于并行的 `feat/capability-workspace`：cap-std 受限临时工作区、有界读写、可重试幂等清理、真实 example 与测试、Apache-2.0，无容器或服务。不创建空壳入口。未合并不算本检出已有实现。
+- Cargo 工程建立后的检查以该 crate 分支为准。本检出不把未运行的 Cargo 写成已通过。
 - 单元测试与模块共置；`tests/` 验证 API 行为、非法状态转换、失败回收、路径边界及隔离能力。需要容器或虚拟化的测试应显式标注环境要求并隔离资源。
+- 手写 `.rs` 单文件不超过 1200 行，含 1200 行。文档 QA 的命令、白名单和 `format` 脚本只写在 [docs/engineering.md](docs/engineering.md)。检查结果记在 PR，不记在指南里。
 - 启动优化必须测量冷启动与复用路径，并验证复用不泄露状态。没有覆盖率百分比门槛；实际后端行为必须有运行证据，不能仅靠 mock。
