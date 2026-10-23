@@ -1,0 +1,100 @@
+name: Sandbox security
+
+# Gitleaks has no path filter so it can be a required check.
+# Dependency review is pull_request only: the action compares a PR diff.
+# Do not require it on merge_group: GitHub treats a skipped job as successful,
+# but no dependency review occurred. This job only gates individual PRs.
+# CodeQL runs on every trigger. It analyzes GitHub Actions in
+# .github/workflows/sandbox-security.yml only. It does not analyze JavaScript,
+# Rust, circus-sandbox/qa, or circus-paseo. Rust CodeQL is a separate change.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: Gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout full history
+        # v7.0.1 commit 3d3c42e5aac5ba805825da76410c181273ba90b1 (node24).
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan full Git history
+        shell: bash
+        run: bash .github/scripts/sandbox-gitleaks.sh
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Review dependency changes
+        # v5.0.0 commit a1d282b36b6f3519aa1f3fc636f609c47dddb294
+        # git/refs/tags/v5.0.0 type=commit, same SHA; action.yml runs.using=node24.
+        # git/refs/tags/v4 is 404. Latest v4 line is v4.9.0
+        # (2031cfc080254a8a887f58cffee85186f0e49e48), not used.
+        # Public repository: dependency review does not need GitHub Code Security.
+        # warn-only stays false. No pull-requests: write, so no PR comment.
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: low
+          fail-on-scopes: runtime,development
+          comment-summary-in-pr: never
+          warn-only: false
+          retry-on-snapshot-warnings: true
+
+  codeql:
+    name: CodeQL (actions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        # v4.39.1 commit 9b3254085494b55a0f7c4c2b3d2d52cc712ce370
+        # annotated tag 8498dc4c2b27cdd99baf0f87955b29ebbf30c78d -> that commit.
+        # init/action.yml runs.using=node24.
+        # languages is actions only. No javascript-typescript: this change has
+        # no circus-sandbox/qa source, and circus-paseo is out of scope.
+        # No rust language. Rust CodeQL is a separate change.
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: actions
+          build-mode: none
+          config-file: ./.github/codeql/sandbox.yml
+          queries: security-extended
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:actions

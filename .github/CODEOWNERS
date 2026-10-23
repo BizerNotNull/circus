@@ -1,0 +1,8 @@
+# Security-sensitive changes require review by an authorized repository owner.
+# This includes CODEOWNERS itself. Extend this list when granting reviewer access.
+/.github/ @BizerNotNull
+/.gitleaksignore @BizerNotNull
+/circus-sandbox/qa/ @BizerNotNull
+/circus-sandbox/deny.toml @BizerNotNull
+/circus-sandbox/Cargo.toml @BizerNotNull
+/circus-sandbox/Cargo.lock @BizerNotNull
