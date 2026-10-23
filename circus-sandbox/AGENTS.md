@@ -2,7 +2,7 @@
 
 ## 状态与边界
 
-`circus-sandbox` 是 Rust library crate（包名 `circus-sandbox`，edition 2024）。当前已经实现并导出的只有 workspace 文件能力：在 tempfile 新建的临时目录上，用 cap-std 目录句柄做相对路径读写。这不是进程沙箱，不提供容器、运行时隔离或 Paseo 接入。
+`circus-sandbox` 是 Rust library crate（包名 `circus-sandbox`，edition 2024）。当前提供 workspace 文件能力和 `runtime::ResourceLimits` 资源请求校验：文件操作在 tempfile 新建的临时目录上，用 cap-std 目录句柄做相对路径读写；资源值模型只校验数值与关联约束，尚未接入文件 API 或执行后端。这不是进程沙箱，不提供容器、运行时隔离或 Paseo 接入。
 
 已实现：
 
@@ -15,14 +15,15 @@
 - `cleanup` 可重复调用；成功后文件操作返回 `Closed`。清理失败保留工作区归属，可重试，且不会标成已关闭。`Drop` 只做尽力清理，错误只有显式 `cleanup` 能观察到。
 - `remove_file` 是 cap-std `Dir::remove_file`：对最终组件 unlink，不跟随该符号链接。非目录项都会删，包括普通文件、符号链接、FIFO 和 socket。目录返回 `Io` 且保留。文档若写成“只删除普通文件”，纠正文档；不要加删除前的类型预检，那会和 unlink 竞态。`NotRegularFile` 只属于读写。
 - 同一 `Workspace` 的并发读写由内部 `RwLock` 保护。这只序列化本进程内对这一个值的调用，不是外部进程隔离，也不是 crash-safe 原子写。不要把这把锁写成原子替换或磁盘配额，也不要为此增加原子写入 API。
+- `runtime::ResourceLimits` / `ResourceLimitsError` 是后端中立的资源值模型，无 `Default`。内存/工作区为正字节数且不超过 `i64::MAX`，CPU 为正 milli-CPU（`1000` 等于一个 CPU），进程数为正；工作区不超过内存，单文件上限不超过工作区。单文件上限为 `1..usize::MAX`，拒绝 `0` 和 `usize::MAX`，与 `Workspace::new` 一致。标量错误先于关联错误。校验不提供聚合准入/预留、内核强制或隔离，不附加宿主容量或 Docker 专用约束。
 
-未实现，不得写成现有能力：命令执行、生命周期状态机、Docker/Kubernetes/containerd、runc/gVisor/Kata/Firecracker、OCI 镜像、Git clone/worktree、沙箱池、HTTP/RPC、工作区总配额、宿主磁盘配额、进程隔离。`src/api`、`lifecycle`、`infrastructure`、`runtime`、`environment`、`pool` 仍只是占位目录。不修改 `../circus-paseo/`。
+未实现，不得写成现有能力：命令执行、生命周期状态机、Docker/Kubernetes/containerd、runc/gVisor/Kata/Firecracker、OCI 镜像、Git clone/worktree、沙箱池、HTTP/RPC、工作区总配额执行、宿主磁盘配额、进程隔离。`src/api`、`lifecycle`、`infrastructure`、`environment`、`pool` 仍只是占位目录；`runtime` 已有资源值模型，但没有运行时实现。不修改 `../circus-paseo/`。
 
 用户说明见 [README.md](README.md)，工程命令与门禁边界见 [docs/engineering.md](docs/engineering.md)，完整目标及交付记录入口见 [docs/delivery-plan.md](docs/delivery-plan.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。当前检出已有 Workspace crate、许可证策略、质量/安全/Rust 工作流，但开发约定和工作流存在仍然不是“全部领域已交付”或检查已通过。
 
 ## Architecture & Data Flow
 
-当前可调用路径只有库内的 `Workspace`：调用方 → `circus_sandbox::Workspace` → cap-std `Dir`（根为 tempfile 新建的目录）。没有 `api` / `lifecycle` 门面。
+当前可调用路径包括库内 `Workspace`：调用方 → `circus_sandbox::Workspace` → cap-std `Dir`（根为 tempfile 新建的目录），以及独立的 `circus_sandbox::runtime::ResourceLimits` 请求校验。两者尚未自动接线，没有 `api` / `lifecycle` 门面。
 
 规划中的调用链仍是：调用方 → `api` → `lifecycle` → `infrastructure` → `runtime`。在对应模块真实实现之前，下表是职责边界，不是已交付后端。
 
@@ -31,7 +32,7 @@
 | `src/api/`            | 统一创建、执行命令、文件操作、销毁入口；不泄露后端类型，不预设 HTTP、RPC 或进程内传输。                                                        |
 | `src/lifecycle/`      | 创建、启动、运行、暂停、恢复、销毁的状态转换与资源回收；状态只能由此修改。                                                                     |
 | `src/infrastructure/` | Docker、Kubernetes、containerd 等部署与调度适配；负责资源分配，不承担隔离机制实现。                                                            |
-| `src/runtime/`        | runc、gVisor、Kata Containers、Firecracker 等运行时能力与隔离策略；不支持的能力明确报错。                                                      |
+| `src/runtime/`        | 已实现后端中立的资源请求值校验，不执行资源限制。runc、gVisor、Kata Containers、Firecracker 等运行时能力与隔离策略尚未实现。                    |
 | `src/environment/`    | OCI 镜像、基础环境、依赖准备与可复现环境标识。                                                                                                 |
 | `src/workspace/`      | 已实现：能力目录内的相对文件读写、建目录、删除与回收。尚未实现 Git clone、worktree 或代码副本管理。                                            |
 | `src/pool/`           | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。                                                                       |
@@ -103,13 +104,13 @@
 ## Runtime, Commands & QA
 
 - Rust 核心使用上述 Cargo 工具链，不继承 Paseo 的工具链版本。服务入口尚未配置。`.github/workflows/sandbox-rust.yml` 显示名为 `Sandbox Rust`，检查名为 `rust (ubuntu-latest)`、`rust (windows-latest)`、`dependencies` 和 `codeql`。没有路径过滤，不调用 Paseo CI；`main` push、所有 pull request、merge queue 和 `workflow_dispatch` 都会启动。结果只记在对应 PR，不在本文声称当前提交已通过。命令在 `circus-sandbox/` 执行，rustup 读取本目录 `rust-toolchain.toml`。工作流存在不是服务可运行、隔离通过或分支保护已配置。
-- 本 crate 不允许 unsafe。库只导出已实现的 `workspace` 模块，不预建其他空模块，也不创建空壳二进制来假装后端可用。
+- 本 crate 不允许 unsafe。库只导出已实现的 `Workspace` 文件 API 和 `runtime` 资源值模型，不预建其他空模块，也不创建空壳二进制来假装后端可用。
 - 格式检查：`cargo fmt --check`（写回用 `cargo fmt`）。
 - Clippy：`cargo clippy --locked --all-targets -- -D warnings`。
 - 构建：`cargo build --locked`。
 - 测试：`cargo test --locked`。公开文件 API 集成测试是 `cargo test --locked --test workspace`。连示例一起编译用 `cargo test --locked --all-targets`。
 - 文档：`RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`。与 CI 的文档检查一致。
-- 示例：`cargo run --locked --example workspace`。示例必须实际写、读、删除并 `cleanup`，打印读到的字节，不能打印与 `Result` 无关的成功字样。
+- 文件示例：`cargo run --locked --example workspace`，必须实际写、读、删除并 `cleanup`，打印读到的字节，不能打印与 `Result` 无关的成功字样。资源示例：`cargo run --locked --example resource_policy`，构造合法请求、标明单位，再观察冲突请求的类型化拒绝；它不是后端 smoke。
 - 单元测试与模块共置，可覆盖符号链接逃逸、大于上限的已有文件读取，以及清理失败后的重试。读取超限时 `LimitExceeded.actual` 是探测到的 `limit + 1`，不是未知总长。公开 API 不能制造超限文件，所以 `tests/` 只验证写上限、恰好等于上限的读取、非法路径、嵌套目录/删除、重复 `cleanup` 与 `Closed`。符号链接用例的必要前提是进程能创建符号链接。Windows 需要开发者模式，或持有 `SeCreateSymbolicLinkPrivilege`。缺少该权限时对应用例必须失败，不能把 `PermissionDenied` 当成跳过并静默返回成功。不要修改宿主安全设置、组策略或开发者模式来让测试通过。需要容器或虚拟化的测试应显式标注环境要求并隔离资源；当前没有这类测试。
 - 启动优化必须测量冷启动与复用路径，并验证复用不泄露状态。没有覆盖率百分比门槛。实际后端行为必须有运行证据，不能仅靠 mock；workspace 文件测试使用真实临时目录。Windows 编译成功不能当成隔离或 Linux 后端通过，也不能把缺少符号链接权限时的静默跳过当成符号链接约束已验证。
 - 已合并质量门禁继续使用 `circus-sandbox/qa` 的现有 checker 与锁文件，Node.js 固定 24.18.0。手写 `.rs` 单文件不超过 1200 行（含 1200）。文档白名单、QA 回归测试、npm audit、actionlint、`CodeQL QA` 和已合并安全门禁的精确范围统一见工程说明；不重新引入 markdownlint-cli2/braces，不把 QA 当作 Rust 或隔离测试。
@@ -117,7 +118,7 @@
 
 ### CI 检查内容
 
-- `rust`：两个平台都在 `circus-sandbox/` 安装 Rust 1.99.1（minimal，含 rustfmt 与 clippy），然后跑 `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`、`cargo test --locked`、`RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`、`cargo run --locked --example workspace`。`fail-fast` 为 false。这是源码级检查，不是容器或进程隔离验证。
+- `rust`：两个平台都在 `circus-sandbox/` 安装 Rust 1.99.1（minimal，含 rustfmt 与 clippy），然后跑 `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`、`cargo test --locked`、`RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`、`cargo run --locked --example workspace` 和 `cargo run --locked --example resource_policy`。`fail-fast` 为 false。这是源码级检查，不是容器或进程隔离验证。
 - `dependencies`：只在 `ubuntu-latest`。`cargo install --locked --version 0.20.2 cargo-deny`，然后 `cargo deny --locked check`。本地复现使用同一安装版本，并在 `circus-sandbox/` 执行检查。
 - `codeql`：只在 `ubuntu-latest`。语言 `rust`，`build-mode: none`，配置 `.github/codeql/sandbox-rust.yml`。只分析 `circus-sandbox`，忽略 `circus-paseo` 与 `circus-sandbox/target`。它不编译 crate，不能代替 `cargo test`。
 

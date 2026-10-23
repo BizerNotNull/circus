@@ -1,9 +1,13 @@
-//! Capability-scoped temporary workspace files.
+//! Capability-scoped temporary workspace files and validated resource requests.
 //!
 //! [`Workspace`] confines file access to a directory it creates and opens as a
 //! [`cap_std::fs::Dir`]. Callers pass relative paths only. The root path is not
 //! exposed. This crate is **not** a process sandbox and does not provide
 //! containers, OCI runtimes, mounts, or host isolation.
+//!
+//! [`runtime::ResourceLimits`] validates backend-neutral CPU, memory, process,
+//! workspace, and per-file requests. Validation does not enforce limits, provide
+//! isolation, reserve resources, or perform aggregate admission control.
 //!
 //! # Blocking
 //!
@@ -41,6 +45,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod runtime;
 mod workspace;
 
 #[doc(inline)]
