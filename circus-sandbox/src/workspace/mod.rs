@@ -1,5 +1,6 @@
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{PoisonError, RwLock};
 
 #[cfg(unix)]
 use cap_fs_ext::OpenOptionsSyncExt;
@@ -101,11 +102,25 @@ pub enum WorkspaceError {
 /// deletes the directory on a best-effort basis and ignores errors; call
 /// [`Workspace::cleanup`] to observe removal failures.
 ///
+/// Calls on the same value share one [`RwLock`]: [`Self::read_file`] may run
+/// alongside other reads, while [`Self::write_file`], [`Self::create_dir_all`],
+/// and [`Self::remove_file`] are exclusive with each other and with reads. The
+/// guard is acquired only after the caller path has been borrowed and checked,
+/// and it is held from the final open through the end of that read or write.
+/// A poisoned lock becomes [`WorkspaceError::Io`]; it does not panic.
+/// [`Self::cleanup`] takes `&mut self` and does not lock.
+///
+/// That lock only orders calls on this value in this process. It is not
+/// process isolation, not a workspace or disk quota, and not a crash-safe
+/// atomic replace. `max_file_bytes` is a per-file cap. This crate has no
+/// total-quota API.
+///
 /// This type does not sandbox a process and does not claim container support.
 pub struct Workspace {
     dir: Option<Dir>,
     temp: Option<tempfile::TempDir>,
     max_file_bytes: usize,
+    file_lock: RwLock<()>,
 }
 
 impl std::fmt::Debug for Workspace {
@@ -129,9 +144,10 @@ impl Drop for Workspace {
 impl Workspace {
     /// Creates a private temporary directory and opens it with ambient authority.
     ///
-    /// `max_file_bytes` must be in `1..=usize::MAX - 1`. This does not allocate
-    /// a buffer of that size and does not expose the directory path or any host
-    /// project directory.
+    /// `max_file_bytes` must be in `1..=usize::MAX - 1`. It is a per-file cap,
+    /// not a workspace total, file-count, or host disk quota. This crate has
+    /// no total-quota API. This does not allocate a buffer of that size and
+    /// does not expose the directory path or any host project directory.
     ///
     /// Blocks the calling thread.
     pub fn new(max_file_bytes: usize) -> Result<Self, WorkspaceError> {
@@ -146,28 +162,41 @@ impl Workspace {
             dir: Some(dir),
             temp: Some(temp),
             max_file_bytes,
+            file_lock: RwLock::new(()),
         })
     }
 
     /// Creates `path` and any missing parents inside the workspace.
     ///
-    /// Does not create parents for [`Self::write_file`]. Blocks the calling thread.
+    /// Does not create parents for [`Self::write_file`]. Takes the exclusive
+    /// file lock after the path check and holds it across the directory
+    /// create. Blocks the calling thread.
     pub fn create_dir_all(&self, path: impl AsRef<Path>) -> Result<(), WorkspaceError> {
-        let dir = self.capability()?;
+        self.ensure_open()?;
         let path = check_path(path.as_ref())?;
+        let _guard = self.file_lock.write().map_err(lock_poisoned)?;
+        let dir = self.dir.as_ref().ok_or_else(missing_handle)?;
         dir.create_dir_all(path)?;
         Ok(())
     }
 
     /// Writes `contents` to a regular file, overwriting one that already exists.
     ///
-    /// Closed is checked first, then the path, then the byte length. An
-    /// over-long write does not create or truncate. Missing parents are
+    /// Closed is checked first, then the path, then the byte length. The
+    /// exclusive file lock is taken only after those checks, so a caller
+    /// [`AsRef<Path>`] is not invoked while the lock is held. An over-long
+    /// write does not create or truncate. Missing parents are
     /// [`std::io::ErrorKind::NotFound`] and are not created implicitly. A
     /// directory, FIFO, or other non-regular node, including one reached
     /// through an in-workspace symlink, is [`WorkspaceError::NotRegularFile`]
     /// and is left unchanged. On Unix the open is nonblocking, so a regular
     /// file replaced by a FIFO after the path check cannot stall this call.
+    ///
+    /// The lock covers the final open, `set_len(0)`, and `write_all`. That
+    /// makes overlapping calls on this value see a complete payload. It is
+    /// not an atomic replace and not crash-safe: an I/O error after the open
+    /// can still leave the file truncated or partial. Other processes are not
+    /// excluded.
     ///
     /// Blocks the calling thread.
     pub fn write_file(
@@ -175,7 +204,7 @@ impl Workspace {
         path: impl AsRef<Path>,
         contents: &[u8],
     ) -> Result<(), WorkspaceError> {
-        let dir = self.capability()?;
+        self.ensure_open()?;
         let path = check_path(path.as_ref())?;
         if contents.len() > self.max_file_bytes {
             return Err(WorkspaceError::LimitExceeded {
@@ -183,6 +212,8 @@ impl Workspace {
                 actual: contents.len(),
             });
         }
+        let _guard = self.file_lock.write().map_err(lock_poisoned)?;
+        let dir = self.dir.as_ref().ok_or_else(missing_handle)?;
         require_writable_node(dir, path)?;
         let file = open_writable(dir, path)?;
         write_regular(file, path, contents)
@@ -195,21 +226,31 @@ impl Workspace {
     /// On Unix that open is nonblocking and does not wait for a FIFO peer.
     /// The size is not taken from metadata. At most `max_file_bytes + 1` bytes
     /// are read; a longer file returns [`WorkspaceError::LimitExceeded`].
-    /// Blocks the calling thread.
+    ///
+    /// The shared file lock is taken after the path check and held from the
+    /// final open through the end of the read, so a concurrent call on this
+    /// value cannot truncate the file mid-read. Other processes are not
+    /// excluded. Blocks the calling thread.
     pub fn read_file(&self, path: impl AsRef<Path>) -> Result<Vec<u8>, WorkspaceError> {
-        let dir = self.capability()?;
+        self.ensure_open()?;
         let path = check_path(path.as_ref())?;
+        let _guard = self.file_lock.read().map_err(lock_poisoned)?;
+        let dir = self.dir.as_ref().ok_or_else(missing_handle)?;
         require_readable_node(dir, path)?;
         let file = open_readable(dir, path)?;
         read_regular(file, path, self.max_file_bytes)
     }
 
-    /// Removes a file or symlink at `path`. Does not remove directories.
+    /// Removes a non-directory node at `path` via cap-std unlink. A symlink is
+    /// removed itself and is not followed. Directories are left in place.
     ///
-    /// Blocks the calling thread.
+    /// Takes the exclusive file lock after the path check and holds it across
+    /// the unlink. Blocks the calling thread.
     pub fn remove_file(&self, path: impl AsRef<Path>) -> Result<(), WorkspaceError> {
-        let dir = self.capability()?;
+        self.ensure_open()?;
         let path = check_path(path.as_ref())?;
+        let _guard = self.file_lock.write().map_err(lock_poisoned)?;
+        let dir = self.dir.as_ref().ok_or_else(missing_handle)?;
         dir.remove_file(path)?;
         Ok(())
     }
@@ -220,6 +261,9 @@ impl Workspace {
     /// value keeps the directory so cleanup can be retried, and file operations
     /// do not return [`WorkspaceError::Closed`]. After success, file operations
     /// return `Closed` even for illegal paths.
+    ///
+    /// Does not take the file lock. `&mut self` already excludes other calls
+    /// on this value.
     ///
     /// Blocks the calling thread. Drop remains best-effort and does not report
     /// the error this method returns.
@@ -249,16 +293,14 @@ impl Workspace {
         }
     }
 
-    fn capability(&self) -> Result<&Dir, WorkspaceError> {
+    fn ensure_open(&self) -> Result<(), WorkspaceError> {
         if self.temp.is_none() {
             return Err(WorkspaceError::Closed);
         }
-        self.dir.as_ref().ok_or_else(|| {
-            io::Error::other(
-                "workspace directory handle is unavailable after a failed cleanup; retry cleanup",
-            )
-            .into()
-        })
+        if self.dir.is_none() {
+            return Err(missing_handle());
+        }
+        Ok(())
     }
 
     fn mark_closed(&mut self) {
@@ -289,6 +331,17 @@ impl Workspace {
             Err(err) if err.kind() == io::ErrorKind::NotFound
         )
     }
+}
+
+fn lock_poisoned<T>(err: PoisonError<T>) -> WorkspaceError {
+    io::Error::other(format!("workspace file lock poisoned: {err}")).into()
+}
+
+fn missing_handle() -> WorkspaceError {
+    io::Error::other(
+        "workspace directory handle is unavailable after a failed cleanup; retry cleanup",
+    )
+    .into()
 }
 
 fn check_path(path: &Path) -> Result<&Path, WorkspaceError> {

@@ -9,12 +9,14 @@
 - `Workspace` 同步 API：`new`、`write_file`、`read_file`、`create_dir_all`、`remove_file`、`cleanup`。方法会阻塞调用线程。
 - 临时工作区由 tempfile 新建，不接受宿主目录，公开 API 不暴露工作区根路径。
 - 跨平台拒绝空路径、绝对路径、`..`、Windows 盘符/UNC 前缀和反斜杠；通过后的访问走 cap-std，防止符号链接逃逸和基于路径字符串的 TOCTOU。
-- 读写共享 `max_file_bytes` 上限。`new` 拒绝 `0` 和 `usize::MAX`，以便读取 `limit + 1` 时不溢出，也不按该上限预分配。
+- 读写使用同一个 `max_file_bytes`。它是单个文件的上限：`new` 拒绝 `0` 和 `usize::MAX`，以便读取 `limit + 1` 时不溢出，也不按该上限预分配。它不是工作区总字节配额、文件数配额或宿主磁盘配额，当前也没有总配额 API。写满临时目录是宿主磁盘耗尽，不是 `LimitExceeded`。不要把这个参数写成沙箱配额，也不要在本 crate 增加总配额 API。后续真实进程或容器后端必须显式限制资源。
 - `write_file` 不是原子替换。已关闭、非法路径、超限、缺失父目录和非普通文件在截断前返回，这些失败不修改已有文件。打开普通文件后先把长度设为 0 再写入；此后的 I/O 失败可能截断或留下不完整内容。不要写成原子写入，也不要为此增加原子 API。
 - Unix 上 `read_file` / `write_file` 通过 cap-std `OpenOptions` 设置 `nonblock(true)` 再打开，因此 `open` 本身不等待 FIFO 对端。句柄级 `is_file` 在任何读取或 `set_len`/写入之前执行。路径 metadata 预检不是这个修复：工作区内指向 FIFO 的符号链接，以及打开前普通文件被换成 FIFO，都不得阻塞，并返回 `NotRegularFile`（保留调用方路径）。指向普通文件的工作区符号链接仍跟随。逃出工作区的符号链接仍是 cap-std 的 I/O 错误，不是新错误变体。Windows 不设置该标志；CreateFile 保持 write+create 且不预先 truncate，读取是只读打开。目录、FIFO、设备及其他非普通节点，包括指向它们的工作区符号链接，都是 `NotRegularFile`。
 - `cleanup` 可重复调用；成功后文件操作返回 `Closed`。清理失败保留工作区归属，可重试，且不会标成已关闭。`Drop` 只做尽力清理，错误只有显式 `cleanup` 能观察到。
+- `remove_file` 是 cap-std `Dir::remove_file`：对最终组件 unlink，不跟随该符号链接。非目录项都会删，包括普通文件、符号链接、FIFO 和 socket。目录返回 `Io` 且保留。文档若写成“只删除普通文件”，纠正文档；不要加删除前的类型预检，那会和 unlink 竞态。`NotRegularFile` 只属于读写。
+- 同一 `Workspace` 的并发读写由内部 `RwLock` 保护。这只序列化本进程内对这一个值的调用，不是外部进程隔离，也不是 crash-safe 原子写。不要把这把锁写成原子替换或磁盘配额，也不要为此增加原子写入 API。
 
-未实现，不得写成现有能力：命令执行、生命周期状态机、Docker/Kubernetes/containerd、runc/gVisor/Kata/Firecracker、OCI 镜像、Git clone/worktree、沙箱池、HTTP/RPC。`src/api`、`lifecycle`、`infrastructure`、`runtime`、`environment`、`pool` 仍只是占位目录。不修改 `../circus-paseo/`。
+未实现，不得写成现有能力：命令执行、生命周期状态机、Docker/Kubernetes/containerd、runc/gVisor/Kata/Firecracker、OCI 镜像、Git clone/worktree、沙箱池、HTTP/RPC、工作区总配额、宿主磁盘配额、进程隔离。`src/api`、`lifecycle`、`infrastructure`、`runtime`、`environment`、`pool` 仍只是占位目录。不修改 `../circus-paseo/`。
 
 用户说明见 [README.md](README.md)。开发约定仍然不是“全部领域已交付”。
 
@@ -108,8 +110,8 @@
 - 测试：`cargo test --locked`。公开文件 API 集成测试是 `cargo test --locked --test workspace`。连示例一起编译用 `cargo test --locked --all-targets`。
 - 文档：`RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`。与 CI 的文档检查一致。
 - 示例：`cargo run --locked --example workspace`。示例必须实际写、读、删除并 `cleanup`，打印读到的字节，不能打印与 `Result` 无关的成功字样。
-- 单元测试与模块共置，可覆盖符号链接逃逸、大于上限的已有文件读取，以及清理失败后的重试。读取超限时 `LimitExceeded.actual` 是探测到的 `limit + 1`，不是未知总长。公开 API 不能制造超限文件，所以 `tests/` 只验证写上限、恰好等于上限的读取、非法路径、嵌套目录/删除、重复 `cleanup` 与 `Closed`。需要容器或虚拟化的测试应显式标注环境要求并隔离资源；当前没有这类测试。
-- 启动优化必须测量冷启动与复用路径，并验证复用不泄露状态。没有覆盖率百分比门槛。实际后端行为必须有运行证据，不能仅靠 mock；workspace 文件测试使用真实临时目录。Windows 编译成功不能当成隔离或 Linux 后端通过。
+- 单元测试与模块共置，可覆盖符号链接逃逸、大于上限的已有文件读取，以及清理失败后的重试。读取超限时 `LimitExceeded.actual` 是探测到的 `limit + 1`，不是未知总长。公开 API 不能制造超限文件，所以 `tests/` 只验证写上限、恰好等于上限的读取、非法路径、嵌套目录/删除、重复 `cleanup` 与 `Closed`。符号链接用例的必要前提是进程能创建符号链接。Windows 需要开发者模式，或持有 `SeCreateSymbolicLinkPrivilege`。缺少该权限时对应用例必须失败，不能把 `PermissionDenied` 当成跳过并静默返回成功。不要修改宿主安全设置、组策略或开发者模式来让测试通过。需要容器或虚拟化的测试应显式标注环境要求并隔离资源；当前没有这类测试。
+- 启动优化必须测量冷启动与复用路径，并验证复用不泄露状态。没有覆盖率百分比门槛。实际后端行为必须有运行证据，不能仅靠 mock；workspace 文件测试使用真实临时目录。Windows 编译成功不能当成隔离或 Linux 后端通过，也不能把缺少符号链接权限时的静默跳过当成符号链接约束已验证。
 
 ### CI 检查内容
 

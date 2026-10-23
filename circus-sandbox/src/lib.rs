@@ -13,14 +13,20 @@
 //!
 //! # Limits
 //!
-//! [`Workspace::new`] takes a positive byte cap. Reads never allocate from
-//! untrusted file metadata and stop after proving the file exceeds the cap.
-//! Writes that exceed the cap fail before any create or truncate. A closed
-//! workspace, a rejected path, a missing parent, or a non-regular node also
-//! returns before the file is created or truncated. Replacing a regular file
-//! is not atomic: after it is opened, its length is set to zero and then the
+//! [`Workspace::new`] takes a positive byte cap for a single file. It is not a
+//! workspace total, file-count, or host disk quota, and this crate has no
+//! total-quota API. Reads never allocate from untrusted file metadata and stop
+//! after proving the file exceeds the cap. Writes that exceed the cap fail
+//! before any create or truncate. A closed workspace, a rejected path, a
+//! missing parent, or a non-regular node also returns before the file is
+//! created or truncated. Replacing a regular file is not atomic and not
+//! crash-safe: after it is opened, its length is set to zero and then the
 //! bytes are written. An I/O error after that open can leave the file
 //! truncated or only partly written. This crate has no atomic-write API.
+//!
+//! Calls on one [`Workspace`] share an internal lock so a read does not observe
+//! another call on that value mid-truncate. That is not process isolation:
+//! other processes can still change the directory.
 //!
 //! ```
 //! use circus_sandbox::Workspace;

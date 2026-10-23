@@ -1,5 +1,8 @@
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier};
+use std::time::{Duration, Instant};
 
 use super::{Workspace, WorkspaceError};
 
@@ -227,9 +230,7 @@ fn symlink_escape_cannot_read_or_replace_outside_file() {
     outside.write_all(b"secret").unwrap();
     outside.flush().unwrap();
     let link = workspace.temp.as_ref().unwrap().path().join("escape");
-    if !try_symlink(outside.path(), &link) {
-        return;
-    }
+    try_symlink(outside.path(), &link);
     assert!(workspace.read_file("escape").is_err());
     assert!(workspace.write_file("escape", b"pwned").is_err());
     assert_eq!(std::fs::read(outside.path()).unwrap(), b"secret");
@@ -238,10 +239,9 @@ fn symlink_escape_cannot_read_or_replace_outside_file() {
     let file_name = outside.path().file_name().unwrap();
     let relative = Path::new("..").join(file_name);
     let relative_link = root.join("relative-escape");
-    if try_symlink(&relative, &relative_link) {
-        assert!(workspace.read_file("relative-escape").is_err());
-        assert_eq!(std::fs::read(outside.path()).unwrap(), b"secret");
-    }
+    try_symlink(&relative, &relative_link);
+    assert!(workspace.read_file("relative-escape").is_err());
+    assert_eq!(std::fs::read(outside.path()).unwrap(), b"secret");
 }
 
 #[test]
@@ -250,18 +250,15 @@ fn in_cap_relative_symlink_reads_target_and_cleanup_keeps_outside_file() {
     workspace.write_file("target.txt", b"inside").unwrap();
     let root = workspace.temp.as_ref().unwrap().path();
     let link = root.join("alias.txt");
-    if !try_symlink(Path::new("target.txt"), &link) {
-        return;
-    }
+    try_symlink(Path::new("target.txt"), &link);
     assert_eq!(workspace.read_file("alias.txt").unwrap(), b"inside");
 
     let mut outside = tempfile::NamedTempFile::new().unwrap();
     outside.write_all(b"secret").unwrap();
     outside.flush().unwrap();
     let escape = root.join("escape");
-    if try_symlink(outside.path(), &escape) {
-        assert!(workspace.read_file("escape").is_err());
-    }
+    try_symlink(outside.path(), &escape);
+    assert!(workspace.read_file("escape").is_err());
     workspace.cleanup().unwrap();
     assert_eq!(std::fs::read(outside.path()).unwrap(), b"secret");
 }
@@ -353,11 +350,100 @@ fn probe_symlink_to_fifo() {
     }
 }
 
-fn try_symlink(target: &Path, link: &Path) -> bool {
-    match symlink_file(target, link) {
-        Ok(()) => true,
-        Err(err) if cfg!(windows) && err.kind() == io::ErrorKind::PermissionDenied => false,
-        Err(err) => panic!("create symlink {link:?} -> {target:?}: {err}"),
+/// Two writers replace one file through the same [`Workspace`] while a reader
+/// samples it. Each successful read must be the initial file or one complete
+/// writer payload. Empty and mixed suffixes fail. The loop is finite and does
+/// not claim crash-safe or cross-process atomic replacement.
+#[test]
+fn concurrent_writes_and_reads_preserve_payloads() {
+    const ROUNDS: usize = 64;
+    const FILE: &str = "shared.bin";
+    const DEADLINE: Duration = Duration::from_secs(20);
+    let initial = vec![0x11u8; 32 * 1024 + 64];
+    let payload_a = vec![0xA5u8; 32 * 1024];
+    let payload_b = vec![0x5Au8; 32 * 1024 - 128];
+    let expected: [&[u8]; 3] = [&initial, &payload_a, &payload_b];
+
+    let workspace = Arc::new(Workspace::new(64 * 1024).unwrap());
+    workspace.write_file(FILE, &initial).unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+    let done_a = AtomicBool::new(false);
+    let done_b = AtomicBool::new(false);
+    let done_a = &done_a;
+    let done_b = &done_b;
+
+    std::thread::scope(|scope| {
+        let workspace_a = Arc::clone(&workspace);
+        let barrier_a = Arc::clone(&barrier);
+        let payload_a = payload_a.clone();
+        scope.spawn(move || {
+            barrier_a.wait();
+            let _finished = WriterDone(done_a);
+            for _ in 0..ROUNDS {
+                workspace_a.write_file(FILE, &payload_a).unwrap();
+            }
+        });
+
+        let workspace_b = Arc::clone(&workspace);
+        let barrier_b = Arc::clone(&barrier);
+        let payload_b = payload_b.clone();
+        scope.spawn(move || {
+            barrier_b.wait();
+            let _finished = WriterDone(done_b);
+            for _ in 0..ROUNDS {
+                workspace_b.write_file(FILE, &payload_b).unwrap();
+            }
+        });
+
+        let workspace = Arc::clone(&workspace);
+        let barrier = Arc::clone(&barrier);
+        scope.spawn(move || {
+            barrier.wait();
+            let started = Instant::now();
+            loop {
+                let bytes = workspace.read_file(FILE).expect("read shared file");
+                assert!(
+                    expected.iter().any(|payload| *payload == bytes),
+                    "read {} bytes, not a complete payload (empty or mixed suffix); head {:02x?} tail {:02x?}",
+                    bytes.len(),
+                    &bytes[..bytes.len().min(8)],
+                    &bytes[bytes.len().saturating_sub(8)..],
+                );
+                if done_a.load(Ordering::Acquire) && done_b.load(Ordering::Acquire) {
+                    break;
+                }
+                assert!(
+                    started.elapsed() < DEADLINE,
+                    "writers still running after {DEADLINE:?}"
+                );
+            }
+        });
+    });
+
+    let settled = workspace.read_file(FILE).unwrap();
+    assert!(
+        settled == payload_a || settled == payload_b,
+        "settled file is not a complete writer payload (len {})",
+        settled.len()
+    );
+}
+
+struct WriterDone<'a>(&'a AtomicBool);
+
+impl Drop for WriterDone<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+fn try_symlink(target: &Path, link: &Path) {
+    if let Err(err) = symlink_file(target, link) {
+        if cfg!(windows) && err.kind() == io::ErrorKind::PermissionDenied {
+            panic!(
+                "create symlink {link:?} -> {target:?} failed: {err}. Windows symlink tests require Developer Mode or SeCreateSymbolicLinkPrivilege; PermissionDenied is a failure, not a skip"
+            );
+        }
+        panic!("create symlink {link:?} -> {target:?}: {err}");
     }
 }
 
