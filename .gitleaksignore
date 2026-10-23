@@ -1,0 +1,7 @@
+# Verified exception, not a path or test-directory allowlist.
+# circus-paseo/packages/relay/src/crypto.test.ts lines 91 and 92 in
+# df74dad5e9e3922c7a71ac238dd2f1306e4916d5 are public X25519 low-order
+# points. The test rejects them as invalid peer public keys. They are not
+# credentials. A different commit, path, line, rule, or value still fails.
+df74dad5e9e3922c7a71ac238dd2f1306e4916d5:circus-paseo/packages/relay/src/crypto.test.ts:generic-api-key:91
+df74dad5e9e3922c7a71ac238dd2f1306e4916d5:circus-paseo/packages/relay/src/crypto.test.ts:generic-api-key:92
