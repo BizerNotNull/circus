@@ -85,7 +85,7 @@
 
 ## Runtime, Commands & QA
 
-- Rust 核心使用上述 Cargo 工具链，不继承 Paseo 的工具链版本。服务入口尚未配置。本检出没有 `sandbox-rust.yml`。质量工作流和安全门禁的范围只写在 [docs/engineering.md](docs/engineering.md)。工作流存在不是服务已可运行，也不是隔离通过。
+- Rust 核心使用上述 Cargo 工具链，不继承 Paseo 的工具链版本。服务入口尚未配置。本检出没有 `sandbox-rust.yml`。质量工作流范围见 [docs/engineering.md](docs/engineering.md)，独立安全门禁见 [安全工程说明](../.github/sandbox-security.md)。它们不能代替后端行为与隔离测试。
 - 本检出没有 `Cargo.toml`，不能在这里执行 Cargo。首个真实 crate 属于并行的 `feat/capability-workspace`：cap-std 受限临时工作区、有界读写、可重试幂等清理、真实 example 与测试、Apache-2.0，无容器或服务。不创建空壳入口。未合并不算本检出已有实现。
 - Cargo 工程建立后的检查以该 crate 分支为准。本检出不把未运行的 Cargo 写成已通过。
 - 单元测试与模块共置；`tests/` 验证 API 行为、非法状态转换、失败回收、路径边界及隔离能力。需要容器或虚拟化的测试应显式标注环境要求并隔离资源。
