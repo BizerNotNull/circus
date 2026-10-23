@@ -58,7 +58,7 @@ dependency review 与密钥扫描的通过记录属于安全基线 PR 及其后�
 
 `npm --prefix circus-sandbox/qa audit` 只审计 `circus-sandbox/qa` 的锁文件。它不审计 `circus-paseo/`，也不审计仓库里其它 npm 树。这次审计通过、CodeQL QA 通过，或安全基线合并，都不等于整个仓库的漏洞告警已经解决。告警数量只记在对应 PR 或报告，不写进本文。
 
-secret scanning 与 push protection 是 GitHub 平台设置，不是本质量工作流的替代品。工作流存在也不等于它已被设为 `main` 的 required status check。合并仍需 1 个批准审查，作者不能批准自己的 PR，不得绕过保护。
+secret scanning 与 push protection 是 GitHub 平台设置，不是本质量工作流的替代品。工作流存在也不等于它已被设为 `main` 的 required status check。当前不要求非作者批准；任务授权后的自动合并仍须经过 PR、最新 CI 和适用审查闭环，不绕过保护。
 
 质量工作流不覆盖 Rust CodeQL、Cargo 构建或沙箱隔离。本检出不链接未出现的 `sandbox-rust.yml`。它仍不覆盖沙箱隔离、`paseo-ci.yml` 的修改、Paseo 依赖审计和分支保护变更。质量门禁与安全基线都不把继承自仓库的 Paseo 告警写成已清除。
 
