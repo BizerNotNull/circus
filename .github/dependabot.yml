@@ -2,14 +2,30 @@ version: 2
 # Opens update PRs only. Does not approve, merge, or change branch protection.
 # github-actions scans every workflow under .github/workflows, including
 # paseo-ci.yml. This file does not edit that workflow.
-# npm is omitted: circus-sandbox/qa is not part of this change.
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+      include: scope
     groups:
       github-actions:
         patterns:
           - "*"
+  - package-ecosystem: npm
+    directory: /circus-sandbox/qa
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope
+  - package-ecosystem: cargo
+    directory: /circus-sandbox
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope

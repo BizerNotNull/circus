@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lint this checkout's sandbox quality workflow with a checksum-pinned actionlint binary.
+# Lint this checkout's sandbox workflows and scripts with checksum-pinned actionlint.
 # CI and a local shell use the same entrypoint:
 #   bash .github/scripts/sandbox-actionlint.sh
 # Does not lint workflows or scripts that are not in this checkout.
@@ -147,8 +147,10 @@ if ! command -v shellcheck >/dev/null 2>&1; then
   exit 1
 fi
 
+# Fail rather than silently skipping either lint if its file set is missing.
+shopt -s failglob
 shellcheck --severity=warning \
-  .github/scripts/sandbox-actionlint.sh
+  .github/scripts/sandbox-*.sh
 
 "${tool}" -no-color \
-  .github/workflows/sandbox-quality.yml
+  .github/workflows/sandbox-*.yml
