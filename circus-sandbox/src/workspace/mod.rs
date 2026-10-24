@@ -10,10 +10,12 @@ use cap_std::fs::{Dir, File, OpenOptions};
 /// Why [`Workspace`] rejected a path before touching the filesystem.
 ///
 /// Illegal paths are empty, contain `\`, have a Windows drive prefix
-/// (`^[A-Za-z]:`) or a leading `//`, are absolute (a leading `/` or
-/// [`Path::is_absolute`]), or contain a `..` component. `.` and `foo/./bar`
-/// are allowed. Separators in accepted paths must be `/`. A successful
-/// cleanup is [`WorkspaceError::Closed`], not one of these path categories.
+/// (`[A-Za-z]:` on any component) or a leading `//`, are absolute (a leading
+/// `/` or [`Path::is_absolute`]), or contain a `..` component. `.` and
+/// `foo/./bar` are allowed. A colon that is not a one-letter drive prefix,
+/// such as `file:name` or `CC:name`, is not this prefix. Separators in
+/// accepted paths must be `/`. A successful cleanup is
+/// [`WorkspaceError::Closed`], not one of these path categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathRejectReason {
     /// The path was empty.
@@ -22,7 +24,11 @@ pub enum PathRejectReason {
     Absolute,
     /// The path contained a `..` component.
     ParentComponent,
-    /// The path had a Windows drive prefix or started with `//`.
+    /// The path had a Windows drive prefix on any component, or started with `//`.
+    ///
+    /// A leading `//` or drive prefix is reported before [`Self::Absolute`].
+    /// A `..` component is still [`Self::ParentComponent`] when that check
+    /// matches first. `\` is [`Self::Backslash`].
     WindowsPrefix,
     /// The path contained `\`.
     Backslash,
@@ -359,6 +365,9 @@ fn check_path(path: &Path) -> Result<&Path, WorkspaceError> {
         .any(|component| matches!(component, Component::ParentDir))
     {
         Some(PathRejectReason::ParentComponent)
+    } else if has_windows_drive_component(path) {
+        // After `\`, absolute, and `..`, so those existing reasons stay stable.
+        Some(PathRejectReason::WindowsPrefix)
     } else {
         None
     };
@@ -371,8 +380,17 @@ fn check_path(path: &Path) -> Result<&Path, WorkspaceError> {
     }
 }
 
+fn is_drive_prefix(raw: &[u8]) -> bool {
+    raw.len() >= 2 && raw[0].is_ascii_alphabetic() && raw[1] == b':'
+}
+
 fn is_windows_prefix(raw: &[u8]) -> bool {
-    raw.starts_with(b"//") || (raw.len() >= 2 && raw[0].is_ascii_alphabetic() && raw[1] == b':')
+    raw.starts_with(b"//") || is_drive_prefix(raw)
+}
+
+fn has_windows_drive_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| is_drive_prefix(component.as_os_str().as_encoded_bytes()))
 }
 
 fn require_readable_node(dir: &Dir, path: &Path) -> Result<(), WorkspaceError> {
