@@ -55,6 +55,10 @@ impl FakeBackend {
 
 #[allow(clippy::manual_async_fn)]
 impl Backend for FakeBackend {
+    fn kind(&self) -> &'static str {
+        "test"
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             pause_resume: true,

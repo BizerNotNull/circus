@@ -85,6 +85,9 @@ pub(crate) struct BackendProcess {
 
 /// Deployment adapter with static dispatch.
 pub(crate) trait Backend: Send + Sync + 'static {
+    /// Stable label for telemetry. Never derived from a caller-supplied value.
+    fn kind(&self) -> &'static str;
+
     /// Operations this backend can actually perform.
     fn capabilities(&self) -> Capabilities;
 

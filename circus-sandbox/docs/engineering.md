@@ -43,14 +43,15 @@ Markdown 与链接白名单是 `README.md`、`AGENTS.md` 和 `circus-sandbox/**/
 
 ```text
 error            -> (none)
+observability    -> (none)
 runtime          -> error
-infrastructure   -> runtime, error
+infrastructure   -> runtime, error, observability
 environment      -> infrastructure, runtime, error
 workspace        -> infrastructure, runtime, error
-lifecycle        -> environment, workspace, infrastructure, runtime, error
-pool             -> lifecycle, environment, workspace, runtime, error
-api              -> pool, lifecycle, environment, workspace, runtime, error
-facade           -> api, pool, lifecycle, environment, workspace, runtime, error
+lifecycle        -> environment, workspace, infrastructure, runtime, error, observability
+pool             -> lifecycle, environment, workspace, runtime, error, observability
+api              -> pool, lifecycle, environment, workspace, runtime, error, observability
+facade           -> api, pool, lifecycle, environment, workspace, runtime, error, observability
 ```
 
 - 生成命令在 `circus-sandbox/` 执行：`cargo modules dependencies --lib --all-features --no-externs --no-owns`。脚本先执行 `cargo modules --version`，要求精确 `cargo-modules 0.28.0`，再解析 stdout。analyzer 非零、超时、输出过大或没有 DOT 都失败，不把缺失图当成通过。

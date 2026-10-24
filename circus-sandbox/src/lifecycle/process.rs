@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use super::operations::{cleanup_engine_error, destroy_report, need, required_id};
 use super::{CleanupReport, CommandGuard, Ownership, SandboxError, SandboxPhase, State};
 use crate::infrastructure::{Backend, ProcessSpec};
+use crate::observability::{TerminationKind, events};
 use crate::runtime::check_relative;
 
 const CHUNK_BYTES: usize = 16 * 1024;
@@ -256,6 +257,8 @@ pub(super) async fn spawn<B: Backend>(
         .working_dir
         .as_ref()
         .map_or_else(|| base.to_string(), |dir| format!("{base}/{dir}"));
+    let facts = events::process_facts(&request.argv, &request.env);
+    let timeout_ms = u64::try_from(request.timeout.as_millis()).unwrap_or(u64::MAX);
     let process = state
         .backend
         .spawn_process(
@@ -276,6 +279,8 @@ pub(super) async fn spawn<B: Backend>(
         Ok(process) => process,
         Err(err) => return cleanup_engine_error(state, err).await,
     };
+    state.metrics.record_process_started();
+    events::process_opened(&facts, timeout_ms, request.output_limit_bytes);
     let (input_tx, input_rx) = mpsc::channel(BUFFER_CHUNKS);
     let (output_tx, output_rx) = mpsc::channel(BUFFER_CHUNKS);
     let (exit_tx, exit_rx) = watch::channel(None);
@@ -320,13 +325,20 @@ pub(super) async fn finish<B: Backend>(
     result: Result<i64, ProcessTermination>,
 ) {
     if let Some(process) = state.process.take() {
-        let outcome = match result {
-            Ok(exit_code) => ProcessExit::Exited { exit_code },
-            Err(reason) => ProcessExit::Terminated {
-                reason,
-                cleanup: destroy_report(state).await,
-            },
+        let (label, kind, exit_code) = match &result {
+            Ok(exit_code) => ("exited", TerminationKind::Exited, Some(*exit_code)),
+            Err(reason) => (termination_label(reason), termination_kind(reason), None),
         };
+        let (outcome, ownership) = match result {
+            Ok(exit_code) => (ProcessExit::Exited { exit_code }, None),
+            Err(reason) => {
+                let cleanup = destroy_report(state).await;
+                let ownership = super::cleanup::ownership_label(cleanup.ownership);
+                (ProcessExit::Terminated { reason, cleanup }, Some(ownership))
+            }
+        };
+        state.metrics.record_process_ended(kind);
+        events::process_closed(label, exit_code, ownership);
         process.exit.send_replace(Some(outcome));
     }
 }
@@ -349,6 +361,7 @@ pub(super) fn destroyed(
     process: Option<ActiveProcess>,
     instance_id: Option<String>,
     result: &Result<(), SandboxError>,
+    metrics: &crate::observability::SandboxMetrics,
 ) {
     if let Some(process) = process {
         let cleanup = match result {
@@ -372,9 +385,32 @@ pub(super) fn destroyed(
                 detail: err.to_string(),
             },
         };
+        let ownership = super::cleanup::ownership_label(cleanup.ownership);
+        metrics.record_process_ended(TerminationKind::Cancelled);
+        events::process_closed("cancelled", None, Some(ownership));
         process.exit.send_replace(Some(ProcessExit::Terminated {
             reason: ProcessTermination::Cancelled,
             cleanup,
         }));
+    }
+}
+
+fn termination_label(reason: &ProcessTermination) -> &'static str {
+    match reason {
+        ProcessTermination::Cancelled => "cancelled",
+        ProcessTermination::TimedOut => "timed_out",
+        ProcessTermination::OutputLimit { .. } => "output_limit",
+        ProcessTermination::Transport { .. } => "transport",
+        ProcessTermination::WorkerFailed { .. } => "worker_failed",
+    }
+}
+
+fn termination_kind(reason: &ProcessTermination) -> TerminationKind {
+    match reason {
+        ProcessTermination::Cancelled => TerminationKind::Cancelled,
+        ProcessTermination::TimedOut => TerminationKind::TimedOut,
+        ProcessTermination::OutputLimit { .. } => TerminationKind::OutputLimit,
+        ProcessTermination::Transport { .. } => TerminationKind::Transport,
+        ProcessTermination::WorkerFailed { .. } => TerminationKind::WorkerFailed,
     }
 }

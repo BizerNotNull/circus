@@ -185,6 +185,10 @@ impl DockerBackend {
 // guarantee that the lifecycle worker's spawned future depends on.
 #[allow(clippy::manual_async_fn)]
 impl Backend for DockerBackend {
+    fn kind(&self) -> &'static str {
+        "docker"
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             pause_resume: true,
@@ -196,7 +200,8 @@ impl Backend for DockerBackend {
     fn prepare(&self) -> impl Future<Output = Result<(), PrepareError>> + Send {
         let image = self.config.image.clone();
         async move {
-            self.engine
+            let result = self
+                .engine
                 .prepare(&image, self.config.runtime.as_str())
                 .await
                 .map_err(|error| {
@@ -205,7 +210,14 @@ impl Backend for DockerBackend {
                     } else {
                         PrepareError::Engine(error)
                     }
-                })
+                });
+            let outcome = match &result {
+                Ok(()) => "ok",
+                Err(PrepareError::ImageUnavailable { .. }) => "image_unavailable",
+                Err(PrepareError::Engine(_)) => "engine_error",
+            };
+            crate::observability::events::backend_prepare_completed(outcome);
+            result
         }
     }
 

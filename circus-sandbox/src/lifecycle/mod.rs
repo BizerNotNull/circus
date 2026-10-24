@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 use crate::infrastructure::{
     Backend, CommonSpec, DockerBackend, DockerConfig, DockerConfigError, InstanceId, PrepareError,
 };
+use crate::observability::{OperationKind, OperationOutcome, SandboxMetrics, events};
 use crate::runtime::{BackendConfig, BackendConfigError, SandboxConfig};
 use crate::workspace::Workspace;
 
@@ -146,6 +147,58 @@ impl Sandbox {
         backend: BackendConfig,
         config: SandboxConfig,
     ) -> Result<Self, SandboxError> {
+        Self::create_with_metrics(backend, config, SandboxMetrics::disabled()).await
+    }
+
+    /// Same contract as [`create`](Self::create), with caller-owned counters
+    /// and structured tracing events.
+    ///
+    /// `metrics` is cloned into the lifecycle worker; clones share counters.
+    /// Pass [`SandboxMetrics::disabled`] for the no-op path used by
+    /// [`create`](Self::create). Creation success and failure are counted, and
+    /// a failed creation whose owned cleanup is still owed is reflected in
+    /// `create_cleanup_pending` until cleanup confirms completion. This method
+    /// does not install a tracing subscriber and exposes no health endpoint.
+    pub async fn create_with_metrics(
+        backend: BackendConfig,
+        config: SandboxConfig,
+        metrics: SandboxMetrics,
+    ) -> Result<Self, SandboxError> {
+        let backend_kind = match &backend {
+            BackendConfig::Docker(_) => "docker",
+        };
+        let span = events::create_span(backend_kind);
+        {
+            let _entered = span.enter();
+            events::create_started(backend_kind);
+        }
+        let result = Self::create_inner(backend, config, metrics.clone()).await;
+        {
+            let _entered = span.enter();
+            match &result {
+                Ok(_) => {
+                    metrics.record_create_ok();
+                    events::create_completed("ok", false, "none");
+                }
+                Err(err) => {
+                    metrics.record_create_failed();
+                    if let SandboxError::UnsupportedCapability { capability } = err {
+                        events::capability_unavailable(capability);
+                    }
+                    let cleanup_pending =
+                        matches!(err, SandboxError::CreationCleanupRequired { .. });
+                    events::create_completed("error", cleanup_pending, operations::error_kind(err));
+                }
+            }
+        }
+        result
+    }
+
+    async fn create_inner(
+        backend: BackendConfig,
+        config: SandboxConfig,
+        metrics: SandboxMetrics,
+    ) -> Result<Self, SandboxError> {
         let docker = backend_config(&backend)?;
         let spec = common_spec(&config);
         docker
@@ -154,14 +207,16 @@ impl Sandbox {
         let backend = DockerBackend::connect(docker)
             .await
             .map_err(|err| engine_err(*err))?;
-        Self::create_with_backend(backend, spec, config).await
+        Self::create_with_backend(backend, spec, config, metrics).await
     }
 
     async fn create_with_backend<B: Backend>(
         backend: B,
         spec: CommonSpec,
         config: SandboxConfig,
+        metrics: SandboxMetrics,
     ) -> Result<Self, SandboxError> {
+        events::backend_selected(backend.kind());
         require_capabilities(&backend)?;
         match backend.prepare().await {
             Ok(()) => {}
@@ -193,7 +248,9 @@ impl Sandbox {
             id: None,
             phase: SandboxPhase::Created,
             shutdown: shutdown.clone(),
+            metrics,
             create_unsettled: true,
+            creation_cleanup: false,
             process: None,
             cleanup: cleanup_tx,
         };
@@ -464,6 +521,41 @@ fn map_docker_config(err: DockerConfigError) -> BackendConfigError {
     }
 }
 
+/// Stable telemetry label for an operation result.
+fn outcome_label<T>(result: &Result<T, SandboxError>) -> &'static str {
+    match result {
+        Ok(_) => "ok",
+        Err(SandboxError::Cancelled { .. }) => "cancelled",
+        Err(SandboxError::TimedOut { .. }) => "timed_out",
+        Err(_) => "error",
+    }
+}
+
+/// Fixed metric outcome for an operation result.
+fn outcome<T>(result: &Result<T, SandboxError>) -> OperationOutcome {
+    match result {
+        Ok(_) => OperationOutcome::Ok,
+        Err(SandboxError::Cancelled { .. }) => OperationOutcome::Cancelled,
+        Err(SandboxError::TimedOut { .. }) => OperationOutcome::TimedOut,
+        Err(_) => OperationOutcome::Error,
+    }
+}
+
+/// Whether this result retains owned cleanup.
+fn cleanup_required<T>(result: &Result<T, SandboxError>) -> bool {
+    matches!(result, Err(SandboxError::CleanupRequired { .. }))
+        || matches!(result, Err(SandboxError::CreationCleanupRequired { .. }))
+}
+
+/// Records one operation outcome on the worker's caller-owned handle.
+fn record_operation<T>(
+    metrics: &SandboxMetrics,
+    kind: OperationKind,
+    result: &Result<T, SandboxError>,
+) {
+    metrics.record_operation(kind, outcome(result));
+}
+
 pub(super) struct State<B: Backend> {
     backend: B,
     spec: CommonSpec,
@@ -475,7 +567,10 @@ pub(super) struct State<B: Backend> {
     id: Option<InstanceId>,
     phase: SandboxPhase,
     shutdown: CancellationToken,
+    metrics: SandboxMetrics,
     create_unsettled: bool,
+    /// Telemetry-only marker: this worker is cleaning up a failed creation.
+    creation_cleanup: bool,
     /// At most one interactive process; lifecycle records its final outcome.
     process: Option<process::ActiveProcess>,
     cleanup: tokio::sync::watch::Sender<cleanup::Progress>,
@@ -635,6 +730,12 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
                 lifecycle_timeout,
                 SandboxOperation::Start
             );
+            events::transition_completed(
+                "start",
+                outcome_label(&result),
+                cleanup_required(&result),
+            );
+            record_operation(&state.metrics, OperationKind::Start, &result);
             let _ = reply.send(result);
         }
         Op::Pause(reply) => {
@@ -643,6 +744,12 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
                 lifecycle_timeout,
                 SandboxOperation::Pause
             );
+            events::transition_completed(
+                "pause",
+                outcome_label(&result),
+                cleanup_required(&result),
+            );
+            record_operation(&state.metrics, OperationKind::Pause, &result);
             let _ = reply.send(result);
         }
         Op::Resume(reply) => {
@@ -651,6 +758,12 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
                 lifecycle_timeout,
                 SandboxOperation::Resume
             );
+            events::transition_completed(
+                "resume",
+                outcome_label(&result),
+                cleanup_required(&result),
+            );
+            record_operation(&state.metrics, OperationKind::Resume, &result);
             let _ = reply.send(result);
         }
         // Never cancel cleanup itself: a lost caller cannot relinquish ownership.
@@ -673,6 +786,7 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
                     },
                 }))
             };
+            record_operation(&state.metrics, OperationKind::Destroy, &result);
             let _ = reply.send(result);
         }
         Op::Write { path, bytes, reply } => {
@@ -681,6 +795,7 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
                 file_timeout,
                 SandboxOperation::WriteFile
             );
+            record_operation(&state.metrics, OperationKind::WriteFile, &result);
             let _ = reply.send(result);
         }
         Op::Read { path, reply } => {
@@ -689,6 +804,7 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
                 file_timeout,
                 SandboxOperation::ReadFile
             );
+            record_operation(&state.metrics, OperationKind::ReadFile, &result);
             let _ = reply.send(result);
         }
         Op::Mkdir { path, reply } => {
@@ -697,6 +813,7 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
                 file_timeout,
                 SandboxOperation::CreateDirAll
             );
+            record_operation(&state.metrics, OperationKind::CreateDirAll, &result);
             let _ = reply.send(result);
         }
         Op::Unlink { path, reply } => {
@@ -705,17 +822,61 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
                 file_timeout,
                 SandboxOperation::RemoveFile
             );
+            record_operation(&state.metrics, OperationKind::RemoveFile, &result);
             let _ = reply.send(result);
         }
         Op::Exec { request, reply } => {
             // The configured command timeout is an operator ceiling; a request
             // may ask for a shorter deadline but never a longer one.
             let timeout = request.timeout.min(state.config.command_timeout());
+            let facts = events::command_facts(&request.argv, 0);
+            let started = std::time::Instant::now();
             let result = run!(
                 operations::exec(state, request),
                 timeout,
                 SandboxOperation::Exec
             );
+            let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            match &result {
+                Ok(output) => events::exec_completed(
+                    &facts,
+                    duration_ms,
+                    "ok",
+                    Some(output.exit_code),
+                    output.stdout.len(),
+                    output.stderr.len(),
+                    false,
+                    None,
+                ),
+                Err(SandboxError::OutputLimit { phase, .. }) => {
+                    let stream = match phase {
+                        OutputPhase::Stdout => "stdout",
+                        OutputPhase::Stderr => "stderr",
+                        OutputPhase::NotStarted => "not_started",
+                    };
+                    events::exec_completed(
+                        &facts,
+                        duration_ms,
+                        "error",
+                        None,
+                        0,
+                        0,
+                        true,
+                        Some(stream),
+                    );
+                }
+                Err(_) => events::exec_completed(
+                    &facts,
+                    duration_ms,
+                    outcome_label(&result),
+                    None,
+                    0,
+                    0,
+                    false,
+                    None,
+                ),
+            }
+            record_operation(&state.metrics, OperationKind::Exec, &result);
             let _ = reply.send(result);
         }
         // Attachment allocates an exec, so a deadline or cancellation destroys
@@ -726,10 +887,12 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
                 file_timeout,
                 SandboxOperation::SpawnProcess
             );
+            record_operation(&state.metrics, OperationKind::SpawnProcess, &result);
             let _ = reply.send(result);
         }
         Op::Status(reply) => {
             let result = observe!(operations::status(state), lifecycle_timeout);
+            record_operation(&state.metrics, OperationKind::Status, &result);
             let _ = reply.send(result);
         }
         Op::CaptureSnapshot {
@@ -738,10 +901,24 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
             reply,
         } => {
             let result = snapshot::capture(state, budget, max_manifest_bytes, &cancel).await;
+            record_operation(
+                &state.metrics,
+                OperationKind::CaptureWorkspaceSnapshot,
+                &result,
+            );
+            state.metrics.record_snapshot_capture(result.is_ok());
+            events::snapshot_capture_completed(outcome_label(&result), cleanup_required(&result));
             let _ = reply.send(result);
         }
         Op::RestoreSnapshot { snapshot, reply } => {
             let result = snapshot::restore(state, snapshot, &cancel).await;
+            record_operation(
+                &state.metrics,
+                OperationKind::RestoreWorkspaceSnapshot,
+                &result,
+            );
+            state.metrics.record_snapshot_restore(result.is_ok());
+            events::snapshot_restore_completed(outcome_label(&result), cleanup_required(&result));
             let _ = reply.send(result);
         }
     }
@@ -757,7 +934,7 @@ impl Sandbox {
         config: SandboxConfig,
     ) -> Result<Self, SandboxError> {
         let spec = common_spec(&config);
-        Self::create_with_backend(backend, spec, config).await
+        Self::create_with_backend(backend, spec, config, SandboxMetrics::disabled()).await
     }
 }
 

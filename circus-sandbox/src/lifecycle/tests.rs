@@ -85,6 +85,7 @@ use crate::infrastructure::{
     PolicyMismatch, PrepareError, ProcessSpec, Recovered, UploadEntry, UploadSource,
     WorkspaceEntry,
 };
+use crate::observability::SandboxMetrics;
 use crate::runtime::{IoLimits, IsolationConfig, ResourceLimits, SandboxConfig};
 use crate::workspace::{Workspace, WorkspaceError};
 
@@ -180,6 +181,10 @@ impl FakeBackend {
 // The production trait returns explicit `impl Future + Send` bounds.
 #[allow(clippy::manual_async_fn)]
 impl Backend for FakeBackend {
+    fn kind(&self) -> &'static str {
+        "fake"
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             pause_resume: true,
@@ -417,7 +422,9 @@ fn test_state(backend: FakeBackend) -> State<FakeBackend> {
         id: Some(InstanceId::new("fake-instance".to_string())),
         phase: SandboxPhase::Created,
         shutdown: CancellationToken::new(),
+        metrics: SandboxMetrics::disabled(),
         create_unsettled: false,
+        creation_cleanup: false,
         process: None,
         cleanup,
     }
@@ -519,9 +526,10 @@ async fn concurrent_destroy_calls_never_report_false_success() {
     }
     backend.push_recovery(Recovered::Removed);
     let (config, spec) = sandbox_config_and_spec();
-    let sandbox = Sandbox::create_with_backend(backend.clone(), spec, config)
-        .await
-        .expect("fake creation");
+    let sandbox =
+        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
+            .await
+            .expect("fake creation");
 
     let (first, second) = tokio::join!(sandbox.destroy(), sandbox.destroy());
     for result in [first, second] {
@@ -553,9 +561,10 @@ async fn aggregate_output_limit_reports_stream_and_reclaims_instance() {
     }));
     backend.push_recovery(Recovered::Removed);
     let (config, spec) = sandbox_config_and_spec();
-    let sandbox = Sandbox::create_with_backend(backend.clone(), spec, config)
-        .await
-        .expect("fake creation");
+    let sandbox =
+        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
+            .await
+            .expect("fake creation");
     sandbox.start().await.expect("fake start");
 
     let error = sandbox
@@ -586,9 +595,10 @@ async fn aggregate_output_limit_reports_stream_and_reclaims_instance() {
 async fn request_over_configured_output_bound_is_not_started_or_destroyed() {
     let backend = FakeBackend::new();
     let (config, spec) = sandbox_config_and_spec();
-    let sandbox = Sandbox::create_with_backend(backend.clone(), spec, config)
-        .await
-        .expect("fake creation");
+    let sandbox =
+        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
+            .await
+            .expect("fake creation");
     sandbox.start().await.expect("fake start");
 
     match sandbox
@@ -619,9 +629,10 @@ async fn status_timeout_preserves_phase_and_ownership() {
     let backend = FakeBackend::new();
     backend.sleep_next_report();
     let (config, spec) = sandbox_config_and_spec();
-    let sandbox = Sandbox::create_with_backend(backend.clone(), spec, config)
-        .await
-        .expect("fake creation");
+    let sandbox =
+        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
+            .await
+            .expect("fake creation");
     sandbox.start().await.expect("fake start");
 
     let error = tokio::time::timeout(Duration::from_secs(2), sandbox.status())
@@ -665,9 +676,10 @@ async fn policy_mismatch_fails_creation_and_destroys_the_instance() {
     backend.push_recovery(Recovered::Removed);
     let (config, spec) = sandbox_config_and_spec();
 
-    let error = Sandbox::create_with_backend(backend.clone(), spec, config)
-        .await
-        .expect_err("mismatched policy must not create a sandbox");
+    let error =
+        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
+            .await
+            .expect_err("mismatched policy must not create a sandbox");
     match error {
         SandboxError::PolicyMismatch {
             field,
@@ -701,9 +713,10 @@ async fn policy_mismatch_retains_cleanup_ownership_when_removal_is_unconfirmed()
     backend.push_recovery(Recovered::Removed);
     let (config, spec) = sandbox_config_and_spec();
 
-    let error = Sandbox::create_with_backend(backend.clone(), spec, config)
-        .await
-        .expect_err("mismatched policy must not create a sandbox");
+    let error =
+        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
+            .await
+            .expect_err("mismatched policy must not create a sandbox");
     match error {
         SandboxError::CreationCleanupRequired {
             instance_id,
@@ -740,9 +753,10 @@ async fn cancelled_cleanup_wait_does_not_stop_owned_retry() {
     backend.push_recovery(Recovered::Removed);
     let (config, spec) = sandbox_config_and_spec();
 
-    let error = Sandbox::create_with_backend(backend.clone(), spec, config)
-        .await
-        .expect_err("mismatched policy must not create a sandbox");
+    let error =
+        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
+            .await
+            .expect_err("mismatched policy must not create a sandbox");
     let SandboxError::CreationCleanupRequired { cleanup, .. } = error else {
         panic!("expected a creation cleanup receipt");
     };
@@ -796,7 +810,9 @@ fn state_with_staging(
         id: Some(InstanceId::new("fake-instance".to_string())),
         phase: SandboxPhase::Created,
         shutdown: CancellationToken::new(),
+        metrics: SandboxMetrics::disabled(),
         create_unsettled: false,
+        creation_cleanup: false,
         cleanup,
         process: None,
     }
@@ -940,9 +956,10 @@ async fn timed_out_start_transfer_never_reports_running_and_retains_cleanup() {
     let backend = FakeBackend::new();
     backend.slow_next_upload();
     let (config, spec) = sandbox_config_and_spec();
-    let sandbox = Sandbox::create_with_backend(backend.clone(), spec, config)
-        .await
-        .expect("fake creation succeeds");
+    let sandbox =
+        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
+            .await
+            .expect("fake creation succeeds");
     sandbox
         .write_file("slow", b"payload")
         .await
