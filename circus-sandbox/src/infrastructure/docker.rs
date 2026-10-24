@@ -138,9 +138,6 @@ impl DockerConfig {
         Ok(())
     }
 
-    pub(crate) fn image(&self) -> &str {
-        &self.image
-    }
 
 }
 
