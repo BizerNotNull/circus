@@ -1,0 +1,29 @@
+name: Sandbox Docker probe
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Paused tmpfs archive visibility
+        run: |
+          set -x
+          docker run -d --name probe --user 65534:65534 \
+            --tmpfs /workspace:rw,nosuid,nodev,uid=65534,gid=65534,mode=0755,size=8388608 \
+            python:3.12-slim sleep 600
+          docker exec probe python3 -c "from pathlib import Path; Path('/workspace/data.bin').write_bytes(b'x'*32); Path('/workspace/empty/nested').mkdir(parents=True)"
+          echo '--- running archive ---'
+          docker cp probe:/workspace - | tar -tvf -
+          echo '--- pause ---'
+          docker pause probe
+          echo '--- paused archive ---'
+          docker cp probe:/workspace - | tar -tvf -
+          docker unpause probe
+          docker rm -f probe
