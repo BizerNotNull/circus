@@ -10,6 +10,7 @@
 - Workspace 实现与 Rust 门禁的交付记录见 [PR #5](https://github.com/BizerNotNull/circus/pull/5)。当前检出已有真实 Rust 1.99.1、edition 2024 crate、同步文件 API、example、测试、Apache-2.0 许可证和 cargo-deny 策略；该 PR 是合并状态与 CI 结果的权威入口，不在本文预填结果。
 - 安全文档与最小权限跟进见 [PR #7](https://github.com/BizerNotNull/circus/pull/7)，以该 PR 的实际合并状态和证据为准。安全扫描约定统一见 [安全说明](../../.github/sandbox-security.md)。
 - `main` 基准提交 `1b4c005` 已含本地 Linux Docker + runc 的进程内创建、启动、执行、文件、暂停、恢复、销毁路径，以及显式配置和资源值校验；公开类型不泄露 Bollard，但入口仍是 Docker 专用，不等于后端中立 API 已完成。范围以 [Docker + runc 文档](docker-linux-runc.md) 和源码为准。
+- 命令/暂存类型化错误 C01 已由 [PR #18](https://github.com/BizerNotNull/circus/pull/18) 合并到 `main`（`73bc190`）；验收和运行证据见该 PR。后续矩阵中的 C01 保留为契约与验收索引，不再作为待实现前置项。
 - 已有 `Workspace::capture_code_snapshot`、`CodeSnapshot`、预算与新工作区恢复，是进程内存中的代码文件快照，不是容器/VM 快照、持久化存储或池。文件库、资源请求校验也不等于总配额执行或宿主隔离。
 - Kubernetes、containerd、gVisor、Kata、Firecracker、OCI 环境准备、Git 工作区、运行时快照、预启动、池、HTTP/认证/OpenAPI 和运行指标仍待实现。Docker 现有路径还需要下文审计正确性切片；局部测试通过不能关闭这些项。
 - 本地 Docker 测试、工具安装或宿主资源可达只证明各自观察，不能证明七领域交付完成。具体命令、环境、提交和运行结果保留在产生证据的 PR/报告，不为本计划编辑预填 CI 或合并结果。
