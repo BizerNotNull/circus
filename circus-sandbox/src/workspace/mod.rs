@@ -673,5 +673,6 @@ pub use code_source::{CodeCopyError, CodeSource};
 pub use git::{GitCheckout, GitCleanup, GitError, GitOptions, GitRevision, GitSource, GitWorktree};
 #[doc(inline)]
 pub use snapshot::{CodeSnapshot, SnapshotBudget, SnapshotError};
+pub(crate) use snapshot::{SnapshotBody, SnapshotEntry};
 #[cfg(test)]
 mod tests;

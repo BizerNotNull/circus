@@ -1,12 +1,17 @@
 //! Serialized workspace-only capture and staging replacement.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::infrastructure::Backend;
-use crate::workspace::{CodeSnapshot, SnapshotBudget, SnapshotError};
+use crate::infrastructure::{
+    Backend, EngineError, EngineErrorKind, WorkspaceEntry, WorkspaceEntryKind,
+};
+use crate::workspace::{
+    CodeSnapshot, SnapshotBody, SnapshotBudget, SnapshotEntry, SnapshotError, WorkspaceError,
+};
 
 use super::operations::{
     cleanup_engine_error, destroy_report, need, pause, phase_err, required_id, resume, spawn_block,
@@ -17,22 +22,25 @@ impl Sandbox {
     /// Captures regular workspace files and directories, not processes or memory.
     ///
     /// In `Created`, captures host staging. In `Running`, the lifecycle worker
-    /// pauses the guest, downloads only the configured workspace archive through
-    /// the backend's archive operation, validates it, and resumes before
-    /// returning (also on archive validation failure). An already `Paused`
-    /// guest stays paused. Other phases return [`SandboxError::InvalidPhase`].
+    /// pauses the guest, enumerates the configured workspace through the
+    /// confined guest helper, checks the budgets, reads each file, and resumes
+    /// before returning (also on an ordinary validation or budget failure). An
+    /// already `Paused` guest stays paused. Other phases return
+    /// [`SandboxError::InvalidPhase`].
     ///
     /// `budget` bounds retained file payload and entries. `max_archive_bytes`
-    /// must be positive and separately bounds archive transport, including tar
-    /// overhead. A zero archive bound fails before queueing. All operations are
-    /// serialized with other sandbox mutations. The configured file timeout
-    /// covers pause, download, parsing and resume together. Cancellation or
-    /// timeout uses whole-instance cleanup; failed cleanup retains ownership.
-    /// Backend pause, download or resume failures also trigger owned cleanup.
-    /// Archive/domain failures are matchable as [`SandboxError::Snapshot`],
-    /// including any temporary workspace whose explicit cleanup failed.
-    /// A deadline initiates cancellation, not a bound on cleanup completion:
-    /// already-started blocking filesystem work is drained before cleanup.
+    /// must be positive and separately bounds the transport encoding of the
+    /// manifest that enumerates the workspace; a zero bound fails before
+    /// queueing. Payload bytes are bounded separately: the configured per-file
+    /// limit caps every read and `budget` caps the retained total. All
+    /// operations are serialized with other sandbox mutations. The configured
+    /// file timeout covers pause, enumeration, payload reads and resume
+    /// together. Cancellation or timeout uses whole-instance cleanup; failed
+    /// cleanup retains ownership. Backend pause, transport or resume failures
+    /// also trigger owned cleanup. Domain failures — unsafe guest nodes,
+    /// non-portable names, and budget violations — are matchable as
+    /// [`SandboxError::Snapshot`] and leave a resumed sandbox usable.
+    /// A deadline initiates cancellation, not a bound on cleanup completion.
     /// [`SandboxError::SnapshotInterrupted`] preserves both an interruption
     /// and any snapshot failure, including owned temporary cleanup failures.
     pub async fn capture_workspace_snapshot(
@@ -45,7 +53,7 @@ impl Sandbox {
         }
         self.call(|reply| Op::CaptureSnapshot {
             budget,
-            max_archive_bytes,
+            max_manifest_bytes: max_archive_bytes,
             reply,
         })
         .await?
@@ -155,7 +163,7 @@ async fn interrupted<B: Backend, T>(
 pub(super) async fn capture<B: Backend>(
     state: &mut State<B>,
     budget: SnapshotBudget,
-    max_archive_bytes: u64,
+    max_manifest_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<Arc<CodeSnapshot>, SandboxError> {
     let deadline = Deadline::new(state, cancel);
@@ -200,16 +208,27 @@ pub(super) async fn capture<B: Backend>(
     }
     let id = required_id(state)?;
     let path = state.config.isolation().workspace_path().to_owned();
-    let archive = match deadline
-        .network(
-            state
-                .backend
-                .download_workspace_archive(&id, &path, max_archive_bytes),
-        )
+    let user = state.user.clone();
+    let max_file = state.config.limits().max_file_bytes();
+    let entries = match deadline
+        .network(state.backend.list_workspace(
+            &id,
+            &user,
+            &path,
+            max_manifest_bytes,
+            budget.max_entries(),
+        ))
         .await
     {
-        Ok(Ok(archive)) => archive,
-        Ok(Err(err)) => return cleanup_engine_error(state, err).await,
+        Ok(Ok(entries)) => entries,
+        Ok(Err(err)) => {
+            return match manifest_rejection(&err, budget) {
+                Some(snapshot) => {
+                    settle_capture(state, resume_after, &deadline, Err(snapshot)).await
+                }
+                None => cleanup_engine_error(state, err).await,
+            };
+        }
         Err(cancelled) => {
             return interrupted(
                 state,
@@ -220,31 +239,88 @@ pub(super) async fn capture<B: Backend>(
             .await;
         }
     };
-    let root = path.rsplit('/').next().unwrap_or_default().to_owned();
-    let max_file = state.config.limits().max_file_bytes();
-    let (result, stopped) = deadline
-        .blocking(move || CodeSnapshot::from_workspace_archive(archive, &root, max_file, budget))
-        .await;
-    if let Some(cancelled) = stopped {
-        return interrupted(
-            state,
-            cancelled,
-            SandboxOperation::CaptureWorkspaceSnapshot,
-            result.ok().and_then(Result::err),
-        )
-        .await;
+    // Declared metadata is checked before any payload byte is transferred, in
+    // this order: entry count, per-file cap, aggregate bytes.
+    if let Err(snapshot) = check_budgets(&entries, max_file, budget) {
+        return settle_capture(state, resume_after, &deadline, Err(snapshot)).await;
     }
-    // Keep a domain error owned until resume has succeeded or failed.
+    let mut captured = Vec::new();
+    for entry in entries {
+        let captured_path = PathBuf::from(entry.path());
+        let body = match entry.kind() {
+            WorkspaceEntryKind::Directory => SnapshotBody::Directory,
+            WorkspaceEntryKind::File => {
+                let bytes = match deadline
+                    .network(
+                        state
+                            .backend
+                            .download_file(&id, &user, &path, entry.path(), max_file),
+                    )
+                    .await
+                {
+                    Ok(Ok(bytes)) => bytes,
+                    Ok(Err(err)) => {
+                        return match payload_rejection(&err, max_file) {
+                            Some(snapshot) => {
+                                settle_capture(state, resume_after, &deadline, Err(snapshot)).await
+                            }
+                            None => cleanup_engine_error(state, err).await,
+                        };
+                    }
+                    Err(cancelled) => {
+                        return interrupted(
+                            state,
+                            cancelled,
+                            SandboxOperation::CaptureWorkspaceSnapshot,
+                            None,
+                        )
+                        .await;
+                    }
+                };
+                if u64::try_from(bytes.len()).ok() != Some(entry.size()) {
+                    let snapshot = SnapshotError::InvalidArchive {
+                        reason: format!(
+                            "guest file {} did not match its listed size",
+                            entry.path()
+                        ),
+                    };
+                    return settle_capture(state, resume_after, &deadline, Err(snapshot)).await;
+                }
+                SnapshotBody::File(bytes)
+            }
+        };
+        captured.push(SnapshotEntry {
+            path: captured_path,
+            body,
+        });
+    }
+    let snapshot = CodeSnapshot::from_entries(max_file, captured);
+    settle_capture(state, resume_after, &deadline, snapshot)
+        .await
+        .map(Arc::new)
+}
+
+/// Resumes a source we paused, then reports `result`.
+///
+/// A domain failure never destroys the instance: the workspace is readable but
+/// not snapshottable. A resume failure keeps both the failure and the cause
+/// visible, as the previous capture path did.
+async fn settle_capture<B: Backend, T>(
+    state: &mut State<B>,
+    resume_after: bool,
+    deadline: &Deadline,
+    result: Result<T, SnapshotError>,
+) -> Result<T, SandboxError> {
     if resume_after {
         match deadline.network(resume(state)).await {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
                 return match result {
-                    Ok(Err(snapshot)) => Err(SandboxError::SnapshotInterrupted {
+                    Err(snapshot) => Err(SandboxError::SnapshotInterrupted {
                         interruption: Box::new(err),
                         snapshot: Box::new(snapshot),
                     }),
-                    _ => Err(err),
+                    Ok(_) => Err(err),
                 };
             }
             Err(cancelled) => {
@@ -252,13 +328,108 @@ pub(super) async fn capture<B: Backend>(
                     state,
                     cancelled,
                     SandboxOperation::CaptureWorkspaceSnapshot,
-                    result.ok().and_then(Result::err),
+                    result.err(),
                 )
                 .await;
             }
         }
     }
-    Ok(Arc::new(result??))
+    result.map_err(SandboxError::Snapshot)
+}
+
+/// Checks declared manifest metadata against the capture budgets.
+///
+/// Entry count is checked first, then each file's size against the workspace
+/// per-file cap, then the running total against the capture budget. Nothing is
+/// read, so an over-budget workspace never transfers its payload.
+fn check_budgets(
+    entries: &[WorkspaceEntry],
+    max_file: usize,
+    budget: SnapshotBudget,
+) -> Result<(), SnapshotError> {
+    let mut count = 0usize;
+    let mut total = 0usize;
+    for entry in entries {
+        count = count.saturating_add(1);
+        if count > budget.max_entries() {
+            return Err(SnapshotError::EntryLimit {
+                limit: budget.max_entries(),
+                actual: count,
+            });
+        }
+        if entry.kind() != WorkspaceEntryKind::File {
+            continue;
+        }
+        let size = usize::try_from(entry.size()).unwrap_or(usize::MAX);
+        if size > max_file {
+            return Err(SnapshotError::Workspace(WorkspaceError::LimitExceeded {
+                limit: max_file,
+                actual: size,
+            }));
+        }
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| SnapshotError::ByteLimit {
+                limit: budget.max_total_bytes(),
+                actual: usize::MAX,
+            })?;
+        if total > budget.max_total_bytes() {
+            return Err(SnapshotError::ByteLimit {
+                limit: budget.max_total_bytes(),
+                actual: total,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Guest listing exits that describe workspace content rather than transport.
+///
+/// These are snapshot-domain failures: an unsafe node, an unportable name, or
+/// an entry count beyond the caller's bound. The source is resumed and stays
+/// owned. The manifest byte bound and engine I/O failures keep the whole-
+/// instance cleanup path because they are transport failures.
+fn manifest_rejection(err: &EngineError, budget: SnapshotBudget) -> Option<SnapshotError> {
+    match err.kind {
+        EngineErrorKind::EntryLimit => Some(SnapshotError::EntryLimit {
+            limit: budget.max_entries(),
+            // The helper stops at the first entry beyond the bound.
+            actual: budget.max_entries().saturating_add(1),
+        }),
+        EngineErrorKind::UnsafeFile | EngineErrorKind::InvalidPath | EngineErrorKind::Protocol => {
+            Some(SnapshotError::InvalidArchive {
+                reason: err.message.clone(),
+            })
+        }
+        EngineErrorKind::Limit
+        | EngineErrorKind::FileIo
+        | EngineErrorKind::NotFound
+        | EngineErrorKind::PermissionDenied
+        | EngineErrorKind::Other => None,
+    }
+}
+
+/// Guest payload reads that describe workspace content rather than transport.
+///
+/// A payload that outgrew the per-file cap is reported with the same typed
+/// file-limit shape as an ordinary bounded read; an unreadable or replaced node
+/// is a capture-domain failure. Both resume the paused source.
+fn payload_rejection(err: &EngineError, max_file: usize) -> Option<SnapshotError> {
+    match err.kind {
+        EngineErrorKind::Limit => Some(SnapshotError::Workspace(WorkspaceError::LimitExceeded {
+            limit: max_file,
+            actual: max_file.saturating_add(1),
+        })),
+        EngineErrorKind::UnsafeFile
+        | EngineErrorKind::InvalidPath
+        | EngineErrorKind::Protocol
+        | EngineErrorKind::NotFound
+        | EngineErrorKind::PermissionDenied
+        | EngineErrorKind::FileIo => Some(SnapshotError::InvalidArchive {
+            reason: err.message.clone(),
+        }),
+        EngineErrorKind::EntryLimit | EngineErrorKind::Other => None,
+    }
 }
 
 pub(super) async fn restore<B: Backend>(

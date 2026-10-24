@@ -111,7 +111,7 @@ Call `GitCheckout::cleanup().await` for observable, idempotent removal. `GitErro
 - `runtime::SandboxConfig::new(limits, isolation, io_limits)` 只承载所有后端共有的要求：`ResourceLimits` 请求、`IsolationConfig` 隔离要求（no-new-privileges、drop all capabilities、read-only root、disabled network 必须全部为真）和 `IoLimits`。它不包含 endpoint、image 或 runtime。
 - `runtime::BackendConfig` 是后端选择枚举，当前只有一个已实现变体 `BackendConfig::Docker(DockerBackendConfig)`。该描述包含显式本地 endpoint、已存在的 image reference 和 OCI runtime 名称；构造它不连接 Docker。
 - Docker endpoint/image/runtime 的解析、仅 runc、以及 Docker 特有的 PID 下限等校验都在私有 `infrastructure::DockerConfig` 中完成。`Sandbox::create` 在分配任何容器之前返回 `SandboxError::BackendConfig(BackendConfigError)`；本地镜像不存在时返回 `SandboxError::BackendImageUnavailable { image }`；其他后端失败是 `SandboxError::Backend { message }`，不泄露 SDK 类型。真实 Engine 的 restrict/limit 结果由 create 时的 inspect 校验，不匹配会清理已创建容器，而不是降级。
-- `Sandbox::create` 还会在连接前检查后端是否声明支持 pause/resume、guest 文件传输和 workspace archive 捕获；不支持时返回 `SandboxError::UnsupportedCapability`。这些检查不表示其他后端已实现。
+- `Sandbox::create` 还会在连接前检查后端是否声明支持 pause/resume、guest 文件传输和 workspace 快照捕获；不支持时返回 `SandboxError::UnsupportedCapability`。这些检查不表示其他后端已实现。
 
 `SandboxStatus` 只报告当前 phase、`instance_id: Option<String>` 和 `enforcement: Option<EnforcementReport>`。`EnforcementReport` 的每个字段都是 inspect 到的证据，类型为 `Option`；`None` 表示后端没有报告该项。请求值不会复制成“已强制”的值。
 
@@ -291,8 +291,8 @@ npm --prefix circus-sandbox/qa run architecture
 
 ### 未发布：Docker 工作区文件快照
 
-- 新增 `capture_workspace_snapshot` 和 `restore_workspace_snapshot`：使用 Docker archive API 捕获运行中 tmpfs 的普通文件/目录，并替换新建 sandbox 的启动暂存区；复用 `Arc<CodeSnapshot>`，不复制队列中的快照载荷。
-- 运行态捕获临时暂停后恢复，已暂停的 sandbox 保持暂停；独立限制 archive 传输、文件载荷与条目数量，恢复使用目标配置限制。清理失败保留所有权，完整语义见[后端文档](docs/docker-linux-runc.md)。
+- 新增 `capture_workspace_snapshot` 和 `restore_workspace_snapshot`：通过受限 guest helper 枚举运行中 tmpfs 的普通文件/目录（每项逐文件读取），并替换新建 sandbox 的启动暂存区；复用 `Arc<CodeSnapshot>`，不复制队列中的快照载荷。Docker archive API 对 `--tmpfs` 只返回挂载点本身，因此不能用于捕获。
+- 运行态捕获临时暂停后恢复，已暂停的 sandbox 保持暂停；独立限制清单传输、文件载荷与条目数量，预算按条目数、单文件上限、总字节的顺序在读取任何文件前检查；不安全节点与非可移植名以类型化快照错误失败并保留可用 sandbox。恢复使用目标配置限制。清理失败保留所有权，完整语义见[后端文档](docs/docker-linux-runc.md)。
 - 不代表进程、内存、VM checkpoint 或 Docker commit，不声明本次改动已经通过真实 Docker 验证。
 
 ### 未发布：显式授权的代码副本与固定提交 Git 检出
