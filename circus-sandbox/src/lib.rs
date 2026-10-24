@@ -5,15 +5,15 @@
 //! commands in a Linux container through an explicit local Docker endpoint.
 //! Public types do not expose the Docker SDK.
 //!
-//! Docker workspace snapshots capture regular files and directories, including
-//! running tmpfs writes, into an in-process [`CodeSnapshot`]. Restore replaces
-//! a newly created sandbox's staging for its next start. This is not process,
-//! memory, VM, or Docker-commit checkpointing.
+//! [`CodeSource`] copies an explicitly authorized source directory into a fresh
+//! owned workspace. [`CodeSnapshot`] captures workspace contents in memory;
+//! Docker snapshots capture and restore tmpfs workspace files, including running
+//! writes, but are not process, memory, VM, or Docker-commit checkpoints.
 //!
-//! This is not a Kubernetes, gVisor, Kata, or Firecracker backend. Snapshots
-//! contain payload files, not process memory. The bounded Docker pool prestarts
-//! fresh single-use containers; it never resets dirty leases. Git, environment
-//! resolution and HTTP remain unimplemented.
+//! The bounded Docker pool prestarts fresh single-use containers and never
+//! resets dirty leases. [`GitCheckout`] prepares a fixed commit with a controlled
+//! host Git process. Not implemented: Kubernetes, gVisor, Kata, Firecracker,
+//! OCI environment resolution/pull, and HTTP.
 //!
 //! # Blocking
 //!
@@ -66,7 +66,8 @@ pub use api::{
 };
 #[doc(inline)]
 pub use workspace::{
-    CodeSnapshot, PathRejectReason, SnapshotBudget, SnapshotError, Workspace, WorkspaceError,
+    CodeCopyError, CodeSnapshot, CodeSource, GitCheckout, GitCleanup, GitError, GitOptions, GitRevision,
+    GitSource, PathRejectReason, SnapshotBudget, SnapshotError, Workspace, WorkspaceError,
 };
 
 #[doc(inline)]

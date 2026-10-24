@@ -7,6 +7,9 @@
 已实现：
 
 - `Workspace` 同步 API：`new`、`write_file`、`read_file`、`create_dir_all`、`remove_file`、`cleanup`。方法会阻塞调用线程。
+- `CodeSource::open` 只接受可信库调用方显式授权的源目录读取 grant；路径不是不可信租户请求的授权凭证。根打开遵循宿主路径解析，之后子项访问通过只读 cap-std 目录能力约束，不暴露源根路径。`copy_to_workspace(max_file_bytes, SnapshotBudget)` 逐文件复制到新建的自有 `Workspace`，源不被修改；不是接管或挂载宿主目录，也不改变 `Workspace::new` 的边界。
+- 复制预算仅约束本次内容字节和文件/目录条目（根不计、空目录和零字节文件计入），精确等于上限允许；不是后续写入配额。拒绝源子项链接、非普通节点和不可移植名称，不按不可信 metadata 分配整个源树。`CodeCopyError` 清理失败分支保留部分工作区所有权以便重试。同步复制不保证源被外部修改时的一致快照或崩溃原子性；没有 Git metadata 特殊策略或隐式凭据共享。
+- 既有 `CodeSnapshot` 是 `Workspace` 到进程内的内容捕获与新工作区恢复；不是外部源复制、进程 checkpoint、持久化快照或 Docker/pool 能力。不得重复实现或将其改名为外部代码副本。
 - 临时工作区由 tempfile 新建，不接受宿主目录，公开 API 不暴露工作区根路径。
 - 跨平台拒绝空路径、绝对路径、`..`、Windows 盘符/UNC 前缀和反斜杠；通过后的访问走 cap-std，防止符号链接逃逸和基于路径字符串的 TOCTOU。
 - 读写使用同一个 `max_file_bytes`。它是单个文件的上限：`new` 拒绝 `0` 和 `usize::MAX`，以便读取 `limit + 1` 时不溢出，也不按该上限预分配。它不是工作区总字节配额、文件数配额或宿主磁盘配额，当前也没有总配额 API。写满临时目录是宿主磁盘耗尽，不是 `LimitExceeded`。不要把这个参数写成沙箱配额，也不要在本 crate 增加总配额 API。后续真实进程或容器后端必须显式限制资源。
@@ -18,7 +21,11 @@
 - `runtime::ResourceLimits` / `ResourceLimitsError` 是后端中立的资源值模型，无 `Default`。内存/工作区为正字节数且不超过 `i64::MAX`，CPU 为正 milli-CPU（`1000` 等于一个 CPU），进程数为正；工作区不超过内存，单文件上限不超过工作区。单文件上限为 `1..usize::MAX`，拒绝 `0` 和 `usize::MAX`，与 `Workspace::new` 一致。标量错误先于关联错误。校验不提供聚合准入/预留、内核强制或隔离，不附加宿主容量或 Docker 专用约束。
 - `Workspace::capture_code_snapshot` 使用字节/条目预算捕获普通文件和目录，拒绝符号链接与特殊节点；`CodeSnapshot::restore` 创建独立工作区。这是进程内存中的有界代码快照，进程退出后不持久存在，不是容器/VM 文件系统、进程或客户机内存检查点。
 
+<<<<<<< HEAD
 未实现，不得写成现有能力：Kubernetes、containerd、HTTP/RPC、Git clone/worktree、沙箱池、容器/VM 运行时快照、工作区总配额执行、宿主磁盘配额、Paseo 接入。已有内存代码快照不代表运行时快照完成。当前 Docker slice 的范围和限制见 [Linux Docker + runc](docs/docker-linux-runc.md) 及 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。不修改 `../circus-paseo/`。
+=======
+未实现，不得写成现有能力：Kubernetes、containerd、HTTP/RPC、Git clone/worktree、沙箱池、进程/容器快照、工作区总配额执行、宿主磁盘配额、Paseo 接入。`CodeSource` 的普通代码副本和 `CodeSnapshot` 的进程内内容快照不推断这些能力。当前 Docker slice 的范围和限制见 [Linux Docker + runc](docs/docker-linux-runc.md) 及 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。不修改 `../circus-paseo/`。
+>>>>>>> feat/git-code-workspace
 
 用户说明见 [README.md](README.md)，工程命令与门禁边界见 [docs/engineering.md](docs/engineering.md)，完整目标及交付记录入口见 [docs/delivery-plan.md](docs/delivery-plan.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。当前检出已有 Workspace crate、许可证策略、元数据/质量/安全/Rust 工作流，但开发约定和工作流存在仍然不是“全部领域已交付”或检查已通过。
 
@@ -35,7 +42,11 @@
 | `src/infrastructure/` | Docker、Kubernetes、containerd 等部署与调度适配；负责资源分配，不承担隔离机制实现。                                                                                                                  |
 | `src/runtime/`        | 已实现后端中立的资源请求值校验，不执行资源限制。当前 Docker + runc 隔离策略由 `infrastructure`/`lifecycle` 显式配置并验证；Kubernetes、containerd、gVisor、Kata Containers、Firecracker 等仍未实现。 |
 | `src/environment/`    | OCI 镜像、基础环境、依赖准备与可复现环境标识。                                                                                                                                                       |
+<<<<<<< HEAD
 | `src/workspace/`      | 已实现：能力目录内的相对文件读写、建目录、删除、回收，以及有界内存代码快照与新工作区恢复。尚未实现 Git clone、worktree 或代码副本管理。                                                              |
+=======
+| `src/workspace/`      | 已实现：能力目录内的相对文件读写、建目录、删除与回收，进程内 `CodeSnapshot`，以及显式授权源的 `CodeSource` 独立代码副本。尚未实现 Git clone/worktree。                                               |
+>>>>>>> feat/git-code-workspace
 | `src/pool/`           | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。                                                                                                                             |
 | `tests/`              | `tests/workspace.rs` 验证公开 workspace API；`tests/docker_sandbox.rs` 是默认忽略、仅连接显式真实 Docker Engine 的 Linux + runc 集成测试。                                                           |
 
@@ -110,9 +121,11 @@ Kubernetes、containerd、池与容器/VM 运行时快照仍保留为规划目�
 - Clippy：`cargo clippy --locked --all-targets -- -D warnings`。
 - 构建：`cargo build --locked`。
 - 测试：`cargo test --locked`。公开文件 API 集成测试是 `cargo test --locked --test workspace`。连示例一起编译用 `cargo test --locked --all-targets`。
+- 代码副本公开 API 测试：`cargo test --locked --test code_copy`。使用真实源临时目录，覆盖独立副本/源不变、嵌套内容、精确单文件/总字节/条目预算、空目录/零字节文件、符号链接逃逸、Unix 非普通节点与不可移植名称；Windows 链接权限不足必须失败，不能静默跳过。
 - 文档：`RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`。与 CI 的文档检查一致。
 - 文件示例：`cargo run --locked --example workspace`，必须实际写、读、删除并 `cleanup`，打印读到的字节，不能打印与 `Result` 无关的成功字样。资源示例：`cargo run --locked --example resource_policy`，构造合法请求、标明单位，再观察冲突请求的类型化拒绝；它不是后端 smoke。
-- 单元测试与模块共置，可覆盖符号链接逃逸、大于上限的已有文件读取，以及清理失败后的重试。读取超限时 `LimitExceeded.actual` 是探测到的 `limit + 1`，不是未知总长。公开 API 不能制造超限文件，所以 `tests/` 只验证写上限、恰好等于上限的读取、非法路径、嵌套目录/删除、重复 `cleanup` 与 `Closed`。符号链接用例的必要前提是进程能创建符号链接。Windows 需要开发者模式，或持有 `SeCreateSymbolicLinkPrivilege`。缺少该权限时对应用例必须失败，不能把 `PermissionDenied` 当成跳过并静默返回成功。不要修改宿主安全设置、组策略或开发者模式来让测试通过。需要容器或虚拟化的测试应显式标注环境要求并隔离资源；当前没有这类测试。
+- 代码副本示例：`cargo run --locked --example code_copy`，创建显式授权的临时源，读取目的工作区实际字节，显式清理目的工作区及源。`CodeSource` 打开与复制同样阻塞，异步调用使用 `spawn_blocking`；任务开始后不能靠 abort 终止。
+- 单元测试与模块共置，可覆盖工作区内符号链接逃逸、大于上限的已有文件读取，以及清理失败后的重试。读取超限时 `LimitExceeded.actual` 是探测到的 `limit + 1`，不是未知总长。`tests/workspace.rs` 验证写上限、恰好等于上限的读取、非法路径、嵌套目录/删除、重复 `cleanup` 与 `Closed`；`tests/code_copy.rs` 则通过公开授权源 API 建立超限文件和特殊节点。符号链接用例的必要前提是进程能创建符号链接。Windows 需要开发者模式，或持有 `SeCreateSymbolicLinkPrivilege`。缺少该权限时对应用例必须失败，不能把 `PermissionDenied` 当成跳过并静默返回成功。不要修改宿主安全设置、组策略或开发者模式来让测试通过。容器或虚拟化测试须显式标注环境要求并隔离资源。
 - 架构域门禁：先安装 `cargo-modules` 0.28.0，再在仓库根目录执行 `npm --prefix circus-sandbox/qa ci` 和 `npm --prefix circus-sandbox/qa run architecture`。脚本必须用真实的 `cargo modules dependencies --lib --all-features --no-externs --no-owns` DOT，验证工具精确为 0.28.0，按语义 ID 和声明 kind 投影到顶层域，接受同域 getter/impl 递归，拒绝固定矩阵之外的跨域 `uses` 边。不得用 `--acyclic`、`--no-fns`/`--no-types`、手写 Rust 源码解析或忽略 analyzer 失败来绕过。矩阵、根门面规则和限制只在[工程说明](docs/engineering.md#架构域门禁)维护，不在本文件复制第二份。
 - 架构门禁只证明当前 crate 的跨域 `uses` 边满足 allowlist DAG；它不证明外部 SDK 暴露面，也不检查域内循环。`cargo-modules` 是 MPL-2.0 开发期 CLI 工具，`dotparser` 1.1.1 是 MIT 的 QA 依赖，都不是 crate 的运行时依赖。
 - 启动优化必须测量冷启动与复用路径，并验证复用不泄露状态。没有覆盖率百分比门槛。实际后端行为必须有运行证据，不能仅靠 mock；workspace 文件测试使用真实临时目录。Windows 编译成功不能当成隔离或 Linux 后端通过，也不能把缺少符号链接权限时的静默跳过当成符号链接约束已验证。

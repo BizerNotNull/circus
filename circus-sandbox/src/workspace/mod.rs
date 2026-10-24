@@ -1,3 +1,5 @@
+mod code_source;
+mod git;
 mod snapshot;
 
 use std::io::{self, Read, Write};
@@ -574,7 +576,19 @@ fn write_regular(mut file: File, path: &Path, contents: &[u8]) -> Result<(), Wor
     Ok(())
 }
 
-fn read_regular(mut file: File, path: &Path, limit: usize) -> Result<Vec<u8>, WorkspaceError> {
+fn read_regular(file: File, path: &Path, limit: usize) -> Result<Vec<u8>, WorkspaceError> {
+    let mut buf = Vec::new();
+    read_regular_into(file, path, limit, &mut buf)?;
+    Ok(buf)
+}
+
+fn read_regular_into(
+    mut file: File,
+    path: &Path,
+    limit: usize,
+    buf: &mut Vec<u8>,
+) -> Result<(), WorkspaceError> {
+    buf.clear();
     let meta = file.metadata()?;
     if !meta.is_file() {
         return Err(not_regular(path));
@@ -584,7 +598,6 @@ fn read_regular(mut file: File, path: &Path, limit: usize) -> Result<Vec<u8>, Wo
             max_file_bytes: limit,
         });
     };
-    let mut buf = Vec::new();
     let mut chunk = [0u8; 8 * 1024];
     while buf.len() < probe {
         let want = (probe - buf.len()).min(chunk.len());
@@ -602,12 +615,16 @@ fn read_regular(mut file: File, path: &Path, limit: usize) -> Result<Vec<u8>, Wo
             actual: buf.len(),
         });
     }
-    Ok(buf)
+    Ok(())
 }
 
 #[cfg(test)]
 mod snapshot_tests;
 
+#[doc(inline)]
+pub use code_source::{CodeCopyError, CodeSource};
+#[doc(inline)]
+pub use git::{GitCheckout, GitCleanup, GitError, GitOptions, GitRevision, GitSource};
 #[doc(inline)]
 pub use snapshot::{CodeSnapshot, SnapshotBudget, SnapshotError};
 #[cfg(test)]

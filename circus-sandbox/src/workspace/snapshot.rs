@@ -134,13 +134,14 @@ impl From<io::Error> for SnapshotError {
     }
 }
 
-/// Caller-supplied bound for one [`Workspace::capture_code_snapshot`].
+/// Caller-supplied bound for one [`Workspace::capture_code_snapshot`] or
+/// [`super::CodeSource::copy_to_workspace`] operation.
 ///
 /// `max_total_bytes` counts file contents only. `max_entries` counts files and
-/// directories, not the workspace root. Both must be positive. This is an
-/// operation budget that limits memory for that capture. It is not a workspace
-/// total, file-count quota, or host disk quota, and it is not enforced on
-/// later writes. There is still no workspace total-quota API.
+/// directories, not the root. Both must be positive. This operation budget
+/// bounds one capture or copy. It is not a workspace total, file-count quota,
+/// or host disk quota, and it is not enforced on later writes. There is still
+/// no workspace total-quota API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotBudget {
     max_total_bytes: usize,
@@ -162,12 +163,12 @@ impl SnapshotBudget {
         })
     }
 
-    /// Total file-content bytes this capture may retain.
+    /// Total file-content bytes this capture or copy may retain.
     pub fn max_total_bytes(&self) -> usize {
         self.max_total_bytes
     }
 
-    /// Files plus directories this capture may retain. The root is not counted.
+    /// Files plus directories this operation may retain. The root is not counted.
     pub fn max_entries(&self) -> usize {
         self.max_entries
     }
@@ -452,12 +453,12 @@ fn capture_frame(
     Ok(())
 }
 
-enum Kind {
+pub(super) enum Kind {
     Dir,
     File,
 }
 
-fn child_path(prefix: &Path, name: &std::ffi::OsStr) -> Result<PathBuf, SnapshotError> {
+pub(super) fn child_path(prefix: &Path, name: &std::ffi::OsStr) -> Result<PathBuf, SnapshotError> {
     let name_path = Path::new(name);
     require_portable_component(name_path)?;
     let rel = append_component(prefix, name);
@@ -513,7 +514,7 @@ fn require_portable_component(path: &Path) -> Result<(), SnapshotError> {
     }
 }
 
-fn node_kind(dir: &Dir, name: &Path, rel: &Path) -> Result<Kind, SnapshotError> {
+pub(super) fn node_kind(dir: &Dir, name: &Path, rel: &Path) -> Result<Kind, SnapshotError> {
     let meta = dir.symlink_metadata(name)?;
     let file_type = meta.file_type();
     if file_type.is_symlink() {
@@ -547,12 +548,33 @@ pub(super) fn open_child_dir(parent: &Dir, name: &Path, rel: &Path) -> Result<Di
     Ok(Dir::from_std_file(file.into_std()))
 }
 
-fn read_capped(
+pub(super) fn read_capped(
     parent: &Dir,
     name: &Path,
     rel: &Path,
     limit: usize,
 ) -> Result<Vec<u8>, SnapshotError> {
+    let mut bytes = Vec::new();
+    read_capped_into(parent, name, rel, limit, &mut bytes)?;
+    Ok(bytes)
+}
+
+pub(super) fn read_capped_into(
+    parent: &Dir,
+    name: &Path,
+    rel: &Path,
+    limit: usize,
+    bytes: &mut Vec<u8>,
+) -> Result<(), SnapshotError> {
+    let file = open_regular(parent, name, rel)?;
+    match super::read_regular_into(file, rel, limit, bytes) {
+        Ok(()) => Ok(()),
+        Err(WorkspaceError::NotRegularFile { path }) => Err(SnapshotError::NotRegular { path }),
+        Err(err) => Err(err.into()),
+    }
+}
+
+pub(super) fn open_regular(parent: &Dir, name: &Path, rel: &Path) -> Result<File, SnapshotError> {
     let mut options = OpenOptions::new();
     options.read(true);
     options.follow(FollowSymlinks::No);
@@ -565,11 +587,7 @@ fn read_capped(
         Err(err) => return Err(classify_failed_open(parent, name, rel, err)),
     };
     refuse_unwanted_handle(&file, rel, false)?;
-    match read_regular(file, rel, limit) {
-        Ok(bytes) => Ok(bytes),
-        Err(WorkspaceError::NotRegularFile { path }) => Err(SnapshotError::NotRegular { path }),
-        Err(err) => Err(err.into()),
-    }
+    Ok(file)
 }
 
 fn refuse_unwanted_handle(file: &File, rel: &Path, want_dir: bool) -> Result<(), SnapshotError> {

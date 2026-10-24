@@ -103,6 +103,8 @@ bash .github/scripts/sandbox-gitleaks.sh
 
 Rust fmt、clippy、构建、测试、文档、example、cargo-deny 和 Rust CodeQL 均已配置。Cargo 命令在 `circus-sandbox/` 执行，完整命令表见 [README](../README.md#命令)。`deny.toml` 已配置显式许可证 allow、漏洞、来源与依赖策略，细节见沙箱指南；dependency review 不替代许可证策略。某次实际运行结果只记在对应提交的 PR。
 
+显式授权源目录的代码副本，在 `circus-sandbox/` 执行 `cargo test --locked --test code_copy` 和 `cargo run --locked --example code_copy`。前者用真实临时源验证内容、预算及拒绝边界，后者读取实际复制字节并显式清理源和目的工作区；都不要求 Git、Docker、沙箱池或运行时，不构成进程隔离证据。Windows 符号链接用例要求开发者模式或 `SeCreateSymbolicLinkPrivilege`，权限不足不得静默跳过。
+
 `npm --prefix circus-sandbox/qa audit` 只审计 `circus-sandbox/qa` 的锁文件。它不审计 `circus-paseo/`，也不审计仓库里其它 npm 树。这次审计通过、CodeQL QA 通过，或安全基线合并，都不等于整个仓库的漏洞告警已经解决。告警数量只记在对应 PR 或报告，不写进本文。
 
 secret scanning 与 push protection 是 GitHub 平台设置，不是工作流的替代品。工作流存在也不等于它已设为 `main` 的 required status check。当前不要求非作者批准；任务授权后的自动 squash merge 仍须经过 PR、最新 CI、适用审查问题闭环且无冲突，不绕过保护或强推。提交流程见根指南，安全扫描范围见安全说明。

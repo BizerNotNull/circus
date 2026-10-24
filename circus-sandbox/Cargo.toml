@@ -14,9 +14,14 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tempfile = "3.27.0"
 tar = "0.4.46"
 thiserror = "2.0.21"
-tokio = { version = "1.47", default-features = false, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "fs"] }
+tokio = { version = "1.47", default-features = false, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "process", "signal", "fs"] }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 uuid = { version = "1", default-features = false, features = ["v4", "std"] }
+process-wrap = { version = "=10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
+url = "2.5"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
 
 
 [lints.rust]

@@ -2,9 +2,9 @@
 
 Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace 文件能力、受预算约束的进程内代码快照、`runtime::ResourceLimits` 请求校验，以及显式配置的本地 Linux Docker Engine + `runc` 异步容器后端。workspace 文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；容器后端通过私有 lifecycle/infrastructure 模块运行 Linux 容器。
 
-容器后端不是通用进程沙箱：它只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。Kubernetes、containerd、gVisor、Kata、Firecracker、OCI 环境准备、HTTP/RPC、Git、容器/VM 快照与预启动/沙箱池仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker + runc slice 当作全部七领域交付。
+容器后端不是通用进程沙箱：它只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。Kubernetes、containerd、gVisor、Kata、Firecracker、OCI 环境准备、HTTP/RPC 仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker + runc slice 当作全部七领域交付。
 
-workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Docker 后端不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；Docker 设置的实际效果需要真实 Linux Engine 验证，独立 workspace 仍没有总字节或宿主磁盘配额执行机制。
+workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Docker 后端不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；Docker 设置的实际效果需要真实 Linux Engine 验证，独立 workspace 仍没有总字节或宿主磁盘配额执行机制。`CodeSource::open` 仅供可信库调用方显式授予源目录读取能力，再复制到新建的 `Workspace`，不是挂载或直接接管源目录。`GitCheckout` 用受控宿主 Git 进程准备固定提交，属于可信准备流程，不是对抗性进程沙箱。
 
 工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖还包括 bollard **0.21.1**、tokio **1.x**、tokio-util **0.7.x**、uuid **1.x**、futures-util **0.3.x** 和 thiserror **2.0.21**；`Cargo.lock` 固定解析版本，检查和运行都加 `--locked`。workspace 仍使用 cap-std **4.0.3**、cap-fs-ext **4.0.3**、tempfile **3.27.0**。
 
@@ -65,6 +65,35 @@ cargo run --locked --example workspace
 - 快照只保存在当前进程内存中，不序列化、不持久化，不是进程/内存检查点、Docker commit、容器或 VM 快照，也不是池已实现的证据。恢复失败且清理也失败时，`RestoreCleanup` 返回目标 workspace 供调用方重试清理。
 
 示例为 `examples/code_snapshot.rs`，公开 API 测试在 `tests/code_snapshot.rs`。
+## 显式授权的代码副本
+
+`CodeSource::open(path)` 打开调用方已经授权读取的源目录，返回只读 capability；不公开源根路径。路径字符串不是租户授权凭证：服务必须先自行决定调用方可读哪个目录，不能把不可信请求里的宿主路径直接传入。打开根目录按宿主路径解析语义处理；此后子项遍历和读取通过 cap-std 目录能力约束在源目录内，不修改源文件。
+
+`source.copy_to_workspace(max_file_bytes, SnapshotBudget::new(max_total_bytes, max_entries)?)` 返回新的、独立拥有的 `Workspace`，不经过内存 `CodeSnapshot` 中间副本。原有 `Workspace::capture_code_snapshot` 仍是工作区到进程内快照的独立能力，不等同于外部源目录导入。
+
+- `max_file_bytes` 沿用 workspace 单文件限制（拒绝 `0` 与 `usize::MAX`）；预算两个值必须为正。总字节只计文件内容；条目计目录和文件（包括空目录、零字节文件），不计根目录。恰好等于上限允许。
+- 预算只约束这一次复制，不是以后写入的总配额、磁盘预留或原子配额。复制逐文件读取，不按不可信 metadata 分配整个源树。
+- 拒绝所有源子项符号链接（包括指向目录内的链接）、非普通节点和不满足 workspace 可移植路径规则的名称；不复制所有权、权限或其他文件 metadata。
+- `CodeCopyError` 可匹配 `ByteLimit { limit, actual }`、`EntryLimit { limit, actual }`、`Symlink { path }`、`NotRegular { path }`、`NotPortable { path }`、`Workspace(WorkspaceError)` 和 `SourceIo { path, source }`。单文件超限是 `Workspace(WorkspaceError::LimitExceeded { .. })`；遍历错误路径相对源根，打开失败的 `SourceIo.path` 是调用方传入的授权路径。失败不返回成功工作区；若回收部分目的工作区也失败，`CopyCleanup { copy, destination, cleanup }` 保留原始复制错误及 boxed 工作区所有权，调用方应取回 `destination` 并重试 `cleanup`，不能把 Drop 当成清理成功。
+- 打开、复制和清理是同步阻塞调用；异步调用方应使用 `spawn_blocking`，已经开始的阻塞任务不能靠 abort 终止。外部仍可修改源文件，本 API 不承诺一致时间点快照、崩溃原子性或跨进程隔离。
+- 不推断 Git clone/worktree、沙箱池或运行时能力；没有 Git metadata 特殊策略，也不会隐式分享源凭据。授权范围内的普通文件会按普通内容复制，调用方必须自行排除不应授予的秘密。
+
+真实临时目录示例创建授权源、读取复制后的实际字节并显式清理双方；公开 API 测试覆盖独立副本、精确预算、嵌套文件与拒绝边界。在 `circus-sandbox/` 执行：
+
+```bash
+cargo run --locked --example code_copy
+cargo test --locked --test code_copy
+```
+
+## Fixed-revision Git workspaces
+
+`GitSource::local` and `GitSource::https` accept only explicitly authorized absolute local paths or HTTPS URLs without credentials, queries, fragments, or alternate protocols. `GitRevision` accepts only a complete 40- or 64-character commit ID. `GitCheckout::clone` prepares that commit with the configured absolute Git binary in a private temporary repository, disables ambient configuration and credentials, disables recursive submodules and tags, and verifies the checked-out object ID.
+
+`GitCheckout::copy_to_workspace` returns a code-only `Workspace`: the checkout's private `.git` metadata is retained by `GitCheckout` and is never copied. The copy is independent and bounded by the per-file and one-shot snapshot budgets. The source path, repository root, private home, hooks, and configuration are not exposed publicly.
+
+Git preparation is trusted host-side work, not an OS process or filesystem isolation boundary. A local grant trusts the filesystem repository; an HTTPS grant is not an SSRF policy. The storage parent has no library-enforced disk quota and must be bounded by the deployer. A detached worker owns allocation, processes, blocking copies, and explicit removal. Dropping a clone/copy future cancels work but does not drop that owner; started blocking work drains before its destination is explicitly removed. Each clone or copy has one whole-operation deadline. Clone output has one combined stdout/stderr budget across all commands. Only the selected source protocol is enabled. Private home, config, temporary files, and empty hooks live beside, not inside, the repository.
+
+Call `GitCheckout::cleanup().await` for observable, idempotent removal. `GitError::CleanupRequired { source, cleanup }` preserves the initiating error and an opaque `GitCleanup` receipt: `cleanup.wait().await` succeeds only after process termination and directory removal are confirmed. Cleanup retries retain directory identity and continue independently of receipt cancellation/drop. A failed ordinary copy can retain its partial destination in `CodeCopyError::CopyCleanup`; explicitly clean that destination. These are library ownership guarantees, not crash recovery or disk quota enforcement. Git behavior depends on the configured trusted binary.
 
 ## 资源请求值模型
 
@@ -117,17 +146,19 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
 
 同样在 `circus-sandbox/` 下执行：
 
-| 目的                | 命令                                                                                            |
-| ------------------- | ----------------------------------------------------------------------------------------------- |
-| 格式检查 / 格式化   | `cargo fmt --check` / `cargo fmt`                                                               |
-| Clippy              | `cargo clippy --locked --all-targets -- -D warnings`                                            |
-| 构建                | `cargo build --locked`                                                                          |
-| 测试                | `cargo test --locked`                                                                           |
-| 只跑本 API 集成测试 | `cargo test --locked --test workspace`                                                          |
-| 文档                | `RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`                                         |
-| 运行示例            | `cargo run --locked --example workspace`                                                        |
-| 资源请求示例        | `cargo run --locked --example resource_policy`                                                  |
-| 依赖策略            | 先 `cargo install --locked --version 0.20.2 cargo-deny`，再在本目录 `cargo deny --locked check` |
+| 目的              | 命令                                                                                            |
+| ----------------- | ----------------------------------------------------------------------------------------------- |
+| 格式检查 / 格式化 | `cargo fmt --check` / `cargo fmt`                                                               |
+| Clippy            | `cargo clippy --locked --all-targets -- -D warnings`                                            |
+| 构建              | `cargo build --locked`                                                                          |
+| 测试              | `cargo test --locked`                                                                           |
+| 只跑文件 API 测试 | `cargo test --locked --test workspace`                                                          |
+| 文档              | `RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`                                         |
+| 运行示例          | `cargo run --locked --example workspace`                                                        |
+| 资源请求示例      | `cargo run --locked --example resource_policy`                                                  |
+| 代码副本测试      | `cargo test --locked --test code_copy`                                                          |
+| 代码副本示例      | `cargo run --locked --example code_copy`                                                        |
+| 依赖策略          | 先 `cargo install --locked --version 0.20.2 cargo-deny`，再在本目录 `cargo deny --locked check` |
 
 `cargo test --locked` 覆盖库测试和 `tests/`。要连示例一起编译，使用 `cargo test --locked --all-targets`。不要手改 `Cargo.lock` 来绕过解析失败。
 
@@ -185,14 +216,20 @@ npm --prefix circus-sandbox/qa run architecture
 ### 未发布：Docker 工作区文件快照
 
 - 新增 `capture_workspace_snapshot` 和 `restore_workspace_snapshot`：使用 Docker archive API 捕获运行中 tmpfs 的普通文件/目录，并替换新建 sandbox 的启动暂存区；复用 `Arc<CodeSnapshot>`，不复制队列中的快照载荷。
-- 运行态捕获临时暂停后恢复，已暂停的 sandbox 保持暂停；独立限制 archive 传输、文件载荷与条目数量，恢复使用目标配置限制。清理失败保留所有权，完整语义见[后端文档](docs/docker-linux-runc.md#workspace-file-snapshots)。
+- 运行态捕获临时暂停后恢复，已暂停的 sandbox 保持暂停；独立限制 archive 传输、文件载荷与条目数量，恢复使用目标配置限制。清理失败保留所有权，完整语义见[后端文档](docs/docker-linux-runc.md)。
 - 不代表进程、内存、VM checkpoint 或 Docker commit，不声明本次改动已经通过真实 Docker 验证。
 
-### 未发布：当前能力与完整交付边界
+### 未发布：显式授权的代码副本与固定提交 Git 检出
 
-- 同步 workspace、受字节/条目预算约束的进程内代码快照、资源请求值校验，以及显式配置的异步 Linux Docker + runc 后端是当前实现；Docker API 的生命周期、命令/文件操作与前提见[后端文档](docs/docker-linux-runc.md)。
-- 工作区文件快照与尚未实现的进程/内存/VM checkpoint 明确区分；Kubernetes、containerd、gVisor、Kata、Firecracker、OCI 环境准备、Git、预启动与池仍保留在完整交付范围，没有 HTTP/RPC 或 Paseo 接入。
-- 本次修订只纠正文档事实，不声明发布、合并、检查或真实运行成功。
+- 新增只读 `CodeSource`，将调用方显式授权的源目录逐文件复制到新建的能力工作区；原有内存 `CodeSnapshot` 不变。
+- 使用单文件限制与单次内容/条目预算，拒绝链接、特殊节点和不可移植名称；清理失败保留部分工作区所有权以供重试。
+- 新增受控宿主 Git 进程、固定 40/64 位提交校验、代码-only 工作区复制和 `GitCleanup` 清理回执；恢复环境隔离边界与清理责任不适用项。
+- 新增真实临时目录公开 API 测试和 `code_copy`、`git_clone` 示例；不声明 Git 进程隔离、池、运行时隔离、一致快照或未来写入总配额。
+
+### 未发布：预启动 Docker 租约池
+
+- 新增 `DockerPool`/`PoolLease`：固定容量内预启动新鲜容器，租约单次使用，释放、Drop、TTL 到期或 shutdown 都走真实销毁与确认回收。
+- 新增 `PoolConfig::new(sandbox, capacity, baseline, lease_ttl)`、显式 acquire 超时、FIFO 等待者、容量统计与 `CleanupReceipt` 归属观察；不代表聚合宿主资源预留或进程检查点。
 
 ### 未发布：声明依赖架构门禁
 
