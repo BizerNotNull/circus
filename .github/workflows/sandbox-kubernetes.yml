@@ -85,7 +85,7 @@ jobs:
           done
           sudo k3s kubectl wait --for=condition=Ready node --all --timeout=300s
           sudo k3s kubectl get nodes -o wide
-          sudo k3s version
+          sudo k3s --version
 
       - name: Export kubeconfig
         shell: bash
