@@ -2,8 +2,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use circus_sandbox::{
-    CommandRequest, DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig, ResourceLimits,
-    RuntimeName, SandboxConfig, SandboxError, SandboxPhase,
+    CommandError, CommandRequest, DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig,
+    ResourceLimits, RuntimeName, SandboxConfig, SandboxError, SandboxPhase, StagingError,
 };
 
 const PY: &str = "python3";
@@ -42,8 +42,12 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let ep = endpoint()?;
-        let sandbox = DockerSandbox::create(config()?).await?;
+        Self::with_config(config()?).await
+    }
+
+    async fn with_config(config: SandboxConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        let ep = config.endpoint().clone();
+        let sandbox = DockerSandbox::create(config).await?;
         let id = sandbox.status().await?.container_id;
         Ok(Self {
             sandbox: Some(sandbox),
@@ -253,5 +257,101 @@ async fn docker_linux_runc_exec_abort_destroys_only_owner() -> Result<(), Box<dy
     );
     destroy(&mut victim).await?;
     destroy(&mut survivor).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit real Linux Docker Engine"]
+async fn docker_linux_runc_invalid_commands_preserve_sandbox()
+-> Result<(), Box<dyn std::error::Error>> {
+    enabled();
+    let mut f = Fixture::new().await?;
+    f.sandbox().start().await?;
+    let mut empty_argv = py(&["-c", "print('unexpected')"]);
+    empty_argv.argv.clear();
+    let mut zero_timeout = py(&["-c", "print('unexpected')"]);
+    zero_timeout.timeout = Duration::ZERO;
+    let mut zero_limit = py(&["-c", "print('unexpected')"]);
+    zero_limit.output_limit_bytes = 0;
+    for (request, expected) in [
+        (empty_argv, CommandError::EmptyArgv),
+        (
+            zero_timeout,
+            CommandError::InvalidTimeout {
+                timeout: Duration::ZERO,
+            },
+        ),
+        (
+            zero_limit,
+            CommandError::InvalidOutputLimit {
+                output_limit_bytes: 0,
+            },
+        ),
+    ] {
+        let err = f.sandbox().exec(request).await.unwrap_err();
+        assert!(
+            !matches!(err, SandboxError::RelativePath { .. }),
+            "invalid command was classified as a path failure: {err:?}"
+        );
+        assert!(matches!(&err, SandboxError::Command(actual) if actual == &expected));
+        assert_eq!(
+            std::error::Error::source(&err)
+                .and_then(|source| source.downcast_ref::<CommandError>()),
+            Some(&expected)
+        );
+        let status = f.sandbox().status().await?;
+        assert_eq!(status.phase, SandboxPhase::Running);
+        assert_eq!(status.container_id, f.id);
+        let out = f.sandbox().exec(py(&["-c", "print('alive')"])).await?;
+        assert_eq!(out.stdout, b"alive\n");
+    }
+    destroy(&mut f).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit real Linux Docker Engine"]
+async fn docker_linux_runc_staging_limit_is_not_a_path_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    enabled();
+    let config = SandboxConfig::new(
+        endpoint()?,
+        std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
+        RuntimeName::runc(),
+        ResourceLimits::new(64 * 1024 * 1024, 100, 8, 1024, 1024)?,
+        IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
+        IoLimits::new(64 * 1024, Duration::from_secs(3))?,
+    )?;
+    let mut f = Fixture::with_config(config).await?;
+    let bytes = vec![b'x'; 700];
+    f.sandbox().write_file("first", &bytes).await?;
+    f.sandbox().write_file("second", &bytes).await?;
+    f.sandbox().write_file("third", &bytes).await?;
+    let err = f.sandbox().start().await.unwrap_err();
+    assert!(
+        !matches!(err, SandboxError::RelativePath { .. }),
+        "staging bound was classified as a path failure: {err:?}"
+    );
+    let expected = StagingError::LimitExceeded {
+        limit: 1024,
+        actual: 1400,
+    };
+    assert!(matches!(&err, SandboxError::Staging(actual) if actual == &expected));
+    assert_eq!(
+        std::error::Error::source(&err).and_then(|source| source.downcast_ref::<StagingError>()),
+        Some(&expected)
+    );
+    let status = f.sandbox().status().await?;
+    assert_eq!(status.phase, SandboxPhase::Created);
+    assert_eq!(status.container_id, f.id);
+    assert_eq!(f.sandbox().read_file("first").await?, bytes);
+    assert_eq!(f.sandbox().read_file("second").await?, bytes);
+    assert_eq!(f.sandbox().read_file("third").await?, bytes);
+    f.sandbox().remove_file("first").await?;
+    f.sandbox().remove_file("third").await?;
+    f.sandbox().write_file("second", &vec![b'x'; 1024]).await?;
+    f.sandbox().start().await?;
+    assert_eq!(f.sandbox().read_file("second").await?, vec![b'x'; 1024]);
+    destroy(&mut f).await?;
     Ok(())
 }

@@ -1,6 +1,9 @@
 //! Lifecycle owner for one Linux Docker sandbox.
 
 mod config;
+mod input;
+
+pub use input::{CommandError, StagingError};
 
 pub use config::{
     ConfigError, DockerEndpoint, IoLimits, IsolationConfig, OWNER_LABEL_KEY, RuntimeName,
@@ -67,8 +70,11 @@ pub struct SandboxStatus {
 /// One exec. `argv` is passed as separate arguments, not a shell string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandRequest {
+    /// Separate arguments; must include at least the executable.
     pub argv: Vec<String>,
+    /// Non-zero command deadline.
     pub timeout: Duration,
+    /// Non-zero captured stdout/stderr byte bound.
     pub output_limit_bytes: usize,
 }
 
@@ -87,6 +93,12 @@ pub enum SandboxError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
+    /// Invalid command input. No command is queued and ownership is unchanged.
+    #[error("invalid command request: {0}")]
+    Command(#[from] CommandError),
+    /// Staged content exceeds its byte bound or cannot be counted.
+    #[error("workspace staging failed: {0}")]
+    Staging(#[from] StagingError),
     #[error("phase {current:?} cannot {operation}")]
     InvalidPhase {
         current: SandboxPhase,
@@ -251,6 +263,11 @@ impl DockerSandbox {
         })
     }
 
+    /// Starts the container after validating all staged files.
+    ///
+    /// [`SandboxError::Staging`] leaves the container in `Created`, with its
+    /// files and ownership retained. Remove or shrink files and retry, or
+    /// explicitly [`destroy`](Self::destroy) it.
     pub async fn start(&self) -> Result<(), SandboxError> {
         self.call(Op::Start).await?
     }
@@ -311,12 +328,29 @@ impl DockerSandbox {
     ///
     /// Dropping this future, including while `create_exec` has not returned,
     /// destroys the owned container. A pending response is not treated as
-    /// "not accepted". Timeout and output-limit failures do the same.
+    /// "not accepted". Timeout and observed output overflow do the same.
+    ///
+    /// # Errors
+    ///
+    /// [`SandboxError::Command`] rejects empty argv, zero timeout, and zero
+    /// output bound before queueing, without changing phase or ownership.
+    /// A request above the configured output bound returns
+    /// [`SandboxError::OutputLimit`] with `StillPresent` without executing.
     pub async fn exec(&self, request: CommandRequest) -> Result<CommandOutput, SandboxError> {
-        if request.argv.is_empty() || request.timeout.is_zero() || request.output_limit_bytes == 0 {
-            return Err(SandboxError::RelativePath {
-                reason: "command requires argv, timeout, and output limit",
-            });
+        if request.argv.is_empty() {
+            return Err(CommandError::EmptyArgv.into());
+        }
+        if request.timeout.is_zero() {
+            return Err(CommandError::InvalidTimeout {
+                timeout: request.timeout,
+            }
+            .into());
+        }
+        if request.output_limit_bytes == 0 {
+            return Err(CommandError::InvalidOutputLimit {
+                output_limit_bytes: request.output_limit_bytes,
+            }
+            .into());
         }
         self.call(|reply| Op::Exec { request, reply }).await?
     }
@@ -869,16 +903,11 @@ async fn staged(state: &State) -> Result<Vec<StagedBytes>, SandboxError> {
                 .read_file(path)
         })
         .await??;
-        total = total
-            .checked_add(bytes.len() as u64)
-            .ok_or(SandboxError::RelativePath {
-                reason: "staged bytes overflow",
-            })?;
-        if total > state.config.limits().workspace_bytes() {
-            return Err(SandboxError::RelativePath {
-                reason: "staged bytes exceed workspace limit",
-            });
-        }
+        total = input::staged_total(
+            total,
+            bytes.len() as u64,
+            state.config.limits().workspace_bytes(),
+        )?;
         entries.push(StagedBytes {
             path: relative,
             is_dir: false,
@@ -1001,4 +1030,78 @@ async fn spawn_block<T: Send + 'static>(
         .map_err(|err| SandboxError::WorkerGone {
             detail: err.to_string(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn rejected_without_worker(request: CommandRequest, expected: CommandError) {
+        let (tx, mut rx) = mpsc::channel(QUEUE);
+        let sandbox = DockerSandbox {
+            tx,
+            shutdown: CancellationToken::new(),
+            max_file_bytes: 1024,
+        };
+        let err = tokio::time::timeout(Duration::from_secs(1), sandbox.exec(request))
+            .await
+            .expect("invalid command must not wait for a worker")
+            .unwrap_err();
+        assert!(
+            !matches!(err, SandboxError::RelativePath { .. }),
+            "invalid command was classified as a path failure: {err:?}"
+        );
+        assert!(matches!(&err, SandboxError::Command(actual) if actual == &expected));
+        assert_eq!(
+            std::error::Error::source(&err)
+                .and_then(|source| source.downcast_ref::<CommandError>()),
+            Some(&expected)
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(!sandbox.shutdown.is_cancelled());
+    }
+
+    fn request() -> CommandRequest {
+        CommandRequest {
+            argv: vec!["/bin/true".into()],
+            timeout: Duration::from_secs(1),
+            output_limit_bytes: 1024,
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_command_is_not_a_path_error() {
+        let mut request = request();
+        request.argv.clear();
+        rejected_without_worker(request, CommandError::EmptyArgv).await;
+    }
+
+    #[tokio::test]
+    async fn zero_command_timeout_is_not_a_path_error() {
+        let mut request = request();
+        request.timeout = Duration::ZERO;
+        rejected_without_worker(
+            request,
+            CommandError::InvalidTimeout {
+                timeout: Duration::ZERO,
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn zero_command_output_limit_is_not_a_path_error() {
+        let mut request = request();
+        request.output_limit_bytes = 0;
+        rejected_without_worker(
+            request,
+            CommandError::InvalidOutputLimit {
+                output_limit_bytes: 0,
+            },
+        )
+        .await;
+    }
 }
