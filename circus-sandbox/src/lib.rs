@@ -5,10 +5,10 @@
 //! commands in a Linux container through an explicit local Docker endpoint.
 //! Public types do not expose the Docker SDK.
 //!
-//! This is not a Kubernetes, gVisor, Kata, or Firecracker backend. Snapshot,
-//! pool, Git, and HTTP are not implemented. A readonly root plus tmpfs workspace
-//! means a Docker commit would not preserve workspace writes; a later snapshot
-//! must restore an archive.
+//! [`CodeSource`] copies an explicitly authorized source directory into a fresh
+//! owned workspace. [`CodeSnapshot`] captures workspace contents in memory.
+//! Neither is a process/container checkpoint. Pool, Git, HTTP, Kubernetes,
+//! gVisor, Kata, and Firecracker backends are not implemented.
 //!
 //! # Blocking
 //!
@@ -60,7 +60,8 @@ pub use api::{
 };
 #[doc(inline)]
 pub use workspace::{
-    CodeSnapshot, PathRejectReason, SnapshotBudget, SnapshotError, Workspace, WorkspaceError,
+    CodeCopyError, CodeSnapshot, CodeSource, PathRejectReason, SnapshotBudget, SnapshotError,
+    Workspace, WorkspaceError,
 };
 
 #[doc(inline)]

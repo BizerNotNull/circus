@@ -4,7 +4,7 @@ Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace �
 
 容器后端不是通用进程沙箱：它只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在的 Linux 镜像和 Python 3，拒绝拉取镜像；当前不提供 Kubernetes、containerd、HTTP/RPC、Git、快照或沙箱池。Docker Engine 的资源和隔离设置由显式配置验证，真实隔离仍必须在 Linux Docker Engine 上运行并验证。
 资源请求校验不等于资源预留、聚合准入或宿主磁盘配额。
-workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。容器后端是独立的 Docker + runc slice，不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；workspace 仍没有宿主磁盘配额执行机制。
+workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；`Workspace::new` 不接受宿主目录，公开 API 不返回工作区根路径。独立的 `CodeSource::open` 仅供可信库调用方显式授予源目录读取能力，再复制到新建的 `Workspace`，不是挂载或直接接管源目录。资源请求校验不等于资源预留、聚合准入或内核强制；workspace 仍没有宿主磁盘配额执行机制。
 
 工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖还包括 bollard **0.21.1**、tokio **1.x**、tokio-util **0.7.x**、uuid **1.x**、futures-util **0.3.x** 和 thiserror **2.0.21**；`Cargo.lock` 固定解析版本，检查和运行都加 `--locked`。workspace 仍使用 cap-std **4.0.3**、cap-fs-ext **4.0.3**、tempfile **3.27.0**。
 
@@ -56,6 +56,26 @@ cargo run --locked --example workspace
 
 在 `circus-sandbox/` 目录执行。rustup 会按该目录的 `rust-toolchain.toml` 选择 1.99.1。
 
+## 显式授权的代码副本
+
+`CodeSource::open(path)` 打开调用方已经授权读取的源目录，返回只读 capability；不公开源根路径。路径字符串不是租户授权凭证：服务必须先自行决定调用方可读哪个目录，不能把不可信请求里的宿主路径直接传入。打开根目录按宿主路径解析语义处理；此后子项遍历和读取通过 cap-std 目录能力约束在源目录内，不修改源文件。
+
+`source.copy_to_workspace(max_file_bytes, SnapshotBudget::new(max_total_bytes, max_entries)?)` 返回新的、独立拥有的 `Workspace`，不经过内存 `CodeSnapshot` 中间副本。原有 `Workspace::capture_code_snapshot` 仍是工作区到进程内快照的独立能力，不等同于外部源目录导入。
+
+- `max_file_bytes` 沿用 workspace 单文件限制（拒绝 `0` 与 `usize::MAX`）；预算两个值必须为正。总字节只计文件内容；条目计目录和文件（包括空目录、零字节文件），不计根目录。恰好等于上限允许。
+- 预算只约束这一次复制，不是以后写入的总配额、磁盘预留或原子配额。复制逐文件读取，不按不可信 metadata 分配整个源树。
+- 拒绝所有源子项符号链接（包括指向目录内的链接）、非普通节点和不满足 workspace 可移植路径规则的名称；不复制所有权、权限或其他文件 metadata。
+- `CodeCopyError` 可匹配 `ByteLimit { limit, actual }`、`EntryLimit { limit, actual }`、`Symlink { path }`、`NotRegular { path }`、`NotPortable { path }`、`Workspace(WorkspaceError)` 和 `SourceIo { path, source }`。单文件超限是 `Workspace(WorkspaceError::LimitExceeded { .. })`；遍历错误路径相对源根，打开失败的 `SourceIo.path` 是调用方传入的授权路径。失败不返回成功工作区；若回收部分目的工作区也失败，`CopyCleanup { copy, destination, cleanup }` 保留原始复制错误及 boxed 工作区所有权，调用方应取回 `destination` 并重试 `cleanup`，不能把 Drop 当成清理成功。
+- 打开、复制和清理是同步阻塞调用；异步调用方应使用 `spawn_blocking`，已经开始的阻塞任务不能靠 abort 终止。外部仍可修改源文件，本 API 不承诺一致时间点快照、崩溃原子性或跨进程隔离。
+- 不推断 Git clone/worktree、沙箱池或运行时能力；没有 Git metadata 特殊策略，也不会隐式分享源凭据。授权范围内的普通文件会按普通内容复制，调用方必须自行排除不应授予的秘密。
+
+真实临时目录示例创建授权源、读取复制后的实际字节并显式清理双方；公开 API 测试覆盖独立副本、精确预算、嵌套文件与拒绝边界。在 `circus-sandbox/` 执行：
+
+```bash
+cargo run --locked --example code_copy
+cargo test --locked --test code_copy
+```
+
 ## 资源请求值模型
 
 通过 `circus_sandbox::runtime::{ResourceLimits, ResourceLimitsError}` 使用。`ResourceLimits::new(memory_bytes, cpu_millis, pids, workspace_bytes, max_file_bytes)` 返回 `Result`；字段私有，提供同名 getter，支持 `Clone`、`Copy`、`Debug`、`PartialEq`、`Eq`，没有 `Default`。
@@ -90,17 +110,19 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
 
 同样在 `circus-sandbox/` 下执行：
 
-| 目的                | 命令                                                                                            |
-| ------------------- | ----------------------------------------------------------------------------------------------- |
-| 格式检查 / 格式化   | `cargo fmt --check` / `cargo fmt`                                                               |
-| Clippy              | `cargo clippy --locked --all-targets -- -D warnings`                                            |
-| 构建                | `cargo build --locked`                                                                          |
-| 测试                | `cargo test --locked`                                                                           |
-| 只跑本 API 集成测试 | `cargo test --locked --test workspace`                                                          |
-| 文档                | `RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`                                         |
-| 运行示例            | `cargo run --locked --example workspace`                                                        |
-| 资源请求示例        | `cargo run --locked --example resource_policy`                                                  |
-| 依赖策略            | 先 `cargo install --locked --version 0.20.2 cargo-deny`，再在本目录 `cargo deny --locked check` |
+| 目的              | 命令                                                                                            |
+| ----------------- | ----------------------------------------------------------------------------------------------- |
+| 格式检查 / 格式化 | `cargo fmt --check` / `cargo fmt`                                                               |
+| Clippy            | `cargo clippy --locked --all-targets -- -D warnings`                                            |
+| 构建              | `cargo build --locked`                                                                          |
+| 测试              | `cargo test --locked`                                                                           |
+| 只跑文件 API 测试 | `cargo test --locked --test workspace`                                                          |
+| 文档              | `RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`                                         |
+| 运行示例          | `cargo run --locked --example workspace`                                                        |
+| 资源请求示例      | `cargo run --locked --example resource_policy`                                                  |
+| 代码副本测试      | `cargo test --locked --test code_copy`                                                          |
+| 代码副本示例      | `cargo run --locked --example code_copy`                                                        |
+| 依赖策略          | 先 `cargo install --locked --version 0.20.2 cargo-deny`，再在本目录 `cargo deny --locked check` |
 
 `cargo test --locked` 覆盖库测试和 `tests/`。要连示例一起编译，使用 `cargo test --locked --all-targets`。不要手改 `Cargo.lock` 来绕过解析失败。
 
@@ -154,6 +176,12 @@ npm --prefix circus-sandbox/qa run architecture
 `cleanup` 的 I/O 失败也是 `Io`。此时工作区仍然打开，应保留同一个 `Workspace` 再调用 `cleanup`，不要丢弃错误后假设目录已消失。
 
 ## 变更
+
+### 未发布：显式授权的代码副本
+
+- 新增只读 `CodeSource`，将调用方显式授权的源目录逐文件复制到新建的能力工作区；原有内存 `CodeSnapshot` 不变。
+- 使用单文件限制与单次内容/条目预算，拒绝链接、特殊节点和不可移植名称；清理失败保留部分工作区所有权以供重试。
+- 新增真实临时目录公开 API 测试和 `code_copy` 示例；不声明 Git、池、运行时隔离、一致快照或未来写入总配额。
 
 ### 未发布：声明依赖架构门禁
 
