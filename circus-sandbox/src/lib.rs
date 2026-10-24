@@ -49,4 +49,6 @@ pub mod runtime;
 mod workspace;
 
 #[doc(inline)]
-pub use workspace::{PathRejectReason, Workspace, WorkspaceError};
+pub use workspace::{
+    CodeSnapshot, PathRejectReason, SnapshotBudget, SnapshotError, Workspace, WorkspaceError,
+};

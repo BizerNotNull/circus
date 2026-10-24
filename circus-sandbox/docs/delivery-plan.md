@@ -9,7 +9,7 @@
 - 安全基线 [PR #3](https://github.com/BizerNotNull/circus/pull/3) 与质量基线 [PR #4](https://github.com/BizerNotNull/circus/pull/4) 已合并并集成；具体提交和检查证据见对应 PR，不在计划中预填通过。
 - Workspace 实现与 Rust 门禁的交付记录见 [PR #5](https://github.com/BizerNotNull/circus/pull/5)。当前检出已有真实 Rust 1.99.1、edition 2024 crate、同步文件 API、example、测试、Apache-2.0 许可证和 cargo-deny 策略；该 PR 是合并状态与 CI 结果的权威入口，不在本文预填结果。
 - 安全文档与最小权限跟进见 [PR #7](https://github.com/BizerNotNull/circus/pull/7)，以该 PR 的实际合并状态和证据为准。安全扫描约定统一见 [安全说明](../../.github/sandbox-security.md)。
-- 其余进程内统一 API、生命周期、命令执行、真实进程/容器隔离、environment、Git、HTTP、认证、部署、指标、池和快照仍未实现。下列完整目标保留，不因文件库已存在而缩小验收。
+- 当前检出另有进程内代码快照：`Workspace::capture_code_snapshot` 在内容字节与条目预算内复制文件和空目录，`CodeSnapshot::restore` 创建新工作区。它不持久化，也没有接入容器或暖池。其余进程内统一 API、生命周期、命令执行、真实进程/容器隔离、environment、Git、HTTP、认证、部署、指标、池和容器快照仍未实现。下列完整目标保留，不因文件库或进程内副本已存在而缩小验收。
 
 ## 非目标
 
@@ -192,7 +192,7 @@ Dependabot 目前没有 QA npm 或 Cargo 配置；后续需要时在已有文件
 
 ### 代码快照与暖池干净检出
 
-依赖：文件系统快照与 workspace 契约都已存在。此项仍是保留需求，不是可选删除，也不是文件系统快照的别名。
+容器集成依赖文件系统快照与 workspace 契约；独立的进程内 `CodeSnapshot` 只依赖 workspace，已在当前检出实现。暖池及容器恢复仍是保留需求，不是可选删除，也不是文件系统快照的别名。
 
 范围：预启动或暖池，以及代码工作区快照。不因此扩大到其他运行时，也不把内存检查点补进 Docker 文件系统快照。
 
