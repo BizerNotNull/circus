@@ -2,8 +2,7 @@
 
 ## 状态与边界
 
-`circus-sandbox` 是 Rust library crate（包名 `circus-sandbox`，edition 2024）。当前提供 workspace 文件能力、进程内代码快照和 `runtime::ResourceLimits` 资源请求校验。文件操作与快照基于 cap-std 目录句柄；资源模型尚未接入文件 API 或执行后端。这不是进程沙箱，不提供容器、运行时隔离或 Paseo 接入。
-
+`circus-sandbox` 是 Rust library crate（包名 `circus-sandbox`，edition 2024）。当前提供 workspace 文件能力、进程内代码快照、`runtime::ResourceLimits` 资源请求校验，以及 lifecycle 配置模型校验。配置模型只验证请求，不启动 Docker、拉取镜像、执行隔离或实现生命周期后端；backend still not implemented in this branch. 文件操作与快照基于 cap-std 目录句柄；资源模型尚未接入文件 API 或执行后端。
 已实现：
 
 - `Workspace` 同步 API：`new`、`write_file`、`read_file`、`create_dir_all`、`remove_file`、`cleanup` 与 `capture_code_snapshot`。方法会阻塞调用线程。
@@ -17,8 +16,7 @@
 - 同一 `Workspace` 的并发读写由内部 `RwLock` 保护。这只序列化本进程内对这一个值的调用，不是外部进程隔离，也不是 crash-safe 原子写。不要把这把锁写成原子替换或磁盘配额，也不要为此增加原子写入 API。
 - `CodeSnapshot` 只保存当前进程内的普通文件与空目录；捕获拒绝符号链接和非普通节点，文件与目录打开都不可等待 FIFO。`SnapshotBudget` 限制单次捕获的内容字节及条目数，不是工作区配额。恢复总是创建新 `Workspace`；恢复后的清理失败通过错误携带目标工作区，调用方可继续重试 `cleanup`。不复制进程、内存或容器状态。
 - `runtime::ResourceLimits` / `ResourceLimitsError` 是后端中立的资源值模型，无 `Default`。内存/工作区为正字节数且不超过 `i64::MAX`，CPU 为正 milli-CPU（`1000` 等于一个 CPU），进程数为正；工作区不超过内存，单文件上限不超过工作区。单文件上限为 `1..usize::MAX`，拒绝 `0` 和 `usize::MAX`，与 `Workspace::new` 一致。标量错误先于关联错误。校验不提供聚合准入/预留、内核强制或隔离，不附加宿主容量或 Docker 专用约束。
-
-未实现，不得写成现有能力：命令执行、生命周期状态机、Docker/Kubernetes/containerd、runc/gVisor/Kata/Firecracker、OCI 镜像、Git clone/worktree、沙箱池、HTTP/RPC、工作区总配额执行、宿主磁盘配额、进程隔离。`src/api`、`lifecycle`、`infrastructure`、`environment`、`pool` 仍只是占位目录；`runtime` 已有资源值模型，但没有运行时实现。不修改 `../circus-paseo/`。
+  未实现，不得写成现有能力：命令执行、生命周期状态机（配置模型除外）、Docker/Kubernetes/containerd、runc/gVisor/Kata/Firecracker、OCI 镜像、Git clone/worktree、沙箱池、HTTP/RPC、工作区总配额执行、宿主磁盘配额、进程隔离。`src/api`、`src/infrastructure`、`src/environment`、`src/pool` 仍只是占位目录；`runtime` 已有资源值模型，`lifecycle` 仅有配置校验模型，没有运行时实现。不修改 `../circus-paseo/`。
 
 用户说明见 [README.md](README.md)，工程命令与门禁边界见 [docs/engineering.md](docs/engineering.md)，完整目标及交付记录入口见 [docs/delivery-plan.md](docs/delivery-plan.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。当前检出已有 Workspace crate、许可证策略、元数据/质量/安全/Rust 工作流，但开发约定和工作流存在仍然不是“全部领域已交付”或检查已通过。
 

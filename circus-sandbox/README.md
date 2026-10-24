@@ -5,6 +5,12 @@ Rust 库，包名 `circus-sandbox`。当前提供 workspace 文件能力、进�
 代码快照是受显式操作预算约束的、仅进程内存中的文件与目录副本；它不是进程或内存检查点、Docker commit、容器能力或持久化格式。
 这不是进程沙箱，也不是容器。它不隔离 CPU、网络、系统调用或进程，不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Git、命令执行、生命周期、HTTP/RPC 和容器后端都还没有实现。资源请求校验不等于资源预留、聚合准入或内核强制；也没有工作区总字节配额、文件数配额或宿主磁盘配额的执行机制。
 
+## Sandbox configuration validation
+
+`circus_sandbox::{DockerEndpoint, RuntimeName, IsolationConfig, IoLimits, SandboxConfig}` validates an explicit six-argument create request. It accepts only local Unix sockets or local `npipe:////./pipe/<name>` endpoints, `runc`, nonempty image references, all required isolation flags, safe absolute container workspace paths, positive probeable I/O bounds, and the supported future supervisor profile of at least three PIDs. The models validate only: this branch still has no backend, does not start Docker, pull images, enforce isolation, or reserve resources. See `examples/sandbox_config.rs` and `tests/sandbox_config.rs`.
+
+Run the focused example with `cargo run --locked --example sandbox_config`.
+
 工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖是 cap-std **4.0.3**、cap-fs-ext **4.0.3**（使用 `OpenOptionsFollowExt::follow(No)` 拒绝快照遍历中的符号链接，并在 Unix 使用 `OpenOptionsSyncExt::nonblock`，不开 default features）、tempfile **3.27.0**、thiserror **2.0.21**（非预发布）。`Cargo.lock` 固定解析版本；检查和运行都加 `--locked`。
 
 这里描述当前检出的真实实现，不以文件或工作流存在代替发布、合并和运行证据。完整目标及交付记录入口见 [交付计划](docs/delivery-plan.md)，QA、安全、Rust 与架构域门禁的实际范围见 [工程说明](docs/engineering.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。
