@@ -244,6 +244,15 @@ async fn terminate(
         *may_signal = false;
         return Err(error);
     }
+    // `killpg` reports ESRCH (3) when the whole group is already gone; that is
+    // the outcome termination wants, not a cleanup failure.
+    #[cfg(target_os = "linux")]
+    if let Err(error) = child.start_kill()
+        && error.raw_os_error() != Some(3)
+    {
+        return Err(error);
+    }
+    #[cfg(not(target_os = "linux"))]
     child.start_kill()?;
     #[cfg(target_os = "linux")]
     {
