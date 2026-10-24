@@ -8,6 +8,10 @@ pub(crate) use images::ImageInfo;
 mod output;
 pub(crate) use output::{OutputLimit, OutputPhase};
 
+#[path = "engine_manifest.rs"]
+mod manifest;
+pub(crate) use manifest::{WorkspaceEntry, WorkspaceEntryKind};
+
 #[path = "engine_policy.rs"]
 mod policy;
 pub(crate) use policy::{HostReport, OWNER_LABEL_KEY, PolicyMismatch, create_body};
@@ -23,7 +27,7 @@ use std::future::Future;
 
 use futures_util::StreamExt;
 
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::observability::events;
 
@@ -72,6 +76,8 @@ pub(crate) enum EngineErrorKind {
     Limit,
     InvalidPath,
     Protocol,
+    /// The guest stopped listing after the caller's entry bound.
+    EntryLimit,
 }
 
 const CLIENT_TIMEOUT_SECS: u64 = 90;
@@ -139,6 +145,8 @@ struct FileRequest<'a> {
     mode: &'static str,
     stdin: Stdin<'a>,
     max_bytes: usize,
+    /// Only `list` carries one; it becomes the helper's entry bound.
+    max_entries: Option<usize>,
 }
 
 struct ExecIo<'a> {
@@ -343,67 +351,46 @@ impl Engine {
         result
     }
 
-    /// Download only the configured workspace, never the container root.
-    /// The anonymous file is deleted on close, including cancellation/errors.
-    pub(crate) async fn download_workspace_archive(
+    /// Enumerates only the configured workspace through the confined guest
+    /// helper, never the container root and never Docker's archive API.
+    ///
+    /// The helper walks the workspace without following links and refuses
+    /// symlinks, hardlinks, FIFOs, devices, sockets, non-UTF-8 names, and names
+    /// that are not portable relative paths. It emits a sorted NUL-delimited
+    /// manifest; `max_bytes` bounds that manifest (the helper fails with the
+    /// limit exit when a record would cross it) and `max_entries` bounds the
+    /// number of listed entries with a typed entry-limit exit. A zero byte bound
+    /// is rejected before exec. Payloads are not transferred here; callers read
+    /// them one file at a time with [`Self::download_file`].
+    pub(crate) async fn list_workspace(
         &self,
         id: &str,
+        user: &str,
         workspace: &str,
-        max_archive_bytes: u64,
-    ) -> Result<std::fs::File, EngineError> {
-        if max_archive_bytes == 0 {
+        max_bytes: u64,
+        max_entries: usize,
+    ) -> Result<Vec<WorkspaceEntry>, EngineError> {
+        if max_bytes == 0 {
             return Err(file_error(
                 EngineErrorKind::Limit,
-                "archive byte limit must be positive",
+                "workspace manifest byte limit must be positive",
             ));
         }
-        let file = tokio::task::spawn_blocking(tempfile::tempfile)
-            .await
-            .map_err(|err| {
-                file_error(
-                    EngineErrorKind::FileIo,
-                    format!("archive tempfile task: {err}"),
-                )
-            })?
-            .map_err(|err| {
-                file_error(EngineErrorKind::FileIo, format!("archive tempfile: {err}"))
-            })?;
-        let mut file = tokio::fs::File::from_std(file);
-        let options = bollard::query_parameters::DownloadFromContainerOptionsBuilder::new()
-            .path(workspace)
-            .build();
-        let mut stream = self.docker.download_from_container(id, Some(options));
-        let mut total = 0u64;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(map_err)?;
-            let size = u64::try_from(chunk.len())
-                .map_err(|_| file_error(EngineErrorKind::Limit, "archive chunk size overflow"))?;
-            total = total
-                .checked_add(size)
-                .filter(|total| *total <= max_archive_bytes)
-                .ok_or_else(|| {
-                    file_error(
-                        EngineErrorKind::Limit,
-                        "workspace archive exceeds transport byte limit",
-                    )
-                })?;
-            file.write_all(&chunk).await.map_err(|err| {
-                file_error(EngineErrorKind::FileIo, format!("archive write: {err}"))
-            })?;
-        }
-        if total == 0 {
-            return Err(file_error(
-                EngineErrorKind::Protocol,
-                "empty workspace archive response",
-            ));
-        }
-        file.flush()
-            .await
-            .map_err(|err| file_error(EngineErrorKind::FileIo, format!("archive flush: {err}")))?;
-        file.rewind()
-            .await
-            .map_err(|err| file_error(EngineErrorKind::FileIo, format!("archive rewind: {err}")))?;
-        Ok(file.into_std().await)
+        let bytes = self
+            .file_helper(
+                id,
+                user,
+                workspace,
+                FileRequest {
+                    relative: "",
+                    mode: "list",
+                    stdin: Stdin::None,
+                    max_bytes: usize::try_from(max_bytes).unwrap_or(usize::MAX),
+                    max_entries: Some(max_entries),
+                },
+            )
+            .await?;
+        manifest::decode(&bytes)
     }
 
     /// Transfers one entry. A file source is streamed from its host handle in
@@ -430,6 +417,7 @@ impl Engine {
                         mode: "mkdir",
                         stdin: Stdin::None,
                         max_bytes: 0,
+                        max_entries: None,
                     },
                 )
                 .await?;
@@ -450,6 +438,7 @@ impl Engine {
                         mode: "write",
                         stdin: Stdin::Bytes(&bytes),
                         max_bytes: 0,
+                        max_entries: None,
                     },
                 )
                 .await?;
@@ -470,6 +459,7 @@ impl Engine {
                         mode: "write",
                         stdin: Stdin::File { file, len },
                         max_bytes: 0,
+                        max_entries: None,
                     },
                 )
                 .await?;
@@ -496,6 +486,7 @@ impl Engine {
                     mode: "read",
                     stdin: Stdin::None,
                     max_bytes,
+                    max_entries: None,
                 },
             )
             .await?;
@@ -524,6 +515,7 @@ impl Engine {
                 mode: "unlink",
                 stdin: Stdin::None,
                 max_bytes: 0,
+                max_entries: None,
             },
         )
         .await?;
@@ -542,13 +534,14 @@ impl Engine {
             mode,
             stdin,
             max_bytes,
+            max_entries,
         } = request;
         let bound = match &stdin {
             Stdin::None => 0,
             Stdin::Bytes(bytes) => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
             Stdin::File { len, .. } => *len,
         };
-        let argv = vec![
+        let mut argv = vec![
             "python3".to_string(),
             "-I".to_string(),
             "-B".to_string(),
@@ -564,6 +557,9 @@ impl Engine {
             }
             .to_string(),
         ];
+        if let Some(max_entries) = max_entries {
+            argv.push(max_entries.to_string());
+        }
         // The helper contract is explicit: stdout may carry up to
         // `max_bytes + 1` (the extra byte proves an over-limit file), stderr may
         // carry at most 4 KiB of diagnostics, and both share exactly their sum.
@@ -592,6 +588,7 @@ impl Engine {
             85 => EngineErrorKind::FileIo,
             86 => EngineErrorKind::NotFound,
             87 => EngineErrorKind::PermissionDenied,
+            88 => EngineErrorKind::EntryLimit,
             _ => EngineErrorKind::Other,
         };
         Err(file_error(
@@ -896,6 +893,7 @@ fn engine_error_kind(err: &EngineError) -> &'static str {
         EngineErrorKind::PermissionDenied => "permission_denied",
         EngineErrorKind::UnsafeFile => "unsafe_file",
         EngineErrorKind::Limit => "limit",
+        EngineErrorKind::EntryLimit => "entry_limit",
         EngineErrorKind::InvalidPath => "invalid_path",
         EngineErrorKind::Protocol => "protocol",
     }

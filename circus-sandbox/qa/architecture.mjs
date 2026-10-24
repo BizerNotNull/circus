@@ -35,6 +35,7 @@ export const ALLOWED_DEPENDENCIES = Object.freeze({
     "error",
     "observability",
   ],
+  http: ["api", "lifecycle", "workspace", "runtime", "error"],
   api: [
     "pool",
     "lifecycle",
@@ -45,6 +46,7 @@ export const ALLOWED_DEPENDENCIES = Object.freeze({
     "observability",
   ],
   facade: [
+    "http",
     "api",
     "pool",
     "lifecycle",

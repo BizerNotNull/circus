@@ -155,19 +155,26 @@ impl Fixture {
     }
 }
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        if let Some(id) = &self.id {
-            let _ = Command::new("docker")
-                .args(["--host", &self.host, "rm", "-f", id])
-                .output();
-        }
-    }
-}
-
-async fn destroy(f: &mut Fixture) -> Result<(), Box<dyn std::error::Error>> {
+// The fixture owns exactly one container. Teardown is explicit and has no Drop
+// fallback: `Sandbox::destroy` reports success only after confirmed absence,
+// then the engine must also report the container gone. Unconfirmed removal
+// fails the test instead of being ignored.
+async fn teardown(f: &mut Fixture) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(sandbox) = f.sandbox.take() {
         sandbox.destroy().await?;
+    }
+    let Some(id) = f.id.as_deref() else {
+        return Err("fixture has no container ID; absence cannot be confirmed".into());
+    };
+    let inspected = docker(&f.host, &["inspect", id])?;
+    if inspected.status.success() {
+        return Err(format!("teardown did not remove container {id}").into());
+    }
+    let stderr = String::from_utf8_lossy(&inspected.stderr);
+    let absent = stderr.to_ascii_lowercase();
+    // The CLI wording varies by version: "No such object" or "no such object".
+    if !(absent.contains("no such") || absent.contains("not found")) {
+        return Err(format!("teardown could not confirm absence of {id}: {stderr}").into());
     }
     Ok(())
 }
@@ -186,7 +193,7 @@ async fn docker_post_create_policy_is_verified_against_inspect()
 -> Result<(), Box<dyn std::error::Error>> {
     enabled();
     let _serial = SERIAL.lock().await;
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     let id = f.id.clone().expect("created container id");
 
     // Independent engine evidence: read the effective host configuration
@@ -262,7 +269,7 @@ async fn docker_post_create_policy_is_verified_against_inspect()
             .as_ref()
             .is_some_and(|caps| caps.iter().any(|cap| cap == "ALL"))
     );
-    Ok(())
+    teardown(&mut f).await
 }
 
 #[tokio::test]
@@ -271,7 +278,7 @@ async fn docker_normal_delete_confirms_absence_and_inspect_fails_after_delete()
 -> Result<(), Box<dyn std::error::Error>> {
     enabled();
     let _serial = SERIAL.lock().await;
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     f.sandbox().start().await?;
     let id = f.id.clone().expect("created container id");
     require_inspect(&f.host, &id)?;
@@ -285,7 +292,7 @@ async fn docker_normal_delete_confirms_absence_and_inspect_fails_after_delete()
         !inspect_exists(&f.host, &id)?,
         "container {id} still exists"
     );
-    Ok(())
+    teardown(&mut f).await
 }
 
 #[tokio::test]
@@ -294,7 +301,7 @@ async fn docker_missing_container_is_treated_as_confirmed_absence()
 -> Result<(), Box<dyn std::error::Error>> {
     enabled();
     let _serial = SERIAL.lock().await;
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     let id = f.id.clone().expect("created container id");
 
     // Remove out of band. The sealed handle must not report a false failure
@@ -316,7 +323,7 @@ async fn docker_missing_container_is_treated_as_confirmed_absence()
     // invent a new backend instance.
     sandbox.destroy().await?;
     assert!(!inspect_exists(&f.host, &id)?);
-    Ok(())
+    teardown(&mut f).await
 }
 
 #[tokio::test]
@@ -325,7 +332,7 @@ async fn docker_aggregate_output_budget_allows_exact_limit_and_reclaims_on_overf
 -> Result<(), Box<dyn std::error::Error>> {
     enabled();
     let _serial = SERIAL.lock().await;
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     f.sandbox().start().await?;
     let id = f.id.clone().expect("created container id");
 
@@ -370,7 +377,7 @@ async fn docker_aggregate_output_budget_allows_exact_limit_and_reclaims_on_overf
         !inspect_exists(&f.host, &id)?,
         "container and descendants were not reclaimed"
     );
-    Ok(())
+    teardown(&mut f).await
 }
 
 #[tokio::test]
@@ -379,7 +386,7 @@ async fn docker_slow_command_timeout_destroys_and_leaves_no_residue()
 -> Result<(), Box<dyn std::error::Error>> {
     enabled();
     let _serial = SERIAL.lock().await;
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     f.sandbox().start().await?;
     let id = f.id.clone().expect("created container id");
 
@@ -407,7 +414,7 @@ async fn docker_slow_command_timeout_destroys_and_leaves_no_residue()
         !inspect_exists(&f.host, &id)?,
         "timed-out command left its container behind"
     );
-    Ok(())
+    teardown(&mut f).await
 }
 
 #[tokio::test]
@@ -416,30 +423,47 @@ async fn docker_status_timeout_does_not_destroy_the_instance()
 -> Result<(), Box<dyn std::error::Error>> {
     enabled();
     let _serial = SERIAL.lock().await;
-    let f =
+    let mut f =
         Fixture::with_config(backend()?, config_with_lifecycle(Duration::from_nanos(1))?).await?;
     let id = f.id.clone().expect("created container id");
 
-    match f.sandbox().status().await {
-        Err(SandboxError::TimedOut {
-            instance_id,
-            ownership,
-            operation,
-            ..
-        }) => {
-            assert_eq!(instance_id.as_deref(), Some(id.as_str()));
-            assert_eq!(ownership, Ownership::StillPresent);
-            assert_eq!(operation, SandboxOperation::Status);
+    // A one-nanosecond deadline can still race with an immediately ready
+    // inspection, so probe until the deadline actually fires. Whatever the
+    // outcome, the read-only status call must never destroy the instance.
+    let mut timed_out = false;
+    for _ in 0..64 {
+        match f.sandbox().status().await {
+            Err(SandboxError::TimedOut {
+                instance_id,
+                ownership,
+                operation,
+                ..
+            }) => {
+                // `id` came from the Docker CLI's short-ID listing; the domain
+                // reports the engine's full 64-character identity.
+                assert!(
+                    instance_id
+                        .as_deref()
+                        .is_some_and(|full| full.starts_with(id.as_str())),
+                    "reported {instance_id:?} does not match owned container {id}"
+                );
+                assert_eq!(ownership, Ownership::StillPresent);
+                assert_eq!(operation, SandboxOperation::Status);
+                timed_out = true;
+                break;
+            }
+            Ok(status) => assert_eq!(status.phase, SandboxPhase::Created),
+            other => panic!("unexpected status result: {other:?}"),
         }
-        other => panic!("unexpected status result: {other:?}"),
     }
+    assert!(
+        timed_out,
+        "a one-nanosecond status deadline never fired in 64 attempts"
+    );
 
     // The read-only inspection deadline must not have removed the container.
     require_inspect(&f.host, &id)?;
-    let mut f = f;
-    destroy(&mut f).await?;
-    assert!(!inspect_exists(&f.host, &id)?);
-    Ok(())
+    teardown(&mut f).await
 }
 
 #[tokio::test]
@@ -466,8 +490,17 @@ async fn docker_cancelled_create_retains_owned_cleanup() -> Result<(), Box<dyn s
         }
         task.abort();
         // Dropping the create future or a completed Sandbox retains worker
-        // ownership; the worker must reclaim the labelled container.
-        let _ = task.await;
+        // ownership; the worker must reclaim the labelled container. A create
+        // that finished before the abort is destroyed explicitly.
+        match task.await {
+            Ok(Ok(sandbox)) => sandbox.destroy().await?,
+            Ok(Err(error)) => return Err(error.into()),
+            Err(error) => {
+                if !error.is_cancelled() {
+                    return Err(error.into());
+                }
+            }
+        }
         let mut reclaimed = false;
         for _ in 0..500 {
             tokio::time::sleep(Duration::from_millis(10)).await;

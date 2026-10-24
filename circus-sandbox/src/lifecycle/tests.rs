@@ -83,6 +83,7 @@ use crate::infrastructure::{
     Backend, BackendProcess, Capabilities, CommonSpec, EngineError, EngineErrorKind, ExecDone,
     HostReport, InstanceId, OutputLimit as EngineOutputLimit, OutputPhase as EngineOutputPhase,
     PolicyMismatch, PrepareError, ProcessSpec, Recovered, UploadEntry, UploadSource,
+    WorkspaceEntry,
 };
 use crate::observability::SandboxMetrics;
 use crate::runtime::{IoLimits, IsolationConfig, ResourceLimits, SandboxConfig};
@@ -188,7 +189,7 @@ impl Backend for FakeBackend {
         Capabilities {
             pause_resume: true,
             file_transport: true,
-            workspace_archive: true,
+            workspace_snapshot: true,
         }
     }
 
@@ -362,13 +363,15 @@ impl Backend for FakeBackend {
         }
     }
 
-    fn download_workspace_archive(
+    fn list_workspace(
         &self,
         _id: &InstanceId,
+        _user: &str,
         _workspace: &str,
-        _max_archive_bytes: u64,
-    ) -> impl Future<Output = Result<std::fs::File, EngineError>> + Send {
-        async { unused_engine("download_workspace_archive") }
+        _max_bytes: u64,
+        _max_entries: usize,
+    ) -> impl Future<Output = Result<Vec<WorkspaceEntry>, EngineError>> + Send {
+        async { unused_engine("list_workspace") }
     }
 }
 

@@ -58,7 +58,10 @@ fn config() -> Result<SandboxConfig> {
     )?)
 }
 
-// The emergency fallback removes only the exact unique container created here.
+// The fixture owns exactly one container. Teardown is explicit and has no Drop
+// fallback: `Sandbox::destroy` reports success only after confirmed absence,
+// then the engine must also report the container gone. Unconfirmed removal
+// fails the test instead of being ignored.
 struct Fixture {
     sandbox: Option<Sandbox>,
     host: String,
@@ -87,17 +90,21 @@ impl Fixture {
     }
 }
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = Command::new("docker")
-            .args(["--host", &self.host, "rm", "-f", &self.id])
-            .output();
-    }
-}
-
-async fn destroy(f: &mut Fixture) -> Result {
+async fn teardown(f: &mut Fixture) -> Result {
     if let Some(sandbox) = f.sandbox.take() {
         sandbox.destroy().await?;
+    }
+    let inspected = Command::new("docker")
+        .args(["--host", &f.host, "inspect", &f.id])
+        .output()?;
+    if inspected.status.success() {
+        return Err(format!("teardown did not remove container {}", f.id).into());
+    }
+    let stderr = String::from_utf8_lossy(&inspected.stderr);
+    let absent = stderr.to_ascii_lowercase();
+    // The CLI wording varies by version: "No such object" or "no such object".
+    if !(absent.contains("no such") || absent.contains("not found")) {
+        return Err(format!("teardown could not confirm absence of {}: {stderr}", f.id).into());
     }
     Ok(())
 }
@@ -204,6 +211,6 @@ async fn docker_staging_tree_over_limit_is_typed_and_retry_streams_guest_bytes()
     assert_eq!(downloaded.len(), MAX_FILE_BYTES);
     assert!(downloaded.iter().all(|byte| *byte == b'N'));
 
-    destroy(&mut f).await?;
+    teardown(&mut f).await?;
     Ok(())
 }

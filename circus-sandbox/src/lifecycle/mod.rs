@@ -85,7 +85,8 @@ enum Op {
     Status(oneshot::Sender<Result<SandboxStatus, SandboxError>>),
     CaptureSnapshot {
         budget: crate::workspace::SnapshotBudget,
-        max_archive_bytes: u64,
+        /// Public `max_archive_bytes`: the manifest transport cap.
+        max_manifest_bytes: u64,
         reply: oneshot::Sender<Result<Arc<crate::workspace::CodeSnapshot>, SandboxError>>,
     },
     RestoreSnapshot {
@@ -119,7 +120,7 @@ impl Sandbox {
     ///
     /// Backend-neutral and backend-specific values are rejected before any
     /// instance allocation. Capability requirements (pause/resume, guest file
-    /// transfer, workspace archive capture) are checked before creating an
+    /// transfer, workspace snapshot capture) are checked before creating an
     /// instance. The backend then verifies its environment and that the image
     /// already exists locally; this crate never pulls or contacts a registry.
     ///
@@ -896,10 +897,10 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
         }
         Op::CaptureSnapshot {
             budget,
-            max_archive_bytes,
+            max_manifest_bytes,
             reply,
         } => {
-            let result = snapshot::capture(state, budget, max_archive_bytes, &cancel).await;
+            let result = snapshot::capture(state, budget, max_manifest_bytes, &cancel).await;
             record_operation(
                 &state.metrics,
                 OperationKind::CaptureWorkspaceSnapshot,
@@ -920,6 +921,20 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
             events::snapshot_restore_completed(outcome_label(&result), cleanup_required(&result));
             let _ = reply.send(result);
         }
+    }
+}
+
+#[cfg(test)]
+impl Sandbox {
+    /// Builds a sandbox over an in-process test backend. Used by HTTP handler
+    /// tests; it runs the same capability, preparation, and worker path as a
+    /// production create, differing only in how the backend is selected.
+    pub(crate) async fn create_for_test<B: Backend>(
+        backend: B,
+        config: SandboxConfig,
+    ) -> Result<Self, SandboxError> {
+        let spec = common_spec(&config);
+        Self::create_with_backend(backend, spec, config, SandboxMetrics::disabled()).await
     }
 }
 

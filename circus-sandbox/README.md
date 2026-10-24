@@ -2,11 +2,11 @@
 
 Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace 文件能力、受预算约束的进程内代码快照、`runtime::ResourceLimits` 请求校验、本地 OCI 镜像解析，以及后端中立的 `Sandbox::create(BackendConfig, SandboxConfig)` API。该 API 目前只有一个已实现后端：显式本地 Linux Docker Engine + `runc`。workspace 文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；容器后端通过私有 lifecycle/infrastructure 模块运行 Linux 容器，`BackendConfig::Docker` 只是公开的后端选择描述，不暴露 bollard 或 Engine 类型。
 
-容器后端不是通用进程沙箱：`BackendConfig::Docker` 只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。`environment::prepare_docker_image` 只做本地镜像 inspect，把显式 reference 解析成不可变 image ID 并检查平台；它不会访问 registry，也不会读取凭据。`environment::EnvironmentPlan` 执行显式有序、逐步固定且不经过 shell 的准备工作，并在返回前确认容器与 staging 清理；`environment::EnvironmentId` 从解析后的镜像、平台、固定步骤和显式 tenant 域派生不透明 SHA-256 标识，不提供缓存或持久化。Kubernetes、containerd、gVisor、Kata、Firecracker、registry pull/认证、HTTP/RPC 仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker + runc slice 当作全部七领域交付。
+容器后端不是通用进程沙箱：`BackendConfig::Docker` 只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。`environment::prepare_docker_image` 只做本地镜像 inspect，把显式 reference 解析成不可变 image ID 并检查平台；它不会访问 registry，也不会读取凭据。`environment::EnvironmentPlan` 执行显式有序、逐步固定且不经过 shell 的准备工作，并在返回前确认容器与 staging 清理；`environment::EnvironmentId` 从解析后的镜像、平台、固定步骤和显式 tenant 域派生不透明 SHA-256 标识，不提供缓存或持久化。`http` feature（默认启用）提供认证 JSON HTTP 传输，见 [HTTP API](docs/http-api.md)。Kubernetes、containerd、gVisor、Kata、Firecracker、registry pull/认证仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker + runc slice 当作全部七领域交付。
 
 workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Docker 后端不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；Docker 设置的实际效果需要真实 Linux Engine 验证，独立 workspace 仍没有总字节或宿主磁盘配额执行机制。`CodeSource::open` 仅供可信库调用方显式授予源目录读取能力，再复制到新建的 `Workspace`，不是挂载或直接接管源目录。`GitCheckout` 用受控宿主 Git 进程准备固定提交并可创建独立 worktree，属于可信准备流程，不是对抗性进程沙箱。
 
-工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖还包括 bollard **0.21.1**、tokio **1.x**、tokio-util **0.7.x**、uuid **1.x**、futures-util **0.3.x** 和 thiserror **2.0.21**；`Cargo.lock` 固定解析版本，检查和运行都加 `--locked`。workspace 仍使用 cap-std **4.0.3**、cap-fs-ext **4.0.3**、tempfile **3.27.0**。
+工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖还包括 bollard **0.21.1**、tokio **1.x**、tokio-util **0.7.x**、uuid **1.x**、futures-util **0.3.x**、thiserror **2.0.21**，以及 `http` feature 使用的 axum **0.8**、serde **1.x**、serde_json **1.x**、base64 **0.22**；测试客户端使用 reqwest **0.12**（仅 JSON feature）。`Cargo.lock` 固定解析版本，检查和运行都加 `--locked`。workspace 仍使用 cap-std **4.0.3**、cap-fs-ext **4.0.3**、tempfile **3.27.0**。
 
 这里描述当前检出的真实实现，不以文件或工作流存在代替发布、合并和运行证据。完整目标及交付记录入口见 [交付计划](docs/delivery-plan.md)，QA、安全、Rust 与架构域门禁的实际范围见 [工程说明](docs/engineering.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。
 
@@ -111,7 +111,7 @@ Call `GitCheckout::cleanup().await` for observable, idempotent removal. `GitErro
 - `runtime::SandboxConfig::new(limits, isolation, io_limits)` 只承载所有后端共有的要求：`ResourceLimits` 请求、`IsolationConfig` 隔离要求（no-new-privileges、drop all capabilities、read-only root、disabled network 必须全部为真）和 `IoLimits`。它不包含 endpoint、image 或 runtime。
 - `runtime::BackendConfig` 是后端选择枚举，当前只有一个已实现变体 `BackendConfig::Docker(DockerBackendConfig)`。该描述包含显式本地 endpoint、已存在的 image reference 和 OCI runtime 名称；构造它不连接 Docker。
 - Docker endpoint/image/runtime 的解析、仅 runc、以及 Docker 特有的 PID 下限等校验都在私有 `infrastructure::DockerConfig` 中完成。`Sandbox::create` 在分配任何容器之前返回 `SandboxError::BackendConfig(BackendConfigError)`；本地镜像不存在时返回 `SandboxError::BackendImageUnavailable { image }`；其他后端失败是 `SandboxError::Backend { message }`，不泄露 SDK 类型。真实 Engine 的 restrict/limit 结果由 create 时的 inspect 校验，不匹配会清理已创建容器，而不是降级。
-- `Sandbox::create` 还会在连接前检查后端是否声明支持 pause/resume、guest 文件传输和 workspace archive 捕获；不支持时返回 `SandboxError::UnsupportedCapability`。这些检查不表示其他后端已实现。
+- `Sandbox::create` 还会在连接前检查后端是否声明支持 pause/resume、guest 文件传输和 workspace 快照捕获；不支持时返回 `SandboxError::UnsupportedCapability`。这些检查不表示其他后端已实现。
 
 `SandboxStatus` 只报告当前 phase、`instance_id: Option<String>` 和 `enforcement: Option<EnforcementReport>`。`EnforcementReport` 的每个字段都是 inspect 到的证据，类型为 `Option`；`None` 表示后端没有报告该项。请求值不会复制成“已强制”的值。
 
@@ -136,9 +136,10 @@ cargo run --locked --example resource_policy
 
 ## Linux Docker + runc
 
-可手动构建的 [Codex Agent 镜像](images/codex/README.md) 固定 CLI 与 Node 版本，包含 Python 3、Git、ripgrep，并提供可写 HOME/缓存/临时目录的启动脚本。它沿用当前禁网策略，验收范围是工具和 Codex stdio 离线启动；模型通道与 Paseo 接入仍待实现。
+可手动构建的 [Codex Agent 镜像](images/codex/README.md) 固定 CLI 与 Node 版本，包含 Python 3、Git、ripgrep，并提供可写 HOME/缓存/临时目录的启动脚本。镜像验收沿用当前禁网策略，范围是工具和 Codex stdio 离线
+[Codex 单任务调用示例](docs/codex-agent.md) 通过 `ProcessSession` 转发受限模型请求，保持容器禁网、上游密钥留在宿主，并在任务完成后取回文件。需要显式配置支持 Responses 的模型服务；脚本化模型对端测试不代表真实模型验收或 Paseo 接入。
 
-交互进程入口为后端中立的 `Sandbox::spawn_process(ProcessRequest)`：先用 `Sandbox::create(BackendConfig::docker(endpoint, image, "runc"), SandboxConfig::new(limits, isolation, io))` 创建。返回的 `ProcessSession` 支持持续 stdin、分开的 stdout/stderr 流、EOF、退出通知和取消；每个沙箱同时允许一个交互进程，运行时仍可读写文件、查询状态及销毁。请求在入队前校验 argv、工作目录、环境变量名/值和输出上限，失败为 `SandboxError::InvalidProcessRequest`；已有一个交互进程时再次 `spawn_process` 或执行一次性 `exec` 返回 `SandboxError::ProcessActive`。输出背压、超时、取消与工作区保留语义见下述后端文档。可运行示例为 `examples/interactive_process.rs`；模型通道与 Paseo 接入仍待实现。
+交互进程入口为 `DockerSandbox::spawn_process(ProcessRequest)`。返回的 `ProcessSession` 支持持续 stdin、分开的 stdout/stderr 流、EOF、退出通知和取消；每个沙箱同时允许一个交互进程，运行时仍可读写文件、查询状态及销毁。输出背压、超时、取消与工作区保留语义见下述后端文档。可运行示例为 `examples/interactive_process.rs`；Paseo 接入仍待实现。
 
 容器后端的配置、生命周期、文件传输和已知限制见 [Linux Docker + runc 文档](docs/docker-linux-runc.md)，设计取舍见 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。最小前置条件：Linux Docker Engine（本地 Unix socket；Windows 开发机可使用 Linux Docker Desktop named pipe）、已存在的 Linux 镜像、镜像内 Python 3，以及 cgroup v2 用于运行集成测试。镜像不会自动拉取；声明 `VOLUME` 的镜像不支持。
 
@@ -149,7 +150,7 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
   cargo test --locked --test docker_sandbox --test docker_process -- --ignored
 ```
 
-测试使用 `python:3.12-slim`，可用 `CIRCUS_DOCKER_IMAGE` 指定另一个包含 Python 3 的本地 Linux 镜像。实际运行环境、命令、结果和限制应记录在对应 PR；不要把编译、忽略测试或 CI 通过写成隔离验证。
+测试使用 `python:3.12-slim`，可用 `CIRCUS_DOCKER_IMAGE` 指定另一个包含 Python 3 的本地 Linux 镜像。实际运行环境、命令、结果和限制应记录在对应 PR；不要把编译、忽略测试或 CI 通过写成隔离验证。GitHub 的 `Sandbox Docker` 工作流在 `ubuntu-latest` 上用相同环境变量逐个运行这些忽略套件，并先打印 Engine 版本与镜像证据；它只提供该次 GitHub 运行的真实 Engine 证据，不要求本地 Docker，未运行、取消或失败都不是通过声明。`agent_image` 仍只能手动验收：其镜像构建需要网络，不能离线构建。
 
 本地镜像解析测试同样默认忽略，且需要 `CIRCUS_DOCKER_ARCH` 指定 Docker 架构名（例如 `amd64` 或 `arm64`）：
 
@@ -198,6 +199,7 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
 
 示例分别观察 cold create + restore + start、完整预热和 warm acquire 的 Instant 耗时，并执行基线字节、显式 release/shutdown；不是承诺加速比。Windows 端点可设为 `npipe:////./pipe/dockerDesktopLinuxEngine`；环境变量由所用 shell 显式设置。
 
+<<<<<<< HEAD
 ## 可观测性（调用方计数与 tracing 事件）
 
 `observability::SandboxMetrics` 是调用方显式创建、可克隆的固定计数器句柄；`SandboxMetrics::new()` 分配一组原子计数，`SandboxMetrics::disabled()`（也是 `Default`）不分配且每次记录立即返回。把句柄传给 `Sandbox::create_with_metrics(backend, config, metrics)` 或 `PoolConfig::with_metrics(metrics)` 后，lifecycle、pool 和 backend 会记录 create 成功/失败、create cleanup pending/completed、按 `OperationKind` 与 `OperationOutcome` 分类的操作、cleanup 尝试/失败、pool ready/leased/retired/refilled、snapshot capture/restore，以及按 `TerminationKind` 分类的进程会话结束。`metrics.snapshot()` 返回纯数据 `MetricsSnapshot`；计数饱和而不是回绕，pending cleanup 是永不为负的 gauge。没有句柄时是分支级 no-op，不存在进程级注册表，也不接受租户或调用方自定义标签。
@@ -205,6 +207,22 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
 同一批路径通过 `tracing` 发出稳定名称事件和 `sandbox.create`/`backend.create` span，例如 `sandbox.create.started`、`sandbox.create.completed`、`sandbox.transition.completed`、`sandbox.exec.completed`、`sandbox.process.opened`/`closed`、`sandbox.snapshot.capture.completed`/`restore.completed`、`sandbox.cleanup.attempted`、`sandbox.cleanup.retry`、`pool.acquire.completed`、`pool.lease.handed_off`/`released`/`expired`、`pool.slot.ready`/`retired`/`refilled`，以及 `backend.*.completed`。字段只包含固定标签、计数、布尔值、持续时间、退出码和有界程序名；环境变量值、完整 argv、文件内容、宿主路径、镜像凭据和 endpoint URL 不会进入事件。`cleanup_pending`/`cleanup_required` 字段和 `create_cleanup_pending` 计数用于区分“能力不可用”与“清理仍未完成”。
 
 本 crate 是库：它不安装全局 `tracing` subscriber，不提供 exporter，也没有 health/readiness/metrics HTTP endpoint；是否采集、采到哪里由嵌入应用决定。事件与计数只描述已观察到的事实，不表示 Docker 隔离已在当前机器验证。
+=======
+## HTTP API
+
+`circus-sandbox` 的 `http` feature（默认启用）把同一领域 `Sandbox` API 暴露为认证 JSON HTTP 服务。`HttpConfig::new(bind, token, allowed_tenants)` 要求显式非空 bearer token 和非空租户 allow-list，没有环境默认值或匿名模式。每个路由（含 `GET /healthz`）都先验证 token；缺失/错误 token 是 `401`，租户缺失或不在 allow-list 是 `403`。sandbox 与 snapshot id 均为随机 UUID，注册表按租户隔离，跨租户 id 返回 `404`。
+
+主要端点：`POST /v1/sandboxes`、`GET /v1/sandboxes/{id}`、`POST .../{id}/{start,pause,resume}`、`DELETE /v1/sandboxes/{id}`、`POST .../{id}/exec`、`GET|PUT .../{id}/files/{path}`、`POST .../{id}/snapshots`、`POST .../{id}/snapshots/{snapshot_id}/restore`。`GET /healthz` 只表示进程存活，不探测 Docker 或任何 sandbox；后端相关失败通过 sandbox 响应的 `503 backend_unavailable` 等错误码表达。
+
+错误体固定为 `{"code","message"}`，不使用内部错误文本，也不泄露 SDK 类型。仅支持 `docker` + `runc`；其他后端或 runtime 返回 `501 unsupported_backend`。清理未确认时 `DELETE` 返回 `500 cleanup_required` 并保留句柄供重试；优雅关闭会销毁全部保留 sandbox，并分别报告失败。
+
+完整端点、请求/响应字段、限额、取消与清理归属及 curl 示例见 [HTTP API](docs/http-api.md)，机器可读契约见 [openapi.json](docs/openapi.json)。示例只启动传输，不虚构 Docker 可用性：
+
+```bash
+CIRCUS_HTTP_TOKEN=example-token CIRCUS_HTTP_TENANT=local \
+  cargo run --locked --example http_api
+```
+>>>>>>> origin/main
 
 ## 命令
 
@@ -305,8 +323,8 @@ npm --prefix circus-sandbox/qa run architecture
 
 ### 未发布：Docker 工作区文件快照
 
-- 新增 `capture_workspace_snapshot` 和 `restore_workspace_snapshot`：使用 Docker archive API 捕获运行中 tmpfs 的普通文件/目录，并替换新建 sandbox 的启动暂存区；复用 `Arc<CodeSnapshot>`，不复制队列中的快照载荷。
-- 运行态捕获临时暂停后恢复，已暂停的 sandbox 保持暂停；独立限制 archive 传输、文件载荷与条目数量，恢复使用目标配置限制。清理失败保留所有权，完整语义见[后端文档](docs/docker-linux-runc.md)。
+- 新增 `capture_workspace_snapshot` 和 `restore_workspace_snapshot`：通过受限 guest helper 枚举运行中 tmpfs 的普通文件/目录（每项逐文件读取），并替换新建 sandbox 的启动暂存区；复用 `Arc<CodeSnapshot>`，不复制队列中的快照载荷。Docker archive API 对 `--tmpfs` 只返回挂载点本身，因此不能用于捕获。
+- 运行态容器保持运行：`docker exec` 在暂停容器上会被拒绝，因此捕获是活动工作区的尽力一致读取，不是冻结检查点；清单与逐个文件长度校验在并发修改时失败关闭。已暂停的 sandbox 会短暂恢复枚举后重新暂停。独立限制清单传输、文件载荷与条目数量，预算按条目数、单文件上限、总字节的顺序在读取任何文件前检查；不安全节点与非可移植名以类型化快照错误失败并保留可用 sandbox。恢复使用目标配置限制。清理失败保留所有权，完整语义见[后端文档](docs/docker-linux-runc.md)。
 - 不代表进程、内存、VM checkpoint 或 Docker commit，不声明本次改动已经通过真实 Docker 验证。
 
 ### 未发布：显式授权的代码副本与固定提交 Git 检出

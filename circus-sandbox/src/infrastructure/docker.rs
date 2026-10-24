@@ -5,7 +5,7 @@ use std::future::Future;
 use super::backend::{Backend, BackendProcess, Capabilities, CommonSpec, InstanceId, PrepareError};
 use super::engine::{
     CreateSpec, Engine, EngineError, EngineProcess, ExecDone, HostReport, ProcessSpec, Recovered,
-    SocketKind, UploadEntry,
+    SocketKind, UploadEntry, WorkspaceEntry,
 };
 
 /// Local Docker Engine endpoint. TCP, HTTP, and SSH are rejected.
@@ -193,7 +193,7 @@ impl Backend for DockerBackend {
         Capabilities {
             pause_resume: true,
             file_transport: true,
-            workspace_archive: true,
+            workspace_snapshot: true,
         }
     }
 
@@ -349,15 +349,17 @@ impl Backend for DockerBackend {
         async move { self.engine.host_report(id.as_str()).await }
     }
 
-    fn download_workspace_archive(
+    fn list_workspace(
         &self,
         id: &InstanceId,
+        user: &str,
         workspace: &str,
-        max_archive_bytes: u64,
-    ) -> impl Future<Output = Result<std::fs::File, EngineError>> + Send {
+        max_bytes: u64,
+        max_entries: usize,
+    ) -> impl Future<Output = Result<Vec<WorkspaceEntry>, EngineError>> + Send {
         async move {
             self.engine
-                .download_workspace_archive(id.as_str(), workspace, max_archive_bytes)
+                .list_workspace(id.as_str(), user, workspace, max_bytes, max_entries)
                 .await
         }
     }

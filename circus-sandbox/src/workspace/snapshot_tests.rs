@@ -4,7 +4,7 @@ use std::path::Path;
 use super::{SnapshotBudget, SnapshotError, Workspace};
 
 #[test]
-fn archive_limit_zero_is_rejected() {
+fn zero_budget_and_file_cap_are_rejected() {
     assert!(matches!(
         Workspace::new(0),
         Err(super::super::WorkspaceError::InvalidLimit { max_file_bytes: 0 })
