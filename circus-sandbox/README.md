@@ -1,10 +1,10 @@
 # circus-sandbox
 
-Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace 文件能力、`runtime::ResourceLimits` 请求校验，以及一个明确限定为本地 Linux Docker Engine + `runc` 的异步容器后端。workspace 文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；容器后端通过私有 lifecycle/infrastructure 模块运行显式配置的 Linux 容器。
+Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace 文件能力、受预算约束的进程内代码快照、`runtime::ResourceLimits` 请求校验，以及显式配置的本地 Linux Docker Engine + `runc` 异步容器后端。workspace 文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；容器后端通过私有 lifecycle/infrastructure 模块运行 Linux 容器。
 
-容器后端不是通用进程沙箱：它只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在的 Linux 镜像和 Python 3，拒绝拉取镜像；当前不提供 Kubernetes、containerd、HTTP/RPC、Git、快照或沙箱池。Docker Engine 的资源和隔离设置由显式配置验证，真实隔离仍必须在 Linux Docker Engine 上运行并验证。
-资源请求校验不等于资源预留、聚合准入或宿主磁盘配额。
-workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。容器后端是独立的 Docker + runc slice，不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；workspace 仍没有宿主磁盘配额执行机制。
+容器后端不是通用进程沙箱：它只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。Kubernetes、containerd、gVisor、Kata、Firecracker、OCI 环境准备、HTTP/RPC、Git、容器/VM 快照与预启动/沙箱池仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker + runc slice 当作全部七领域交付。
+
+workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Docker 后端不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；Docker 设置的实际效果需要真实 Linux Engine 验证，独立 workspace 仍没有总字节或宿主磁盘配额执行机制。
 
 工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖还包括 bollard **0.21.1**、tokio **1.x**、tokio-util **0.7.x**、uuid **1.x**、futures-util **0.3.x** 和 thiserror **2.0.21**；`Cargo.lock` 固定解析版本，检查和运行都加 `--locked`。workspace 仍使用 cap-std **4.0.3**、cap-fs-ext **4.0.3**、tempfile **3.27.0**。
 
@@ -36,13 +36,13 @@ fn prepare() -> Result<(), circus_sandbox::WorkspaceError> {
 | `remove_file(path)`              | 通过 cap-std `Dir::remove_file` 对最终组件 unlink。删除非目录项，包括普通文件、符号链接、FIFO 和 socket。不跟随符号链接目标，不删除目录。目录得到 `Io`，不是 `NotRegularFile`。删除前不做类型预检。                                                                                                                                                                                                                                                                                                                                         |
 | `cleanup(&mut self)`             | 删除临时目录。可重复调用：已经删除视为成功。成功之后，上述文件操作都返回 `Closed`。失败时保留工作区归属，可以再调一次；失败不会把工作区标成已关闭。                                                                                                                                                                                                                                                                                                                                                                                         |
 
-这些方法会阻塞当前线程。库本身没有异步运行时。将来在 Tokio 异步上下文里调用时，必须放到 `spawn_blocking` 上，不能直接占住异步 worker，也不要引入第二套异步运行时。
+这些方法会阻塞当前线程；从 Tokio 异步上下文调用时，必须放到 `spawn_blocking` 上，不能直接占住异步 worker。Docker 异步后端使用 Tokio，并通过 `spawn_blocking` 处理 workspace I/O；不要引入第二套异步运行时。
 
 `Drop` 只尽力删除临时目录，不返回错误。需要确认清理结果时调用 `cleanup`。
 
 ## 单文件上限、删除与并发
 
-`max_file_bytes` 只约束一次 `write_file` 的字节数，以及一次 `read_file` 最多探测的长度。读和写共用这一个单文件上限，不是把多个文件的用量加总，也不是文件个数上限。`new` 不按该值预分配，也不向操作系统申请磁盘配额。多次各自未超限的写入仍可能写满宿主临时目录；那是磁盘耗尽，本库不会把它报成 `LimitExceeded`。当前没有总配额 API，也不提供进程隔离。以后若实现真实的进程或容器后端，必须单独、显式地限制 CPU、内存、进程数和磁盘，不能把这个参数当成沙箱配额。本库不为此增加总配额 API。
+`max_file_bytes` 只约束一次 `write_file` 的字节数，以及一次 `read_file` 最多探测的长度。读和写共用这一个单文件上限，不是把多个文件的用量加总，也不是文件个数上限。`new` 不按该值预分配，也不向操作系统申请磁盘配额。多次各自未超限的写入仍可能写满宿主临时目录；那是磁盘耗尽，本库不会把它报成 `LimitExceeded`。独立 workspace 没有总配额 API，也不提供进程隔离；Docker 后端另行显式配置 CPU、内存、进程数和 tmpfs 工作区限制，不能把这个参数当成完整沙箱配额。
 
 `remove_file` 就是 cap-std 的 unlink：去掉路径最终组件上的非目录项。普通文件、符号链接、FIFO、socket，以及该平台 unlink 会删除的其他非目录节点，都会被删掉。最终组件是符号链接时，删的是链接本身，不打开、不跟随目标，因此也不会删掉链接指向的目录或文件。目录删不掉，返回 `Io`，目录及其内容保留。这不是“只删除普通文件”。读写才用 `NotRegularFile` 拒绝非普通节点；删除前再做类型检查会和 unlink 竞态，本 API 不做。
 
@@ -55,6 +55,16 @@ cargo run --locked --example workspace
 ```
 
 在 `circus-sandbox/` 目录执行。rustup 会按该目录的 `rust-toolchain.toml` 选择 1.99.1。
+
+## 进程内代码快照
+
+公开入口为 `Workspace::capture_code_snapshot(SnapshotBudget::new(max_total_bytes, max_entries)?)`，返回 `CodeSnapshot`；调用其 `restore()` 创建独立的新 `Workspace`，不会覆盖源工作区。
+
+- 两项预算必须为正：字节预算只计算文件内容，条目预算计算文件和目录，不包括根目录；单文件仍受 workspace 的读写上限约束。这是一次捕获的预算，不是之后写入的工作区配额。
+- 捕获保留普通文件与空目录，拒绝符号链接、特殊节点和不符合可移植相对路径规则的名称；失败返回类型化 `SnapshotError`。
+- 快照只保存在当前进程内存中，不序列化、不持久化，不是进程/内存检查点、Docker commit、容器或 VM 快照，也不是池已实现的证据。恢复失败且清理也失败时，`RestoreCleanup` 返回目标 workspace 供调用方重试清理。
+
+示例为 `examples/code_snapshot.rs`，公开 API 测试在 `tests/code_snapshot.rs`。
 
 ## 资源请求值模型
 
@@ -84,7 +94,7 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
   cargo test --locked --test docker_sandbox -- --ignored
 ```
 
-测试使用 `python:3.12-slim`，可用 `CIRCUS_DOCKER_IMAGE` 指定另一个包含 Python 3 的本地 Linux 镜像。当前检出没有记录真实 Docker Engine 运行结果；不要把编译、忽略测试或 CI 通过写成隔离验证。
+测试使用 `python:3.12-slim`，可用 `CIRCUS_DOCKER_IMAGE` 指定另一个包含 Python 3 的本地 Linux 镜像。实际运行环境、命令、结果和限制应记录在对应 PR；不要把编译、忽略测试或 CI 通过写成隔离验证。
 
 ## 命令
 
@@ -155,6 +165,12 @@ npm --prefix circus-sandbox/qa run architecture
 
 ## 变更
 
+### 未发布：当前能力与完整交付边界
+
+- 同步 workspace、受字节/条目预算约束的进程内代码快照、资源请求值校验，以及显式配置的异步 Linux Docker + runc 后端是当前实现；Docker API 的生命周期、命令/文件操作与前提见[后端文档](docs/docker-linux-runc.md)。
+- 进程内代码副本与尚未实现的容器/VM 快照明确区分；Kubernetes、containerd、gVisor、Kata、Firecracker、OCI 环境准备、Git、预启动与池仍保留在完整交付范围，没有 HTTP/RPC 或 Paseo 接入。
+- 本次修订只纠正文档事实，不声明发布、合并、检查或真实运行成功。
+
 ### 未发布：声明依赖架构门禁
 
 - 新增 `npm --prefix circus-sandbox/qa run architecture` 与 Windows/Linux CI，验证真实工具报告的跨架构域 `uses` 边满足固定矩阵。
@@ -170,22 +186,22 @@ npm --prefix circus-sandbox/qa run architecture
 
 ### 0.1.0
 
-这是当前 crate 版本及其 workspace 文件能力范围，不是进程沙箱或容器。发布与验证记录以对应提交和发布说明为准。
+以下记录 0.1.0 workspace 文件能力的初始范围，不是当前检出全部 API 的清单；当前新增能力与边界见上方未发布记录。发布与验证记录以对应提交和发布说明为准。
 
 可用：
 
-- `Workspace::new`、`write_file`、`read_file`、`create_dir_all`、`remove_file`、`cleanup`。方法阻塞调用线程，库不提供异步 API。
+- `Workspace::new`、`write_file`、`read_file`、`create_dir_all`、`remove_file`、`cleanup`。这些文件方法阻塞调用线程；独立 Docker API 是异步的。
 - 临时目录由库自己创建。公开 API 不接受宿主目录，也不返回工作区根路径。
 - 空路径、绝对路径、`..`、反斜杠和 Windows 盘符/UNC 前缀在打开前拒绝。通过后的访问从 cap-std 目录句柄出发。
 - 读和写使用同一个 `max_file_bytes`，含义是单个文件的上限，不是工作区总字节、文件数或宿主磁盘配额。超限写入在创建或截断之前失败。读取不按不可信 metadata 分配；超限时 `actual` 是探测到的长度，不是未知总长。当前没有总配额 API。
 - `cleanup` 成功后文件操作返回 `Closed`，并可重复调用。清理失败保留工作区，可以再试。`Drop` 只尽力删除，不返回错误。
 
-限制：workspace 本身不提供命令执行、Git、快照或沙箱池；Docker + runc 容器后端提供独立的异步命令执行和生命周期 API，具体范围见 [Linux Docker + runc](docs/docker-linux-runc.md)。
+限制：workspace 本身不提供命令执行、Git 或沙箱池；当前支持的快照仅为上述进程内代码副本，不支持容器/VM 快照。Docker + runc 后端提供独立的异步命令执行和生命周期 API，具体范围见 [Linux Docker + runc](docs/docker-linux-runc.md)。
 
 - `write_file` 不是原子替换，也没有单独的原子写入 API。只有关闭、非法路径、超限、缺失父目录和非普通文件这类前置失败保证不改文件。打开普通文件之后的 I/O 失败可能截断已有文件，或留下部分内容。
 - `remove_file` 按 cap-std unlink 删除非目录项，包括符号链接、FIFO 和 socket。不跟随符号链接目标，不删除目录，删除前也不做类型预检。
 - 同一 `Workspace` 的并发读写由内部 `RwLock` 保护。这不是外部进程隔离，也不是崩溃安全的原子写。
-- 没有工作区总配额或宿主磁盘配额。后续真实后端必须显式配置资源限制。
+- 独立 workspace 没有总字节或宿主磁盘配额；Docker 后端的资源设置需要另行显式配置。
 
 ## 许可证
 
