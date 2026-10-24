@@ -217,29 +217,10 @@ impl Engine {
                 create_id: Some(created_id.clone()),
                 ..map_err(err)
             })?;
-        let host = inspected.host_config.ok_or_else(|| EngineError {
-            message: "missing effective host configuration".to_string(),
-            not_found: false,
-            kind: EngineErrorKind::Other,
-            create_pending: false,
+        validate_created(&inspected, spec).map_err(|err| EngineError {
             create_id: Some(created_id.clone()),
+            ..err
         })?;
-        if host.memory != Some(spec.memory)
-            || host.memory_swap != Some(spec.memory)
-            || host.nano_cpus != Some(spec.nano_cpus)
-            || host.pids_limit != Some(spec.pids)
-            || host.readonly_rootfs != Some(true)
-            || host.init != Some(true)
-        {
-            return Err(EngineError {
-                message: "engine did not preserve required resource limits and isolation"
-                    .to_string(),
-                not_found: false,
-                kind: EngineErrorKind::Other,
-                create_pending: false,
-                create_id: Some(created_id),
-            });
-        }
         Ok(created_id)
     }
 
@@ -621,18 +602,126 @@ impl Engine {
     }
 }
 
+// Inspect is checked before lifecycle can start the owned container. A mismatch
+// returns its create id to the existing lifecycle recovery path.
+fn validate_created(
+    inspected: &bollard::models::ContainerInspectResponse,
+    spec: &CreateSpec,
+) -> Result<(), EngineError> {
+    let reject =
+        || EngineError::new("engine did not preserve required resource limits and isolation");
+    let host = inspected.host_config.as_ref().ok_or_else(reject)?;
+    let config = inspected.config.as_ref().ok_or_else(reject)?;
+    if host.memory != Some(spec.memory)
+        || host.memory_swap != Some(spec.memory)
+        || host.nano_cpus != Some(spec.nano_cpus)
+        || host.pids_limit != Some(spec.pids)
+        || host.readonly_rootfs != Some(true)
+        || host.init != Some(true)
+        || host.runtime.as_deref() != Some(spec.runtime.as_str())
+        || host.network_mode.as_deref() != Some("none")
+        || config.network_disabled != Some(true)
+        || config.user.as_deref() != Some(format!("{}:{}", spec.guest_uid, spec.guest_gid).as_str())
+        || config.working_dir.as_deref() != Some(spec.workspace_path.as_str())
+        || host.privileged.unwrap_or(false)
+        || host.publish_all_ports.unwrap_or(false)
+        || !empty(&host.cap_add)
+        || !host
+            .cap_drop
+            .as_ref()
+            .is_some_and(|caps| caps.len() == 1 && caps[0].eq_ignore_ascii_case("ALL"))
+        || !host.security_opt.as_ref().is_some_and(|opts| {
+            opts.len() == 1
+                && matches!(
+                    opts[0].as_str(),
+                    "no-new-privileges" | "no-new-privileges:true" | "no-new-privileges=true"
+                )
+        })
+        || !empty(&host.binds)
+        || !empty(&host.mounts)
+        || !empty(&host.volumes_from)
+        || !empty(&config.volumes)
+        || !empty(&host.devices)
+        || !empty(&host.device_requests)
+        || !empty(&host.device_cgroup_rules)
+        || host
+            .port_bindings
+            .as_ref()
+            .is_some_and(|ports| !ports.is_empty())
+        || !empty(&host.extra_hosts)
+        || !empty(&host.dns)
+        || host.ipc_mode.as_deref() != Some("private")
+        || host.cgroupns_mode != Some(bollard::models::HostConfigCgroupnsModeEnum::PRIVATE)
+        || host
+            .pid_mode
+            .as_deref()
+            .is_some_and(|mode| !mode.is_empty())
+        || host
+            .uts_mode
+            .as_deref()
+            .is_some_and(|mode| !mode.is_empty())
+        || host
+            .userns_mode
+            .as_deref()
+            .is_some_and(|mode| !mode.is_empty())
+        || host.auto_remove.unwrap_or(false)
+        || host.oom_kill_disable.unwrap_or(false)
+        || host.shm_size != Some(65_536)
+        || !host.restart_policy.as_ref().is_some_and(|policy| {
+            policy.name == Some(bollard::models::RestartPolicyNameEnum::NO)
+                && policy.maximum_retry_count.unwrap_or(0) == 0
+        })
+    {
+        return Err(reject());
+    }
+    let expected = workspace_options(spec);
+    if !host.tmpfs.as_ref().is_some_and(|tmpfs| {
+        tmpfs.len() == 1
+            && tmpfs.get(&spec.workspace_path).is_some_and(|options| {
+                options.split(',').count() == expected.split(',').count()
+                    && expected
+                        .split(',')
+                        .all(|option| options.split(',').any(|value| value == option))
+            })
+    }) {
+        return Err(reject());
+    }
+    // Docker may omit HostConfig.Tmpfs entries from Mounts. If returned, only
+    // that same writable, host-source-free tmpfs is permitted.
+    if inspected.mounts.as_ref().is_some_and(|mounts| {
+        mounts.len() > 1
+            || mounts.iter().any(|mount| {
+                mount.typ.as_deref() != Some("tmpfs")
+                    || mount.destination.as_deref() != Some(spec.workspace_path.as_str())
+                    || mount
+                        .source
+                        .as_deref()
+                        .is_some_and(|source| !source.is_empty())
+                    || mount.rw != Some(true)
+            })
+    }) {
+        return Err(reject());
+    }
+    Ok(())
+}
+
+fn empty<T>(items: &Option<Vec<T>>) -> bool {
+    items.as_ref().is_none_or(Vec::is_empty)
+}
+
+fn workspace_options(spec: &CreateSpec) -> String {
+    format!(
+        "rw,nosuid,nodev,uid={},gid={},mode=0755,size={}",
+        spec.guest_uid, spec.guest_gid, spec.workspace_bytes
+    )
+}
+
 fn container_body(name: &str, spec: &CreateSpec) -> bollard::models::ContainerCreateBody {
     let mut labels = HashMap::new();
     labels.insert(OWNER_LABEL_KEY.to_string(), spec.owner_label.clone());
     labels.insert("circus.sandbox.name".to_string(), name.to_string());
     let mut tmpfs = HashMap::new();
-    tmpfs.insert(
-        spec.workspace_path.clone(),
-        format!(
-            "rw,nosuid,nodev,uid={},gid={},mode=0755,size={}",
-            spec.guest_uid, spec.guest_gid, spec.workspace_bytes
-        ),
-    );
+    tmpfs.insert(spec.workspace_path.clone(), workspace_options(spec));
     bollard::models::ContainerCreateBody {
         image: Some(spec.image.clone()),
         user: Some(format!("{}:{}", spec.guest_uid, spec.guest_gid)),
@@ -786,4 +875,165 @@ fn is_not_found(err: &bollard::errors::Error) -> bool {
             ..
         }
     )
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::*;
+    use bollard::models::{ContainerConfig, ContainerInspectResponse, MountPoint};
+
+    fn fixture() -> (CreateSpec, ContainerInspectResponse) {
+        let spec = CreateSpec {
+            image: "local-image".into(),
+            runtime: "runc".into(),
+            memory: 64 * 1024 * 1024,
+            nano_cpus: 100_000_000,
+            pids: 8,
+            workspace_path: "/workspace".into(),
+            workspace_bytes: 8 * 1024 * 1024,
+            guest_uid: 65534,
+            guest_gid: 65534,
+            owner_label: "owned".into(),
+        };
+        let body = container_body("sandbox", &spec);
+        let inspected = ContainerInspectResponse {
+            config: Some(ContainerConfig {
+                user: body.user,
+                working_dir: body.working_dir,
+                network_disabled: body.network_disabled,
+                volumes: body.volumes,
+                ..Default::default()
+            }),
+            host_config: body.host_config,
+            ..Default::default()
+        };
+        (spec, inspected)
+    }
+
+    #[test]
+    fn accepts_safe_policy_and_engine_normalization() {
+        let (spec, mut inspected) = fixture();
+        assert!(validate_created(&inspected, &spec).is_ok());
+        let host = inspected.host_config.as_mut().unwrap();
+        host.cap_add = None;
+        host.binds = None;
+        host.mounts = None;
+        host.cap_drop = Some(vec!["all".into()]);
+        host.tmpfs.as_mut().unwrap().insert(
+            spec.workspace_path.clone(),
+            "size=8388608,mode=0755,gid=65534,uid=65534,nodev,nosuid,rw".into(),
+        );
+        inspected.mounts = Some(vec![MountPoint {
+            typ: Some("tmpfs".into()),
+            destination: Some(spec.workspace_path.clone()),
+            source: Some(String::new()),
+            rw: Some(true),
+            ..Default::default()
+        }]);
+        for option in [
+            "no-new-privileges",
+            "no-new-privileges:true",
+            "no-new-privileges=true",
+        ] {
+            inspected.host_config.as_mut().unwrap().security_opt = Some(vec![option.into()]);
+            assert!(validate_created(&inspected, &spec).is_ok(), "{option}");
+        }
+    }
+
+    #[test]
+    fn rejects_effective_host_policy_deviations() {
+        type Change = fn(&mut bollard::models::HostConfig);
+        let changes: &[(&str, Change)] = &[
+            ("memory", |h| h.memory = Some(0)),
+            ("swap", |h| h.memory_swap = Some(-1)),
+            ("cpu", |h| h.nano_cpus = None),
+            ("pids", |h| h.pids_limit = Some(-1)),
+            ("root", |h| h.readonly_rootfs = Some(false)),
+            ("init", |h| h.init = None),
+            ("runtime", |h| h.runtime = Some("other".into())),
+            ("network", |h| h.network_mode = Some("host".into())),
+            ("privileged", |h| h.privileged = Some(true)),
+            ("caps added", |h| h.cap_add = Some(vec!["SYS_ADMIN".into()])),
+            ("caps retained", |h| h.cap_drop = None),
+            ("nnp absent", |h| h.security_opt = None),
+            ("nnp false", |h| {
+                h.security_opt = Some(vec!["no-new-privileges:false".into()])
+            }),
+            ("security weakened", |h| {
+                h.security_opt
+                    .as_mut()
+                    .unwrap()
+                    .push("seccomp=unconfined".into())
+            }),
+            ("bind", |h| h.binds = Some(vec!["/:/host".into()])),
+            ("mount", |h| h.mounts = Some(vec![Default::default()])),
+            ("inherited volume", |h| {
+                h.volumes_from = Some(vec!["other".into()])
+            }),
+            ("device", |h| h.devices = Some(vec![Default::default()])),
+            ("device request", |h| {
+                h.device_requests = Some(vec![Default::default()])
+            }),
+            ("device rule", |h| {
+                h.device_cgroup_rules = Some(vec!["a *:* rwm".into()])
+            }),
+            ("ports", |h| h.publish_all_ports = Some(true)),
+            ("ipc", |h| h.ipc_mode = Some("host".into())),
+            ("pid", |h| h.pid_mode = Some("host".into())),
+            ("cgroup", |h| {
+                h.cgroupns_mode = Some(bollard::models::HostConfigCgroupnsModeEnum::HOST)
+            }),
+            ("tmpfs absent", |h| h.tmpfs = None),
+            ("tmpfs unsafe", |h| {
+                h.tmpfs
+                    .as_mut()
+                    .unwrap()
+                    .insert("/workspace".into(), "rw,size=8388608".into());
+            }),
+            ("extra tmpfs", |h| {
+                h.tmpfs
+                    .as_mut()
+                    .unwrap()
+                    .insert("/extra".into(), "rw".into());
+            }),
+        ];
+        for (name, change) in changes {
+            let (spec, mut inspected) = fixture();
+            change(inspected.host_config.as_mut().unwrap());
+            assert!(validate_created(&inspected, &spec).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn rejects_missing_config_and_effective_mounts() {
+        type Change = fn(&mut ContainerInspectResponse);
+        let changes: &[Change] = &[
+            |i| i.host_config = None,
+            |i| i.config = None,
+            |i| i.config.as_mut().unwrap().network_disabled = Some(false),
+            |i| i.config.as_mut().unwrap().user = Some("0:0".into()),
+            |i| i.config.as_mut().unwrap().volumes = Some(vec!["/data".into()]),
+            |i| {
+                i.mounts = Some(vec![MountPoint {
+                    typ: Some("bind".into()),
+                    source: Some("/".into()),
+                    destination: Some("/host".into()),
+                    rw: Some(true),
+                    ..Default::default()
+                }])
+            },
+            |i| {
+                i.mounts = Some(vec![MountPoint {
+                    typ: Some("volume".into()),
+                    destination: Some("/data".into()),
+                    ..Default::default()
+                }])
+            },
+        ];
+        for change in changes {
+            let (spec, mut inspected) = fixture();
+            change(&mut inspected);
+            assert!(validate_created(&inspected, &spec).is_err());
+        }
+    }
 }
