@@ -4,14 +4,14 @@ use std::process::Command;
 use std::time::Duration;
 
 use circus_sandbox::{
-    CommandRequest, DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig, ResourceLimits,
-    RuntimeName, SandboxConfig, SandboxPhase,
+    BackendConfig, CommandRequest, IoLimits, IsolationConfig, ResourceLimits, Sandbox,
+    SandboxConfig, SandboxPhase,
 };
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 struct ContainerGuard<'a> {
-    endpoint: &'a str,
+    host: &'a str,
     id: String,
 }
 
@@ -19,7 +19,7 @@ impl Drop for ContainerGuard<'_> {
     fn drop(&mut self) {
         // Assertions can unwind before async destroy; remove only this test's container.
         let _ = Command::new("docker")
-            .args(["--host", self.endpoint, "rm", "-f", &self.id])
+            .args(["--host", self.host, "rm", "-f", &self.id])
             .output();
     }
 }
@@ -28,31 +28,42 @@ impl Drop for ContainerGuard<'_> {
 #[ignore = "requires a locally built Codex image and an explicit real Linux Docker Engine"]
 async fn codex_image_starts_offline_in_a_fresh_bounded_workspace() -> Result {
     assert_eq!(std::env::var("CIRCUS_DOCKER_SANDBOX").as_deref(), Ok("1"));
-    let endpoint = std::env::var("CIRCUS_DOCKER_ENDPOINT")?;
-    let image = std::env::var("CIRCUS_AGENT_IMAGE")?;
+    let backend = BackendConfig::docker(
+        std::env::var("CIRCUS_DOCKER_ENDPOINT")?,
+        std::env::var("CIRCUS_AGENT_IMAGE")?,
+        "runc",
+    );
+    let host = match &backend {
+        BackendConfig::Docker(docker) => match docker.endpoint() {
+            endpoint if endpoint.starts_with('/') => format!("unix://{endpoint}"),
+            endpoint => endpoint.to_string(),
+        },
+    };
+    let config = SandboxConfig::new(
+        ResourceLimits::new(512 * 1024 * 1024, 1000, 128, 128 * 1024 * 1024, 1024 * 1024)?,
+        IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
+        IoLimits::new(256 * 1024, Duration::from_secs(15))?,
+    )?;
 
     // A second container must initialize its own home and project from scratch.
     for _ in 0..2 {
-        let sandbox = DockerSandbox::create(SandboxConfig::new(
-            DockerEndpoint::parse(&endpoint)?,
-            &image,
-            RuntimeName::runc(),
-            ResourceLimits::new(512 * 1024 * 1024, 1000, 128, 128 * 1024 * 1024, 1024 * 1024)?,
-            IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
-            IoLimits::new(256 * 1024, Duration::from_secs(15))?,
-        )?)
-        .await?;
+        let sandbox = Sandbox::create(backend.clone(), config.clone()).await?;
         let guard = ContainerGuard {
-            endpoint: &endpoint,
-            id: sandbox.status().await?.container_id.ok_or("missing id")?,
+            host: &host,
+            id: sandbox.status().await?.instance_id.ok_or("missing id")?,
         };
         let exercise = async {
             sandbox.start().await?;
-            let status = sandbox.status().await?;
-            assert!(status.readonly_root);
-            assert_eq!(status.network_mode, "none");
-            assert_eq!(status.bind_count, 0);
-            // DockerSandbox overrides image ENTRYPOINT, so initialization is explicit.
+            let enforcement = sandbox
+                .status()
+                .await?
+                .enforcement
+                .ok_or("missing inspected enforcement")?;
+            assert_eq!(enforcement.readonly_root, Some(true));
+            assert_eq!(enforcement.network_mode.as_deref(), Some("none"));
+            // `None` means the engine reported no host binds at all.
+            assert!(enforcement.bind_count.is_none_or(|count| count == 0));
+            // Sandbox overrides image ENTRYPOINT, so initialization is explicit.
             let output = sandbox
                 .exec(CommandRequest {
                     argv: vec![
@@ -86,7 +97,7 @@ async fn codex_image_starts_offline_in_a_fresh_bounded_workspace() -> Result {
         exercise?;
         assert_eq!(sandbox.status().await?.phase, SandboxPhase::Destroyed);
         let inspected = Command::new("docker")
-            .args(["--host", &endpoint, "inspect", &guard.id])
+            .args(["--host", &host, "inspect", &guard.id])
             .output()?;
         assert!(!inspected.status.success());
         assert!(String::from_utf8_lossy(&inspected.stderr).contains("No such"));

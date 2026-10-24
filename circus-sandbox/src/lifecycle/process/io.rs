@@ -8,31 +8,29 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{CHUNK_BYTES, Input, ProcessError, ProcessOutput, ProcessTermination};
-use crate::infrastructure::{Engine, EngineError, EngineProcess, ProcessChunk};
+use crate::infrastructure::{BackendProcess, EngineError, ProcessChunk};
 
 pub(super) async fn run(
-    engine: Engine,
-    process: EngineProcess,
+    process: BackendProcess,
     input: mpsc::Receiver<Input>,
     output: mpsc::Sender<ProcessOutput>,
     cancel: CancellationToken,
     timeout: Duration,
     limit: usize,
 ) -> Result<i64, ProcessTermination> {
-    let EngineProcess {
-        id,
+    let BackendProcess {
         input: writer,
         output: reader,
+        exit,
     } = process;
     let send = write_input(writer, input);
     let receive = async {
         read_output(reader, output, limit).await?;
-        engine
-            .process_exit(&id)
-            .await
-            .map_err(|err| ProcessTermination::Transport {
-                detail: err.message,
-            })
+        // The backend confirms the guest status only after its output stream
+        // has ended; an unconfirmed end is a transport failure, not an exit.
+        exit.await.map_err(|err| ProcessTermination::Transport {
+            detail: err.message,
+        })
     };
     tokio::select! {
         biased;

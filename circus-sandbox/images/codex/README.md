@@ -1,6 +1,6 @@
 # Codex Agent 镜像
 
-这个目录构建供 `DockerSandbox` 使用的本地 Linux 镜像：包含 Codex CLI、Node.js、Python 3、Git 和 ripgrep，并把运行时写入集中到 `/workspace`。Python 3 同时服务于现有沙箱文件传输。
+这个目录构建供 `Sandbox::create(BackendConfig::docker(endpoint, image, "runc"), SandboxConfig::new(limits, isolation, io))` 使用的本地 Linux 镜像：包含 Codex CLI、Node.js、Python 3、Git 和 ripgrep，并把运行时写入集中到 `/workspace`。Python 3 同时服务于现有沙箱文件传输。
 
 这是手动构建的 Agent 运行环境，不是 OCI 镜像解析/拉取服务。镜像不包含账号、API key 或模型配置；当前沙箱保持禁网。离线启动成功不表示 Agent 已能调用模型或完成编程任务。
 
@@ -40,7 +40,7 @@ docker --host "$CIRCUS_DOCKER_ENDPOINT" image inspect \
 
 这些目录共享沙箱配置中的 tmpfs 预算，容器销毁后全部丢失。镜像默认用户为 `65534:65534`，匹配下述验收配置；不要求宿主存在同名用户。`circus-agent` 使用 `umask 077` 创建运行目录，最后以 `exec` 原样传递命令参数和标准流。
 
-DockerSandbox 会覆盖镜像 ENTRYPOINT 以启动自己的 supervisor；运行时 tmpfs 也会遮住构建时的 `/workspace`。因此调用方必须显式使用 `circus-agent`，不能依赖镜像入口初始化目录。默认工作区路径为 `/workspace`；本镜像暂不适配自定义 workspace 根。
+容器后端会覆盖镜像 ENTRYPOINT 以启动自己的 supervisor；运行时 tmpfs 也会遮住构建时的 `/workspace`。因此调用方必须显式使用 `circus-agent`，不能依赖镜像入口初始化目录。默认工作区路径为 `/workspace`；本镜像暂不适配自定义 workspace 根。
 
 下面的持续 stdio 接入示例使用 [PR #23 引入的交互进程 API](https://github.com/BizerNotNull/circus/pull/23)；下方离线验收通过 `exec` 运行镜像内的校验程序。在 `sandbox.start()` 后先调用 `sandbox.create_dir_all("project")`，再传入以下 `ProcessRequest` 字段启动 Codex stdio 服务：
 
@@ -73,7 +73,7 @@ CIRCUS_AGENT_IMAGE=circus-agent-codex:0.164.0 \
   cargo test --locked --test agent_image -- --ignored --nocapture
 ```
 
-测试经真实 `DockerSandbox` 创建两个全新的容器，使用只读根、禁网、无宿主 bind、非 root 用户及显式内存/CPU/PID/tmpfs 限额，依次验证：
+测试经真实 Docker 后端（`Sandbox::create`）创建两个全新的容器，使用只读根、禁网、无宿主 bind、非 root 用户及显式内存/CPU/PID/tmpfs 限额，依次验证：
 
 - Node/Codex 版本、Python 3、Git 初始化和 ripgrep 读取实际项目文件。
 - HOME、配置、缓存、临时目录可写且没有组/其他用户权限；新容器没有旧项目文件或 Codex 登录信息。
