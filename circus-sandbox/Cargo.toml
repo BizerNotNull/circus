@@ -4,13 +4,27 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
 license = "Apache-2.0"
-description = "Backend-neutral sandbox API with one local Linux Docker + runc backend, capability-scoped workspace, and image resolution. Not Kubernetes, HTTP, or a snapshot service."
+description = "Backend-neutral sandbox API with one local Linux Docker + runc backend, capability-scoped workspace, image resolution, and an optional authenticated HTTP service. Not Kubernetes or a snapshot service."
+
+[features]
+default = ["http"]
+http = [
+    "dep:axum",
+    "dep:base64",
+    "dep:serde",
+    "dep:serde_json",
+    "tokio/net",
+]
 
 [dependencies]
+axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "json", "tokio"] }
+base64 = { version = "0.22", optional = true }
 bollard = { version = "0.21.1", default-features = false, features = ["pipe"] }
 cap-std = { version = "=4.0.3", default-features = false }
 cap-fs-ext = { version = "=4.0.3", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+serde = { version = "1", optional = true, features = ["derive"] }
+serde_json = { version = "1", optional = true }
 tempfile = "3.27.0"
 tar = "0.4.46"
 thiserror = "2.0.21"
@@ -23,6 +37,12 @@ url = "2.5"
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
 
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+[[example]]
+name = "http_api"
+required-features = ["http"]
 
 [lints.rust]
 unsafe_code = "forbid"

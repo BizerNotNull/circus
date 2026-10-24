@@ -747,4 +747,18 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
 }
 
 #[cfg(test)]
+impl Sandbox {
+    /// Builds a sandbox over an in-process test backend. Used by HTTP handler
+    /// tests; it runs the same capability, preparation, and worker path as a
+    /// production create, differing only in how the backend is selected.
+    pub(crate) async fn create_for_test<B: Backend>(
+        backend: B,
+        config: SandboxConfig,
+    ) -> Result<Self, SandboxError> {
+        let spec = common_spec(&config);
+        Self::create_with_backend(backend, spec, config).await
+    }
+}
+
+#[cfg(test)]
 mod tests;

@@ -20,8 +20,10 @@ export const ALLOWED_DEPENDENCIES = Object.freeze({
   workspace: ["infrastructure", "runtime", "error"],
   lifecycle: ["environment", "workspace", "infrastructure", "runtime", "error"],
   pool: ["lifecycle", "environment", "workspace", "runtime", "error"],
+  http: ["api", "lifecycle", "workspace", "runtime", "error"],
   api: ["pool", "lifecycle", "environment", "workspace", "runtime", "error"],
   facade: [
+    "http",
     "api",
     "pool",
     "lifecycle",
