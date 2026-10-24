@@ -155,3 +155,13 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
 ```
 
 The interactive tests cover repeated input, separate output streams, exit codes, concurrent file and lifecycle operations, one-process admission, output backpressure, timeout, cancellation, and owned-container cleanup. They are ignored without explicit invocation; ordinary Cargo test success is not Docker runtime evidence.
+
+## Instrumentation and its limits
+
+`Sandbox::create_with_metrics(backend, config, metrics)` and `PoolConfig::with_metrics(metrics)` accept a caller-created `SandboxMetrics` handle. The lifecycle worker, pool worker, and Docker backend record fixed counters into it: create success/failure, pending and completed create cleanup, operations by fixed kind and outcome, cleanup attempts/failures, pool ready/leased/retired/refilled transitions, snapshot captures/restores, and process sessions started/ended by termination kind. `SandboxMetrics::snapshot()` copies plain values and does not reset anything. Without a handle every recording method is a branch-only no-op; there is no global registry and no label chosen by a caller or tenant. Cumulative counters saturate at `u64::MAX` and the pending-cleanup gauge saturates at zero.
+
+The same lifecycle, pool, and backend points emit `tracing` events with stable event names: `sandbox.create.started`/`completed`, `sandbox.capability.unavailable`, `sandbox.transition.completed`, `sandbox.exec.completed`, `sandbox.process.opened`/`closed`, `sandbox.snapshot.capture.completed`/`restore.completed`, `sandbox.cleanup.attempted`, `sandbox.cleanup.retry`, `sandbox.create.cleanup.completed`, the `pool.*` lease and slot events, and the `backend.*.completed` events, plus `sandbox.create` and `backend.create` spans. Fields are limited to fixed labels, counts, booleans, durations, exit codes, and the sanitized basename of `argv[0]`.
+
+Excluded on purpose: environment values, full argv, guest file contents, host paths, image credentials, and endpoint URLs with credentials. Error events carry a fixed `error_kind`, never the backend message, because backend text can embed paths. An unavailable capability (`sandbox.capability.unavailable`, `error_kind = "unsupported_capability"`) is distinct from cleanup that is still owed (`cleanup_pending = true`, `cleanup_required = true`, and the `create_cleanup_pending` gauge).
+
+This crate installs no global `tracing` subscriber and provides no health, readiness, or metrics HTTP endpoint. Collecting or exporting events is the embedding application's responsibility. Instrumentation is not evidence that a real Docker Engine ran: the ordinary test suite covers event fields and counters without Docker, and the opt-in Docker tests remain the only runtime evidence.

@@ -13,3 +13,8 @@ pub use crate::runtime::{
 };
 
 pub use crate::workspace::{CodeSnapshot, SnapshotBudget, SnapshotError};
+
+pub use crate::observability::{
+    MetricsSnapshot, OperationCounters, OperationKind, OperationOutcome, SandboxMetrics,
+    TerminationKind,
+};

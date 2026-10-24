@@ -198,6 +198,14 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
 
 示例分别观察 cold create + restore + start、完整预热和 warm acquire 的 Instant 耗时，并执行基线字节、显式 release/shutdown；不是承诺加速比。Windows 端点可设为 `npipe:////./pipe/dockerDesktopLinuxEngine`；环境变量由所用 shell 显式设置。
 
+## 可观测性（调用方计数与 tracing 事件）
+
+`observability::SandboxMetrics` 是调用方显式创建、可克隆的固定计数器句柄；`SandboxMetrics::new()` 分配一组原子计数，`SandboxMetrics::disabled()`（也是 `Default`）不分配且每次记录立即返回。把句柄传给 `Sandbox::create_with_metrics(backend, config, metrics)` 或 `PoolConfig::with_metrics(metrics)` 后，lifecycle、pool 和 backend 会记录 create 成功/失败、create cleanup pending/completed、按 `OperationKind` 与 `OperationOutcome` 分类的操作、cleanup 尝试/失败、pool ready/leased/retired/refilled、snapshot capture/restore，以及按 `TerminationKind` 分类的进程会话结束。`metrics.snapshot()` 返回纯数据 `MetricsSnapshot`；计数饱和而不是回绕，pending cleanup 是永不为负的 gauge。没有句柄时是分支级 no-op，不存在进程级注册表，也不接受租户或调用方自定义标签。
+
+同一批路径通过 `tracing` 发出稳定名称事件和 `sandbox.create`/`backend.create` span，例如 `sandbox.create.started`、`sandbox.create.completed`、`sandbox.transition.completed`、`sandbox.exec.completed`、`sandbox.process.opened`/`closed`、`sandbox.snapshot.capture.completed`/`restore.completed`、`sandbox.cleanup.attempted`、`sandbox.cleanup.retry`、`pool.acquire.completed`、`pool.lease.handed_off`/`released`/`expired`、`pool.slot.ready`/`retired`/`refilled`，以及 `backend.*.completed`。字段只包含固定标签、计数、布尔值、持续时间、退出码和有界程序名；环境变量值、完整 argv、文件内容、宿主路径、镜像凭据和 endpoint URL 不会进入事件。`cleanup_pending`/`cleanup_required` 字段和 `create_cleanup_pending` 计数用于区分“能力不可用”与“清理仍未完成”。
+
+本 crate 是库：它不安装全局 `tracing` subscriber，不提供 exporter，也没有 health/readiness/metrics HTTP endpoint；是否采集、采到哪里由嵌入应用决定。事件与计数只描述已观察到的事实，不表示 Docker 隔离已在当前机器验证。
+
 ## 命令
 
 同样在 `circus-sandbox/` 下执行：
@@ -274,6 +282,12 @@ npm --prefix circus-sandbox/qa run architecture
 `cleanup` 的 I/O 失败也是 `Io`。此时工作区仍然打开，应保留同一个 `Workspace` 再调用 `cleanup`，不要丢弃错误后假设目录已消失。
 
 ## 变更
+
+### 未发布：调用方拥有的观测计数与结构化追踪事件
+
+- 新增公开 `observability` 模块：`SandboxMetrics`/`MetricsSnapshot` 是调用方创建并可显式传入的固定计数器，`PoolConfig::with_metrics` 与 `Sandbox::create_with_metrics` 接入 lifecycle 和 pool；无句柄时为零分配 no-op。
+- lifecycle、pool 与 Docker backend 发出稳定名称的 `tracing` 事件和 span，覆盖 create、start/pause/resume、exec、进程会话、snapshot、cleanup 重试和池租约；字段只含固定标签、计数、时长与程序名，不记录环境值、完整 argv、文件内容、宿主路径或凭据。
+- 新增 `tests/observability.rs` 与本地 `Subscriber` 单元测试（断言事件名/字段、哨兵 env/argv 不泄漏、计数器饱和与 no-op）；新增 `tracing` 依赖。crate 不安装全局 subscriber，不提供 health/readiness 或导出 endpoint。
 
 ### 未发布：后端中立的创建 API 与本地镜像解析
 

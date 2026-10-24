@@ -16,7 +16,10 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::{BackendConfig, CodeSnapshot, SandboxConfig, SandboxError, SandboxPhase};
+use crate::observability::{OperationKind, OperationOutcome, events};
+use crate::{
+    BackendConfig, CodeSnapshot, SandboxConfig, SandboxError, SandboxMetrics, SandboxPhase,
+};
 pub use lease::PoolLease;
 
 /// Immutable recipe used for every fresh container in a pool.
@@ -27,6 +30,7 @@ pub struct PoolConfig {
     capacity: usize,
     baseline: Option<Arc<CodeSnapshot>>,
     lease_ttl: Duration,
+    metrics: SandboxMetrics,
 }
 
 impl PoolConfig {
@@ -57,7 +61,20 @@ impl PoolConfig {
             capacity,
             baseline,
             lease_ttl,
+            metrics: SandboxMetrics::disabled(),
         })
+    }
+
+    /// Attaches caller-owned counters to every sandbox this pool creates.
+    ///
+    /// The handle is cloned into the pool worker. Every prestarted or refilled
+    /// sandbox reports its create and lifecycle activity to the same handle, so
+    /// pool activity is visible in one snapshot. Pool slot transitions are
+    /// recorded as cumulative counts; use [`DockerPool::status`] for current
+    /// gauges. This builder does not allocate a tracing subscriber.
+    pub fn with_metrics(mut self, metrics: SandboxMetrics) -> Self {
+        self.metrics = metrics;
+        self
     }
 }
 
@@ -123,6 +140,7 @@ pub enum PoolError {
 struct Client {
     tx: mpsc::UnboundedSender<worker::Request>,
     close: CancellationToken,
+    metrics: SandboxMetrics,
 }
 
 impl Drop for Client {
@@ -154,10 +172,12 @@ impl DockerPool {
     pub async fn create(config: PoolConfig) -> Result<Self, PoolError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let close = CancellationToken::new();
+        let metrics = config.metrics.clone();
         let pool = Self {
             client: Arc::new(Client {
                 tx: tx.clone(),
                 close: close.clone(),
+                metrics: metrics.clone(),
             }),
         };
         let (ready, result) = oneshot::channel();
@@ -181,21 +201,29 @@ impl DockerPool {
             .checked_add(timeout)
             .filter(|_| !timeout.is_zero())
             .ok_or(PoolError::InvalidTimeout)?;
-        let (reply, result) = oneshot::channel();
-        let cancelled = CancellationToken::new();
-        let _guard = CancelWaiter(cancelled.clone());
+        let result = async {
+            let (reply, result) = oneshot::channel();
+            let cancelled = CancellationToken::new();
+            let _guard = CancelWaiter(cancelled.clone());
+            self.client
+                .tx
+                .send(worker::Request::Acquire {
+                    reply,
+                    cancelled,
+                    deadline,
+                })
+                .map_err(|_| PoolError::WorkerGone)?;
+            tokio::time::timeout_at(deadline, result)
+                .await
+                .map_err(|_| PoolError::AcquireTimeout)?
+                .map_err(|_| PoolError::WorkerGone)?
+        }
+        .await;
         self.client
-            .tx
-            .send(worker::Request::Acquire {
-                reply,
-                cancelled,
-                deadline,
-            })
-            .map_err(|_| PoolError::WorkerGone)?;
-        tokio::time::timeout_at(deadline, result)
-            .await
-            .map_err(|_| PoolError::AcquireTimeout)?
-            .map_err(|_| PoolError::WorkerGone)?
+            .metrics
+            .record_operation(OperationKind::PoolAcquire, pool_outcome(&result));
+        events::pool_acquire_completed(pool_outcome_label(&result));
+        result
     }
 
     /// Returns disjoint slot counts without blocking behind slow Docker calls.
@@ -228,5 +256,21 @@ struct CancelWaiter(CancellationToken);
 impl Drop for CancelWaiter {
     fn drop(&mut self) {
         self.0.cancel();
+    }
+}
+
+fn pool_outcome(result: &Result<PoolLease, PoolError>) -> OperationOutcome {
+    match result {
+        Ok(_) => OperationOutcome::Ok,
+        Err(PoolError::AcquireTimeout) => OperationOutcome::TimedOut,
+        Err(_) => OperationOutcome::Error,
+    }
+}
+
+fn pool_outcome_label(result: &Result<PoolLease, PoolError>) -> &'static str {
+    match result {
+        Ok(_) => "ok",
+        Err(PoolError::AcquireTimeout) => "timed_out",
+        Err(_) => "error",
     }
 }

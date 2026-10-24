@@ -7,6 +7,7 @@ use crate::infrastructure::{
     Backend, CommonSpec, EngineError, EngineErrorKind, InstanceId,
     OutputPhase as EngineOutputPhase, Recovered, UploadEntry, UploadSource,
 };
+use crate::observability::events;
 use crate::runtime::{SandboxConfig, check_relative};
 use crate::workspace::WorkspaceError;
 
@@ -170,7 +171,8 @@ pub(super) async fn destroy_state<B: Backend>(state: &mut State<B>) -> Result<()
         .as_ref()
         .map_or_else(|| state.name.clone(), |id| id.as_str().to_string());
     let result = destroy_resources(state).await;
-    super::process::destroyed(state.process.take(), Some(instance_id), &result);
+    let metrics = state.metrics.clone();
+    super::process::destroyed(state.process.take(), Some(instance_id), &result, &metrics);
     result
 }
 
@@ -499,6 +501,15 @@ pub(super) async fn destroy_attempt<B: Backend>(
         complete: state.phase == SandboxPhase::Destroyed,
         attempted: true,
     });
+    state.metrics.record_cleanup_attempt();
+    if error.is_some() {
+        state.metrics.record_cleanup_failure();
+    }
+    events::cleanup_attempted(
+        super::cleanup::ownership_label(report.ownership),
+        state.phase == SandboxPhase::Destroyed,
+        state.creation_cleanup,
+    );
     (report, error)
 }
 
@@ -659,4 +670,34 @@ pub(super) async fn spawn_block<T: Send + 'static>(
         .map_err(|err| SandboxError::WorkerGone {
             detail: err.to_string(),
         })
+}
+
+/// Stable, non-sensitive error classification for telemetry.
+///
+/// Messages are deliberately not returned: they can contain host paths, guest
+/// paths, or backend-supplied text.
+pub(super) fn error_kind(err: &SandboxError) -> &'static str {
+    match err {
+        SandboxError::InvalidProcessRequest { .. } => "invalid_process_request",
+        SandboxError::ProcessActive => "process_active",
+        SandboxError::Config(_) => "config",
+        SandboxError::BackendConfig(_) => "backend_config",
+        SandboxError::Workspace(_) => "workspace",
+        SandboxError::Snapshot(_) => "snapshot",
+        SandboxError::SnapshotInterrupted { .. } => "snapshot_interrupted",
+        SandboxError::Command(_) => "command",
+        SandboxError::Staging(_) => "staging",
+        SandboxError::InvalidPhase { .. } => "invalid_phase",
+        SandboxError::BackendImageUnavailable { .. } => "backend_image_unavailable",
+        SandboxError::Backend { .. } => "backend",
+        SandboxError::TimedOut { .. } => "timed_out",
+        SandboxError::Cancelled { .. } => "cancelled",
+        SandboxError::OutputLimit { .. } => "output_limit",
+        SandboxError::PolicyMismatch { .. } => "policy_mismatch",
+        SandboxError::CreationCleanupRequired { .. } => "creation_cleanup_required",
+        SandboxError::CleanupRequired { .. } => "cleanup_required",
+        SandboxError::WorkerGone { .. } => "worker_gone",
+        SandboxError::RelativePath { .. } => "relative_path",
+        SandboxError::UnsupportedCapability { .. } => "unsupported_capability",
+    }
 }

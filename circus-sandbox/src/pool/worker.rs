@@ -9,6 +9,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::{PoolConfig, PoolError, PoolFailure, PoolLease, PoolStatus};
+use crate::observability::{SandboxMetrics, events};
 use crate::{CleanupReceipt, Sandbox, SandboxError, SandboxPhase};
 
 type Reply = oneshot::Sender<Result<(), PoolError>>;
@@ -80,6 +81,7 @@ enum Completion {
 
 struct Worker {
     config: PoolConfig,
+    metrics: SandboxMetrics,
     slots: Vec<Slot>,
     jobs: FuturesUnordered<BoxFuture<'static, Completion>>,
     waiters: VecDeque<Waiter>,
@@ -101,6 +103,7 @@ pub(super) async fn run(
     close: CancellationToken,
     ready: oneshot::Sender<Result<(), Failure>>,
 ) {
+    let metrics = config.metrics.clone();
     let mut worker = Worker {
         slots: (0..config.capacity)
             .map(|_| Slot {
@@ -110,6 +113,7 @@ pub(super) async fn run(
             })
             .collect(),
         config,
+        metrics,
         jobs: FuturesUnordered::new(),
         waiters: VecDeque::new(),
         shutdowns: Vec::new(),
@@ -170,6 +174,11 @@ impl Worker {
         let config = self.config.clone();
         let close = self.close.clone();
         let refill = self.slots[slot].generation > 1;
+        if refill {
+            self.metrics.record_pool_refilled();
+            events::pool_refilled();
+        }
+        let metrics = self.metrics.clone();
         // Owned by the worker's bounded future set. Never abort a create or
         // discard its eventual ownership receipt when closing/caller cancels.
         self.jobs.push(Box::pin(async move {
@@ -182,7 +191,8 @@ impl Worker {
             if refill {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            let sandbox = match Sandbox::create(backend, sandbox_config).await {
+            let created = Sandbox::create_with_metrics(backend, sandbox_config, metrics).await;
+            let sandbox = match created {
                 Ok(sandbox) => Arc::new(sandbox),
                 Err(source) => {
                     return Completion::Created {
@@ -233,6 +243,8 @@ impl Worker {
     }
 
     fn retire(&mut self, slot: usize, sandbox: Arc<Sandbox>) {
+        self.metrics.record_pool_retired();
+        events::pool_retired();
         let receipt = sandbox.revoke();
         self.slots[slot].state = State::Retiring {
             sandbox,
@@ -298,6 +310,8 @@ impl Worker {
                 result,
             } => match (sandbox, result) {
                 (Some(sandbox), Ok(())) if !self.closing => {
+                    self.metrics.record_pool_ready();
+                    events::pool_ready();
                     self.slots[slot].state = State::Ready(sandbox);
                 }
                 (Some(sandbox), result) => {
@@ -442,6 +456,7 @@ impl Worker {
                 }
                 match &owned.state {
                     State::Leased { sandbox, .. } => {
+                        events::pool_release();
                         let sandbox = sandbox.clone();
                         if let Some(reply) = reply {
                             owned.returns.push(reply);
@@ -489,6 +504,7 @@ impl Worker {
                 _ => None,
             };
             if let Some(sandbox) = expired {
+                events::pool_expired();
                 self.retire(slot, sandbox);
             }
             let retry = match &self.slots[slot].state {
@@ -548,6 +564,8 @@ impl Worker {
                     // disarm its return event and keep the never-used slot ready.
                     match waiter.reply.send(Ok(lease)) {
                         Ok(()) => {
+                            self.metrics.record_pool_leased();
+                            events::pool_handoff();
                             self.slots[slot].state = State::Leased {
                                 sandbox: sandbox.clone(),
                                 expires: Instant::now() + self.config.lease_ttl,

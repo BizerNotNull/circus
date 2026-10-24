@@ -39,6 +39,19 @@
 //! mechanism. Not implemented: Kubernetes, containerd, gVisor, Kata,
 //! Firecracker, registry pulls/authentication, and HTTP.
 //!
+//! # Observability
+//!
+//! [`observability::SandboxMetrics`] is a caller-created, cloneable handle over
+//! a fixed set of atomic counters. Pass it to
+//! [`Sandbox::create_with_metrics`] or [`PoolConfig::with_metrics`]; without a
+//! handle, recording is a branch-only no-op. Counters are read with
+//! [`observability::SandboxMetrics::snapshot`]. Lifecycle, pool, and backend
+//! code also emits `tracing` events and spans with stable names and bounded
+//! fields. This crate never installs a global subscriber and exposes no health,
+//! readiness, or metrics HTTP endpoint; the embedding application owns both the
+//! subscriber and any export. Event fields never contain environment values,
+//! full argv, file contents, host paths, image credentials, or endpoint URLs.
+//!
 //! # Blocking
 //!
 //! Workspace methods block the calling thread. [`Sandbox`] methods are async and
@@ -79,6 +92,7 @@ pub mod api;
 pub mod environment;
 mod infrastructure;
 mod lifecycle;
+pub mod observability;
 pub mod pool;
 pub mod runtime;
 mod workspace;
@@ -103,3 +117,9 @@ pub use runtime::{ResourceLimits, ResourceLimitsError};
 
 #[doc(inline)]
 pub use pool::{DockerPool, PoolConfig, PoolError, PoolFailure, PoolLease, PoolStatus};
+
+#[doc(inline)]
+pub use observability::{
+    MetricsSnapshot, OperationCounters, OperationKind, OperationOutcome, SandboxMetrics,
+    TerminationKind,
+};

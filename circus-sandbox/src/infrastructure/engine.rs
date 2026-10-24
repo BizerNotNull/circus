@@ -25,6 +25,8 @@ use futures_util::StreamExt;
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
+use crate::observability::events;
+
 const GUEST_FILES: &str = include_str!("guest_files.py");
 
 /// One bounded host-to-guest copy buffer. The guest helper reads stdin in the
@@ -152,9 +154,18 @@ struct ExecIo<'a> {
 
 impl Engine {
     pub(crate) async fn connect(kind: SocketKind, path: &str) -> Result<Self, EngineError> {
-        let docker = connect_socket(kind, path)?;
-        let docker = docker.negotiate_version().await.map_err(map_err)?;
-        Ok(Self { docker })
+        let socket = match kind {
+            SocketKind::Unix => "unix",
+            SocketKind::Pipe => "pipe",
+        };
+        let result = async {
+            let docker = connect_socket(kind, path)?;
+            let docker = docker.negotiate_version().await.map_err(map_err)?;
+            Ok(Self { docker })
+        }
+        .await;
+        events::backend_connect_completed(socket, if result.is_ok() { "ok" } else { "error" });
+        result
     }
 
     pub(crate) async fn prepare(&self, image: &str, runtime: &str) -> Result<(), EngineError> {
@@ -198,6 +209,24 @@ impl Engine {
     }
 
     pub(crate) async fn create_owned(
+        &self,
+        name: &str,
+        spec: &CreateSpec,
+    ) -> Result<String, EngineError> {
+        let span = events::backend_create_span();
+        let result = self.create_owned_inner(name, spec).await;
+        let (outcome, create_pending, error_kind) = match &result {
+            Ok(_) => ("ok", false, "none"),
+            Err(err) => ("error", err.create_pending, engine_error_kind(err)),
+        };
+        {
+            let _entered = span.enter();
+            events::backend_create_completed(outcome, create_pending, error_kind);
+        }
+        result
+    }
+
+    async fn create_owned_inner(
         &self,
         name: &str,
         spec: &CreateSpec,
@@ -287,22 +316,31 @@ impl Engine {
         owner_label: &str,
         retained_id: Option<&str>,
     ) -> Recovered {
-        recover_with(self, name, owner_label, retained_id).await
+        let result = recover_with(self, name, owner_label, retained_id).await;
+        events::backend_recovery_completed(recovered_label(&result));
+        result
     }
 
     pub(crate) async fn start(&self, id: &str) -> Result<(), EngineError> {
-        self.docker
+        let result = self
+            .docker
             .start_container(id, None::<bollard::query_parameters::StartContainerOptions>)
             .await
-            .map_err(map_err)
+            .map_err(map_err);
+        backend_transition("start", &result);
+        result
     }
 
     pub(crate) async fn pause(&self, id: &str) -> Result<(), EngineError> {
-        self.docker.pause_container(id).await.map_err(map_err)
+        let result = self.docker.pause_container(id).await.map_err(map_err);
+        backend_transition("pause", &result);
+        result
     }
 
     pub(crate) async fn resume(&self, id: &str) -> Result<(), EngineError> {
-        self.docker.unpause_container(id).await.map_err(map_err)
+        let result = self.docker.unpause_container(id).await.map_err(map_err);
+        backend_transition("resume", &result);
+        result
     }
 
     /// Download only the configured workspace, never the container root.
@@ -596,6 +634,43 @@ impl Engine {
         argv: &[String],
         io: ExecIo<'_>,
     ) -> Result<ExecDone, EngineError> {
+        let stdin_kind = match &io.stdin {
+            Stdin::None => "none",
+            Stdin::Bytes(_) => "bytes",
+            Stdin::File { .. } => "file",
+        };
+        let began = std::time::Instant::now();
+        let result = self.exec_input_inner(id, user, workdir, argv, io).await;
+        let duration_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match &result {
+            Ok(done) => events::backend_exec_completed(
+                duration_ms,
+                Some(done.exit_code),
+                done.stdout.len(),
+                done.stderr.len(),
+                stdin_kind,
+                "ok",
+            ),
+            Err(err) => events::backend_exec_completed(
+                duration_ms,
+                None,
+                0,
+                0,
+                stdin_kind,
+                engine_error_kind(err),
+            ),
+        }
+        result
+    }
+
+    async fn exec_input_inner(
+        &self,
+        id: &str,
+        user: &str,
+        workdir: &str,
+        argv: &[String],
+        io: ExecIo<'_>,
+    ) -> Result<ExecDone, EngineError> {
         let ExecIo {
             stdin,
             stdout_limit,
@@ -808,6 +883,39 @@ impl RemovalControl for Engine {
     fn remove(&self, id: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
         async move { Engine::force_remove(self, id).await }
     }
+}
+
+fn engine_error_kind(err: &EngineError) -> &'static str {
+    if err.policy.is_some() {
+        return "policy_mismatch";
+    }
+    match err.kind {
+        EngineErrorKind::Other => "other",
+        EngineErrorKind::FileIo => "file_io",
+        EngineErrorKind::NotFound => "not_found",
+        EngineErrorKind::PermissionDenied => "permission_denied",
+        EngineErrorKind::UnsafeFile => "unsafe_file",
+        EngineErrorKind::Limit => "limit",
+        EngineErrorKind::InvalidPath => "invalid_path",
+        EngineErrorKind::Protocol => "protocol",
+    }
+}
+
+fn recovered_label(recovered: &Recovered) -> &'static str {
+    match recovered {
+        Recovered::Removed => "removed",
+        Recovered::Absent => "absent",
+        Recovered::StillPresent { .. } => "still_present",
+        Recovered::Unknown { .. } => "unknown",
+    }
+}
+
+fn backend_transition(operation: &'static str, result: &Result<(), EngineError>) {
+    let (outcome, error_kind) = match result {
+        Ok(()) => ("ok", "none"),
+        Err(err) => ("error", engine_error_kind(err)),
+    };
+    events::backend_transition_completed(operation, outcome, error_kind);
 }
 
 fn file_error(kind: EngineErrorKind, message: impl Into<String>) -> EngineError {

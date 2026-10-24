@@ -5,9 +5,18 @@ use std::time::Duration;
 use tokio::sync::{oneshot, watch};
 
 use crate::infrastructure::Backend;
+use crate::observability::events;
 
 use super::operations::destroy_report;
 use super::{CleanupReport, Ownership, SandboxError, SandboxPhase, State};
+
+pub(super) fn ownership_label(ownership: Ownership) -> &'static str {
+    match ownership {
+        Ownership::ConfirmedAbsent => "confirmed_absent",
+        Ownership::StillPresent => "still_present",
+        Ownership::Unknown => "unknown",
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct Progress {
@@ -98,6 +107,8 @@ pub(super) async fn failed_creation<B: Backend>(
     source: SandboxError,
     initial_report: Option<CleanupReport>,
 ) {
+    state.creation_cleanup = true;
+    state.metrics.record_create_cleanup_pending();
     // Preserve the identity even if this first attempt completes cleanup.
     let instance_id = state
         .id
@@ -114,21 +125,36 @@ pub(super) async fn failed_creation<B: Backend>(
         },
     }));
     // Neither a dropped ready receiver nor the last receipt stops this loop.
-    retry_cleanup(state, true).await;
+    retry_cleanup(state, true, true).await;
 }
 
 pub(super) async fn cleanup_until_done<B: Backend>(state: &mut State<B>) {
-    retry_cleanup(state, false).await;
+    retry_cleanup(state, false, false).await;
 }
 
-async fn retry_cleanup<B: Backend>(state: &mut State<B>, mut attempted: bool) {
+async fn retry_cleanup<B: Backend>(
+    state: &mut State<B>,
+    mut attempted: bool,
+    creation_cleanup: bool,
+) {
+    let mut attempts: u32 = u32::from(attempted);
     let mut delay = Duration::from_millis(100);
     while state.phase != SandboxPhase::Destroyed {
         if attempted {
+            events::cleanup_retry(
+                attempts.saturating_add(1),
+                u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                creation_cleanup,
+            );
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(30));
         }
         destroy_report(state).await;
+        attempts = attempts.saturating_add(1);
         attempted = true;
+    }
+    if creation_cleanup {
+        state.metrics.record_create_cleanup_completed();
+        events::creation_cleanup_completed(attempts);
     }
 }
