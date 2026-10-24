@@ -1,10 +1,10 @@
 # 工程说明
 
-本文只记录当前事实和检查入口。本机工具已安装、Docker 引擎可达，或本文已写入仓库，都不等于沙箱已实现，也不等于 PR 已合并。
+本文只记录当前事实和检查入口。本机工具已安装、Docker 引擎可达，或本文已写入仓库，都不等于真实隔离验证完成，也不等于 PR 已合并。
 
 ## 当前工程
 
-当前检出已有真实 Rust library crate：`Cargo.toml`、Cargo 生成的 `Cargo.lock`、`rust-toolchain.toml`、Apache-2.0 `LICENSE`、`deny.toml`、`src/lib.rs`、`src/workspace/`、`src/runtime/` 与 lifecycle 配置模型、真实 example 和测试。Rust 1.99.1 / edition 2024；公开入口为同步 `Workspace` 文件 API、进程内代码快照/恢复、后端中立的 `runtime::ResourceLimits` 值校验和仅验证请求的 lifecycle 配置类型，不是进程沙箱、容器或服务。
+当前检出已有真实 Rust library crate：`Cargo.toml`、Cargo 生成的 `Cargo.lock`、`rust-toolchain.toml`、Apache-2.0 `LICENSE`、`deny.toml`、`src/lib.rs`、`src/workspace/` 与 `src/runtime/`、真实 example 和测试。Rust 1.99.1 / edition 2024；公开入口为同步 `Workspace` 文件 API 和后端中立的 `runtime::ResourceLimits` 值校验，不是进程沙箱、容器或服务。
 
 本文按当前检出描述工程范围，不以文件存在代替合并、发布或最新提交的检查。交付记录入口见 [交付计划](delivery-plan.md)，安全扫描约定见 [安全说明](../../.github/sandbox-security.md)。
 
@@ -65,7 +65,7 @@ facade           -> api, pool, lifecycle, environment, workspace, runtime, error
 
 ## 主机边界
 
-- 隔离证据必须来自 Linux 上可达的 Docker Engine，并且内存、CPU 与 pids 由显式配置限制。Windows 编译成功不是隔离通过。引擎可达也不是适配器已实现。
+- 隔离证据必须来自 Linux 上可达的 Docker Engine，并且内存、CPU 与 pids 由显式配置限制。Windows 编译成功不是隔离通过。当前 Docker + runc 适配器代码已交付，但本检出未记录真实 Engine 运行证据。
 - 验证只能操作自己创建的容器和卷，禁止全局 prune 或清理无关资源。
 - Rust 1.99.1 是项目基线，不是本机清单。工具链文件、组件和第三方库约束只维护在 [沙箱指南](../AGENTS.md)。rust-analyzer 不是构建依赖。
 
@@ -111,7 +111,8 @@ secret scanning 与 push protection 是 GitHub 平台设置，不是工作流的
 
 ## 当前 Workspace 与后续真实后端
 
-`Workspace` 提供临时目录内的受限相对读写、建目录、unlink 和显式可重试幂等清理。`max_file_bytes` 是单文件上限，不是工作区总配额。Unix 工作区根在创建时请求 `0o700`（`mkdir` 的 mode，不是事后 `chmod`，也不改进程 umask），其他宿主用户不能遍历；同账户进程和特权进程不因此被隔离。Windows 目录创建行为不变。内部 `RwLock` 保护同一值的并发读写，不是外部进程隔离或 crash-safe 原子替换。当前检出有真实 example、公开 API 集成测试和 crate 私有测试；某次运行的环境、命令与结果只记在对应 PR，不以旧提交的绿灯为新提交背书。
+`Workspace` 提供临时目录内的受限相对读写、建目录、unlink 和显式可重试幂等清理。`max_file_bytes` 是单文件上限，不是工作区总配额。内部 `RwLock` 保护同一值的并发读写，不是外部进程隔离或 crash-safe 原子替换。当前检出有真实 example、公开 API 集成测试和 crate 私有测试；某次运行的环境、命令与结果只记在对应 PR，不以旧提交的绿灯为新提交背书。
 
-进程内代码快照通过 `capture_code_snapshot` / `CodeSnapshot::restore` 提供，操作预算不代替磁盘配额，失败清理保留可重试目标。lifecycle 配置模型只验证显式请求；backend still not implemented in this branch：尚未实现命令执行、统一领域 API、生命周期状态机、进程/网络/系统调用隔离、容器与虚拟化适配器、OCI 环境准备、Git clone/worktree、HTTP/RPC、池、预启动、容器快照，以及工作区总配额。占位目录不是可调用模块。
-后续运行时必须先消费 workspace 文件契约。建议的首个适配仍是 Linux 上的 Docker + runc，必须有真实运行证据；主机引擎可达或 Windows 编译成功不能提前声明支持。完整目标、依赖及池/快照验收仍见 [交付计划](delivery-plan.md)。
+尚未实现 Kubernetes、containerd、OCI 环境准备、Git clone/worktree、HTTP/RPC、池、预启动和快照，以及工作区总配额；Docker + runc 适配器之外的隔离后端仍是规划。占位目录不是可调用模块。
+
+当前已有一个明确限定为 Linux Docker + runc 的适配器；必须在 Linux 上按 [Docker + runc 文档](docker-linux-runc.md) 运行真实证据。主机引擎可达或 Windows 编译成功不能提前声明隔离通过。完整目标、依赖及池/快照验收仍见 [交付计划](delivery-plan.md)。

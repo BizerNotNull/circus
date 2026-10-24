@@ -1,17 +1,12 @@
 # circus-sandbox
 
-Rust 库，包名 `circus-sandbox`。当前提供 workspace 文件能力、进程内代码快照，以及 `runtime::ResourceLimits` 后端中立的资源请求校验。文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；资源值模型尚未接入文件操作或执行后端。
+Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace 文件能力、`runtime::ResourceLimits` 请求校验，以及一个明确限定为本地 Linux Docker Engine + `runc` 的异步容器后端。workspace 文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；容器后端通过私有 lifecycle/infrastructure 模块运行显式配置的 Linux 容器。
 
-代码快照是受显式操作预算约束的、仅进程内存中的文件与目录副本；它不是进程或内存检查点、Docker commit、容器能力或持久化格式。
-这不是进程沙箱，也不是容器。它不隔离 CPU、网络、系统调用或进程，不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Git、命令执行、生命周期、HTTP/RPC 和容器后端都还没有实现。资源请求校验不等于资源预留、聚合准入或内核强制；也没有工作区总字节配额、文件数配额或宿主磁盘配额的执行机制。
+容器后端不是通用进程沙箱：它只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在的 Linux 镜像和 Python 3，拒绝拉取镜像；当前不提供 Kubernetes、containerd、HTTP/RPC、Git、快照或沙箱池。Docker Engine 的资源和隔离设置由显式配置验证，真实隔离仍必须在 Linux Docker Engine 上运行并验证。
+资源请求校验不等于资源预留、聚合准入或宿主磁盘配额。
+workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。容器后端是独立的 Docker + runc slice，不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；workspace 仍没有宿主磁盘配额执行机制。
 
-## Sandbox configuration validation
-
-`circus_sandbox::{DockerEndpoint, RuntimeName, IsolationConfig, IoLimits, SandboxConfig}` validates an explicit six-argument create request. It accepts only local Unix sockets or local `npipe:////./pipe/<name>` endpoints, `runc`, nonempty image references, all required isolation flags, safe absolute container workspace paths, positive probeable I/O bounds, and the supported future supervisor profile of at least three PIDs. The models validate only: this branch still has no backend, does not start Docker, pull images, enforce isolation, or reserve resources. See `examples/sandbox_config.rs` and `tests/sandbox_config.rs`.
-
-Run the focused example with `cargo run --locked --example sandbox_config`.
-
-工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖是 cap-std **4.0.3**、cap-fs-ext **4.0.3**（使用 `OpenOptionsFollowExt::follow(No)` 拒绝快照遍历中的符号链接，并在 Unix 使用 `OpenOptionsSyncExt::nonblock`，不开 default features）、tempfile **3.27.0**、thiserror **2.0.21**（非预发布）。`Cargo.lock` 固定解析版本；检查和运行都加 `--locked`。
+工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖还包括 bollard **0.21.1**、tokio **1.x**、tokio-util **0.7.x**、uuid **1.x**、futures-util **0.3.x** 和 thiserror **2.0.21**；`Cargo.lock` 固定解析版本，检查和运行都加 `--locked`。workspace 仍使用 cap-std **4.0.3**、cap-fs-ext **4.0.3**、tempfile **3.27.0**。
 
 这里描述当前检出的真实实现，不以文件或工作流存在代替发布、合并和运行证据。完整目标及交付记录入口见 [交付计划](docs/delivery-plan.md)，QA、安全、Rust 与架构域门禁的实际范围见 [工程说明](docs/engineering.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。
 
@@ -34,7 +29,7 @@ fn prepare() -> Result<(), circus_sandbox::WorkspaceError> {
 
 | 方法                             | 行为                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Workspace::new(max_file_bytes)` | 新建独立临时目录。`max_file_bytes` 必须是 `1..=usize::MAX-1`，否则返回 `InvalidLimit`。这是单个文件的读写上限，不是预分配大小，不是工作区总字节或文件数配额，也不是宿主磁盘配额或进程隔离。Unix 上创建时请求 `0o700`，不隔离同账户或特权进程；Windows 目录权限不变。                                                                                                                                                                                                                                                                        |
+| `Workspace::new(max_file_bytes)` | 新建独立临时目录。`max_file_bytes` 必须是 `1..=usize::MAX-1`，否则返回 `InvalidLimit`。这是单个文件的读写上限，不是预分配大小，不是工作区总字节或文件数配额，也不是宿主磁盘配额或进程隔离。                                                                                                                                                                                                                                                                                                                                                 |
 | `write_file(path, contents)`     | 写入或覆盖已有普通文件。不隐式创建父目录，也没有原子替换。`Closed`、非法路径、超限字节、缺失父目录和非普通文件都在截断之前返回，这些失败不修改已有文件，也不留下新文件。Unix 同样以 `nonblock(true)` 打开，Windows 不设置该标志，CreateFile 是 write+create 且不预先 truncate。确认是普通文件后先 `set_len(0)` 再 `write_all`。此后的 I/O 失败可能截断已有内容，或留下不完整或空文件。                                                                                                                                                      |
 | `read_file(path)`                | 读取普通文件的全部字节。目录、FIFO、设备及其他非普通节点，包括工作区内指向它们的符号链接，返回 `NotRegularFile`，并保留调用方路径。指向普通文件的工作区符号链接仍跟随。Unix 用 cap-std `OpenOptions` 的 `nonblock(true)` 打开，所以 `open` 本身不等待 FIFO 对端；这不是路径 metadata 预检。Windows 不设置该标志，读取是只读打开。不会按不可信 metadata 无限分配。超过上限时最多探测 `limit + 1` 字节后返回 `LimitExceeded`，`actual` 是这次探测到的长度，不是未知的文件总长。逃出工作区的符号链接仍是 cap-std 的 I/O 错误，不是新错误变体。 |
 | `create_dir_all(path)`           | 创建相对目录及其缺失的父目录。已存在时成功。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -45,37 +40,13 @@ fn prepare() -> Result<(), circus_sandbox::WorkspaceError> {
 
 `Drop` 只尽力删除临时目录，不返回错误。需要确认清理结果时调用 `cleanup`。
 
-Unix 上，工作区根在创建时把 `0o700` 交给 tempfile `Builder::permissions`，作为 `mkdir` 的 mode，不是创建后再 `chmod`，也不修改进程 umask。内核 umask 只能再去掉权限位，不能给组或其他用户加权限，所以其他宿主用户不能遍历该目录。同账户进程和特权进程仍可打开它。Windows 不设置这个 Unix mode，目录创建行为不变。
-
-## 代码快照
-
-`Workspace::capture_code_snapshot` 在同一工作区锁住整个遍历，复制普通文件和空目录，并拒绝符号链接、FIFO、设备、socket、未知节点和不适合跨平台恢复的相对路径。`SnapshotBudget` 的总字节数只计算文件内容，entry 数计算文件和目录；两个值都是本次操作的内存边界，不是工作区总配额，也不改变 `max_file_bytes` 的单文件含义。
-
-`CodeSnapshot::restore` 总是创建新的 `Workspace`，不会覆盖原工作区。恢复失败会显式调用目标工作区的 `cleanup`；如果清理也失败，返回 `SnapshotError::RestoreCleanup`，其中保留目标工作区，可释放外部占用后从错误中取出并重试 `cleanup`。快照在当前进程内存中存活，进程退出后不保存，也不包含进程状态或 Docker 支持。
-
-```rust
-use circus_sandbox::{SnapshotBudget, Workspace};
-
-let mut source = Workspace::new(64)?;
-source.create_dir_all("src/empty")?;
-source.write_file("src/main.rs", b"bytes")?;
-let snapshot = source.capture_code_snapshot(SnapshotBudget::new(64, 8)?)?;
-let mut restored = snapshot.restore()?;
-assert_eq!(restored.read_file("src/main.rs")?, b"bytes");
-restored.cleanup()?;
-source.cleanup()?;
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
-
-可运行示例：`cargo run --locked --example code_snapshot`。
-
 ## 单文件上限、删除与并发
 
-`max_file_bytes` 只约束一次 `write_file` 的字节数，以及一次 `read_file` 最多探测的长度。读和写共用这一个单文件上限，不是把多个文件的用量加总，也不是文件个数上限。快照捕获还会把每次文件探测限制为单文件上限与剩余捕获字节预算的较小值，避免一次读取超过操作预算。`new` 不按该值预分配，也不向操作系统申请磁盘配额。多次各自未超限的写入仍可能写满宿主临时目录；那是磁盘耗尽，本库不会把它报成 `LimitExceeded`。当前没有总配额 API，也不提供进程隔离。
+`max_file_bytes` 只约束一次 `write_file` 的字节数，以及一次 `read_file` 最多探测的长度。读和写共用这一个单文件上限，不是把多个文件的用量加总，也不是文件个数上限。`new` 不按该值预分配，也不向操作系统申请磁盘配额。多次各自未超限的写入仍可能写满宿主临时目录；那是磁盘耗尽，本库不会把它报成 `LimitExceeded`。当前没有总配额 API，也不提供进程隔离。以后若实现真实的进程或容器后端，必须单独、显式地限制 CPU、内存、进程数和磁盘，不能把这个参数当成沙箱配额。本库不为此增加总配额 API。
 
 `remove_file` 就是 cap-std 的 unlink：去掉路径最终组件上的非目录项。普通文件、符号链接、FIFO、socket，以及该平台 unlink 会删除的其他非目录节点，都会被删掉。最终组件是符号链接时，删的是链接本身，不打开、不跟随目标，因此也不会删掉链接指向的目录或文件。目录删不掉，返回 `Io`，目录及其内容保留。这不是“只删除普通文件”。读写才用 `NotRegularFile` 拒绝非普通节点；删除前再做类型检查会和 unlink 竞态，本 API 不做。
 
-同一 `Workspace` 的并发读写由内部 `RwLock` 保护，避免本进程里对这一个值的交错写入。这不是外部进程隔离。Unix 上其他宿主用户不能遍历以 `0o700` 创建的工作区根，但同一账户的进程和特权进程仍可打开并修改临时目录。这也不是崩溃安全的原子写。`write_file` 没有原子替换；只有已关闭、非法路径、超限、缺失父目录和非普通文件这些失败发生在截断之前，不修改已有文件。打开普通文件并 `set_len(0)` 之后的 I/O 失败，仍可能截断已有内容或留下不完整文件。这把锁不补上那些保证，也不构成磁盘配额。
+同一 `Workspace` 的并发读写由内部 `RwLock` 保护，避免本进程里对这一个值的交错写入。这不是外部进程隔离：其他进程仍可改临时目录。这也不是崩溃安全的原子写。`write_file` 没有原子替换；只有已关闭、非法路径、超限、缺失父目录和非普通文件这些失败发生在截断之前，不修改已有文件。打开普通文件并 `set_len(0)` 之后的 I/O 失败，仍可能截断已有内容或留下不完整文件。这把锁不补上那些保证，也不构成磁盘配额。
 
 可运行示例在 `examples/workspace.rs`。它实际执行写、读、删除和 `cleanup`。成功时标准输出只有读到的字节再加一个换行；失败写到标准错误并以状态码 1 退出，不打印与 `Result` 无关的成功字样：
 
@@ -102,6 +73,19 @@ cargo run --locked --example workspace
 cargo run --locked --example resource_policy
 ```
 
+## Linux Docker + runc
+
+容器后端的配置、生命周期、文件传输和已知限制见 [Linux Docker + runc 文档](docs/docker-linux-runc.md)，设计取舍见 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。最小前置条件：Linux Docker Engine（本地 Unix socket；Windows 开发机可使用 Linux Docker Desktop named pipe）、已存在的 Linux 镜像、镜像内 Python 3，以及 cgroup v2 用于运行集成测试。镜像不会自动拉取；声明 `VOLUME` 的镜像不支持。
+
+集成测试默认被忽略且不会连接 Docker。显式运行真实后端：
+
+```bash
+CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
+  cargo test --locked --test docker_sandbox -- --ignored
+```
+
+测试使用 `python:3.12-slim`，可用 `CIRCUS_DOCKER_IMAGE` 指定另一个包含 Python 3 的本地 Linux 镜像。当前检出没有记录真实 Docker Engine 运行结果；不要把编译、忽略测试或 CI 通过写成隔离验证。
+
 ## 命令
 
 同样在 `circus-sandbox/` 下执行：
@@ -114,14 +98,13 @@ cargo run --locked --example resource_policy
 | 测试                | `cargo test --locked`                                                                           |
 | 只跑本 API 集成测试 | `cargo test --locked --test workspace`                                                          |
 | 文档                | `RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`                                         |
-| 运行 workspace 示例 | `cargo run --locked --example workspace`                                                        |
-| 运行代码快照示例    | `cargo run --locked --example code_snapshot`                                                    |
+| 运行示例            | `cargo run --locked --example workspace`                                                        |
 | 资源请求示例        | `cargo run --locked --example resource_policy`                                                  |
 | 依赖策略            | 先 `cargo install --locked --version 0.20.2 cargo-deny`，再在本目录 `cargo deny --locked check` |
 
 `cargo test --locked` 覆盖库测试和 `tests/`。要连示例一起编译，使用 `cargo test --locked --all-targets`。不要手改 `Cargo.lock` 来绕过解析失败。
 
-Windows 本机目标是 `x86_64-pc-windows-msvc`。这里的编译成功不表示进程隔离或 Linux 容器后端可用；那些后端还没有实现。符号链接测试需要创建符号链接的权限（开发者模式，或进程持有 `SeCreateSymbolicLinkPrivilege`）。没有该权限时，相关测试应失败，不能静默跳过；不要修改宿主安全设置来让它们通过。
+Windows 本机目标是 `x86_64-pc-windows-msvc`。这里的编译成功不表示 Linux 容器隔离已经验证；真实 Docker 后端必须在 Linux Docker Engine 上按上面的显式命令运行。符号链接测试需要创建符号链接的权限（开发者模式，或进程持有 `SeCreateSymbolicLinkPrivilege`）。没有该权限时，相关测试应失败，不能静默跳过；不要修改宿主安全设置来让它们通过。
 
 ### 架构域检查
 
@@ -149,7 +132,7 @@ npm --prefix circus-sandbox/qa run architecture
 
 ## 路径
 
-拒绝发生在打开句柄之前，并且 Windows 与 Linux 使用同一规则。非法路径是：空路径（`Empty`）、含 `\`（`Backslash`）、任一组件以 ASCII 字母加 `:` 开头（大小写不敏感），或以 `//` 开头（`WindowsPrefix`）、以 `/` 开头或 `Path::is_absolute()`（`Absolute`）、任一组件是 `..`（`ParentComponent`）。因此 `./C:name`、`nested/C:name` 和 `.dot/C:name` 都是 `WindowsPrefix`。`file:name` 与 `CC:name` 不是盘符，路径检查不拒绝；宿主若不允许该文件名，结果是 `Io`，不是 `WindowsPrefix`。已有分类顺序不变：`\` 先于盘符，整段开头的盘符或 `//` 先于绝对路径，`..` 先于仅出现在后续组件上的盘符。`cleanup` 成功后的文件操作是 `Closed`，不是这些路径类别。
+拒绝发生在打开句柄之前，并且 Windows 与 Linux 使用同一规则。非法路径是：空路径（`Empty`）、含 `\`（`Backslash`）、以盘符 `A:`–`Z:` 开头或以 `//` 开头（`WindowsPrefix`）、以 `/` 开头或 `Path::is_absolute()`（`Absolute`）、任一组件是 `..`（`ParentComponent`）。`cleanup` 成功后的文件操作是 `Closed`，不是这些路径类别。
 
 `foo/bar`、`foo/./bar` 可以通过。`create_dir_all` 之外不会自动创建父目录。
 
@@ -164,36 +147,26 @@ npm --prefix circus-sandbox/qa run architecture
 | `Closed`                          | `cleanup` 已经成功。优先于路径和长度检查。                                                                                                                                                                                                                                                                 |
 | `InvalidLimit { max_file_bytes }` | `new(0)` 或 `new(usize::MAX)`。                                                                                                                                                                                                                                                                            |
 | `PathRejected { path, reason }`   | 上一节的非法路径。`path` 是调用方原始路径。                                                                                                                                                                                                                                                                |
-| `LimitExceeded { limit, actual }` | 写入或读取超过 `max_file_bytes`。写入时 `actual` 是 `contents.len()`。读取时最多探测 `limit + 1` 字节，`actual` 是本次实际探测到的长度，不是未知的文件总长。快照捕获若剩余总字节预算更紧，则返回 `ByteLimit`，其 `actual` 也是已探测到的累计长度。                                                         |
+| `LimitExceeded { limit, actual }` | 写入或读取超过 `max_file_bytes`。写入时 `actual` 是 `contents.len()`。读取时最多探测 `limit + 1` 字节，`actual` 是探测长度，不是未知的文件总长。                                                                                                                                                           |
 | `NotRegularFile { path }`         | 把目录、FIFO 或其他非普通文件当作文件读写，包括工作区内指向它们的符号链接。不用于 `remove_file`。Unix 上不会为了等 FIFO 对端而卡住。拒绝发生在截断之前。                                                                                                                                                   |
 | `Io(std::io::Error)`              | 缺失文件、缺失父目录、`remove_file` 遇到目录、临时目录创建/删除失败，以及写入过程中的文件系统错误。缺失路径是 `ErrorKind::NotFound`，发生在截断之前。unlink 掉符号链接、FIFO 或 socket 是成功，不是这个变体，也不是 `NotRegularFile`。写入时若错误发生在打开普通文件之后，文件可能已被截断或只写入一部分。 |
 
-`cleanup` 的 I/O 失败也是 `Io`。此时工作区仍然打开，应保留同一个 `Workspace` 再调用 `cleanup`；恢复时若收到 `RestoreCleanup`，从错误中取出其 `destination` 后重试，不要丢弃错误后假设目录已消失。
+`cleanup` 的 I/O 失败也是 `Io`。此时工作区仍然打开，应保留同一个 `Workspace` 再调用 `cleanup`，不要丢弃错误后假设目录已消失。
 
 ## 变更
-
-### 未发布：进程内代码快照
-
-- 新增 `SnapshotBudget`、`CodeSnapshot` 和 `SnapshotError`，捕获普通文件与空目录，并拒绝符号链接和非普通节点。
-- 快照使用 cap-std 目录句柄和现有相对路径策略；总字节数与 entry 数是单次操作预算，不是 Workspace 总配额。
-- `CodeSnapshot::restore` 总是创建新工作区，失败时显式清理目标；该能力是进程内存副本，不是进程检查点、Docker 或持久化支持。
-- 新增真实示例：`cargo run --locked --example code_snapshot`。
-
-### 未发布：按组件拒绝 Windows 盘符
-
-- `WindowsPrefix` 覆盖任一组件上的 `A:`–`Z:` 盘符前缀（大小写不敏感），包括 `./C:name` 与 `nested/C:name`。Windows 与 Linux 仍使用同一规则，并在打开句柄之前拒绝。
-- `file:name`、`CC:name` 不是盘符，路径检查不拒绝。`\`、绝对路径和 `..` 的既有错误类别与优先顺序不变。
-
-### 未发布：工作区根不对其他宿主用户开放
-
-- Unix 上工作区根在创建时请求 `0o700`，经 tempfile `Builder::permissions` 传给 `mkdir`，不是事后 `chmod`，也不修改进程 umask。umask 只能使权限更严。其他宿主用户不能遍历该目录。
-- 这不隔离同一账户的进程或特权进程。Windows 目录创建行为不变。
 
 ### 未发布：声明依赖架构门禁
 
 - 新增 `npm --prefix circus-sandbox/qa run architecture` 与 Windows/Linux CI，验证真实工具报告的跨架构域 `uses` 边满足固定矩阵。
 - 固定 cargo-modules 0.28.0 与 dotparser 1.1.1；避免内建 `--acyclic` 把合法 getter 误判成环，保留失败关闭与未知命名空间拒绝。
 - 这是声明依赖的补充检查，不是完整函数调用图或运行时隔离证明；具体范围见[工程说明](docs/engineering.md#架构域门禁)。
+
+### 未发布：资源请求值模型
+
+- 新增 `runtime::ResourceLimits` 与类型化 `ResourceLimitsError`，校验单个请求，不声称执行后端或隔离已实现。
+- 内存/工作区为正字节数且不超过 `i64::MAX`；CPU 为正 milli-CPU（`1000` 等于一个 CPU），进程数为正。工作区不超过内存，单文件不超过工作区；单文件上限范围为 `1..usize::MAX`，拒绝 `0` 和 `usize::MAX`，与 `Workspace` 一致。
+- 错误区分零值、超出有符号数值范围、`InvalidMaxFileBytes`、`WorkspaceExceedsMemory` 和 `MaxFileExceedsWorkspace`，不施加 Docker 或宿主容量约束。不做聚合资源预留/准入，也没有内核强制或总磁盘配额。
+- 新增真实示例：`cargo run --locked --example resource_policy`；构造合法请求并观察冲突请求的类型化拒绝。
 
 ### 0.1.0
 
@@ -207,9 +180,8 @@ npm --prefix circus-sandbox/qa run architecture
 - 读和写使用同一个 `max_file_bytes`，含义是单个文件的上限，不是工作区总字节、文件数或宿主磁盘配额。超限写入在创建或截断之前失败。读取不按不可信 metadata 分配；超限时 `actual` 是探测到的长度，不是未知总长。当前没有总配额 API。
 - `cleanup` 成功后文件操作返回 `Closed`，并可重复调用。清理失败保留工作区，可以再试。`Drop` 只尽力删除，不返回错误。
 
-限制：
+限制：workspace 本身不提供命令执行、Git、快照或沙箱池；Docker + runc 容器后端提供独立的异步命令执行和生命周期 API，具体范围见 [Linux Docker + runc](docs/docker-linux-runc.md)。
 
-- 没有命令执行、Git、生命周期状态机、容器后端或沙箱池。
 - `write_file` 不是原子替换，也没有单独的原子写入 API。只有关闭、非法路径、超限、缺失父目录和非普通文件这类前置失败保证不改文件。打开普通文件之后的 I/O 失败可能截断已有文件，或留下部分内容。
 - `remove_file` 按 cap-std unlink 删除非目录项，包括符号链接、FIFO 和 socket。不跟随符号链接目标，不删除目录，删除前也不做类型预检。
 - 同一 `Workspace` 的并发读写由内部 `RwLock` 保护。这不是外部进程隔离，也不是崩溃安全的原子写。

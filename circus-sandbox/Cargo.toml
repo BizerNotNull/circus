@@ -4,13 +4,19 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
 license = "Apache-2.0"
-description = "Capability-scoped temporary workspace files. Not a process sandbox or container runtime."
+description = "Linux Docker sandbox with capability-scoped workspace staging. Not Kubernetes, HTTP, or a snapshot service."
 
 [dependencies]
+bollard = { version = "0.21.1", default-features = false, features = ["pipe"] }
 cap-std = { version = "=4.0.3", default-features = false }
 cap-fs-ext = { version = "=4.0.3", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tempfile = "3.27.0"
 thiserror = "2.0.21"
+tokio = { version = "1.47", default-features = false, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util"] }
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
+uuid = { version = "1", default-features = false, features = ["v4", "std"] }
+
 
 [lints.rust]
 unsafe_code = "forbid"
