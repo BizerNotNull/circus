@@ -71,11 +71,7 @@ impl OutputCollector {
         }
     }
 
-    pub(crate) fn push(
-        &mut self,
-        phase: OutputPhase,
-        chunk: &[u8],
-    ) -> Result<(), EngineError> {
+    pub(crate) fn push(&mut self, phase: OutputPhase, chunk: &[u8]) -> Result<(), EngineError> {
         let stream_limit = match phase {
             OutputPhase::Stdout => self.stdout_limit,
             OutputPhase::Stderr => self.stderr_limit,
@@ -92,16 +88,13 @@ impl OutputCollector {
             .error());
         }
         let combined_limit = self.combined_limit;
-        let combined = self
-            .combined
-            .checked_add(chunk.len())
-            .ok_or_else(|| {
-                OutputLimit {
-                    limit: combined_limit,
-                    phase,
-                }
-                .error()
-            })?;
+        let combined = self.combined.checked_add(chunk.len()).ok_or_else(|| {
+            OutputLimit {
+                limit: combined_limit,
+                phase,
+            }
+            .error()
+        })?;
         if combined > combined_limit {
             return Err(OutputLimit {
                 limit: combined_limit,

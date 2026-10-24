@@ -16,8 +16,11 @@ const OWNER_LABEL_KEY: &str = "circus.sandbox.owner";
 static DOCKER_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn backend() -> Result<BackendConfig> {
-    assert_eq!(std::env::var("CIRCUS_DOCKER_SANDBOX").as_deref(), Ok("1"),
-        "set CIRCUS_DOCKER_SANDBOX=1 to opt into the real backend tests");
+    assert_eq!(
+        std::env::var("CIRCUS_DOCKER_SANDBOX").as_deref(),
+        Ok("1"),
+        "set CIRCUS_DOCKER_SANDBOX=1 to opt into the real backend tests"
+    );
     Ok(BackendConfig::docker(
         std::env::var("CIRCUS_DOCKER_ENDPOINT")?,
         std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
@@ -42,47 +45,73 @@ fn docker(backend: &BackendConfig) -> Result<bollard::Docker> {
     } else {
         endpoint.to_string()
     };
-    Ok(bollard::Docker::connect_with_socket(&path, 30, bollard::API_DEFAULT_VERSION)?)
+    Ok(bollard::Docker::connect_with_socket(
+        &path,
+        30,
+        bollard::API_DEFAULT_VERSION,
+    )?)
 }
 
 async fn absent(docker: &bollard::Docker, id: &str) -> Result {
     match docker.inspect_container(id, None).await {
-        Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. }) => Ok(()),
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => Ok(()),
         Err(error) => Err(error.into()),
         Ok(_) => Err(format!("container {id} still exists").into()),
     }
 }
 
 async fn owned_ids(docker: &bollard::Docker) -> Result<HashSet<String>> {
-    let containers = docker.list_containers(Some(bollard::query_parameters::ListContainersOptions {
-        all: true,
-        filters: Some(HashMap::from([("label".into(), vec![OWNER_LABEL_KEY.into()])])),
-        ..Default::default()
-    })).await?;
-    Ok(containers.into_iter().filter_map(|container| container.id).collect())
+    let containers = docker
+        .list_containers(Some(bollard::query_parameters::ListContainersOptions {
+            all: true,
+            filters: Some(HashMap::from([(
+                "label".into(),
+                vec![OWNER_LABEL_KEY.into()],
+            )])),
+            ..Default::default()
+        }))
+        .await?;
+    Ok(containers
+        .into_iter()
+        .filter_map(|container| container.id)
+        .collect())
 }
 
 async fn eventually_absent(docker: &bollard::Docker, id: &str) -> Result {
     tokio::time::timeout(WAIT, async {
         loop {
             match docker.inspect_container(id, None).await {
-                Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. }) => return Ok(()),
+                Err(bollard::errors::Error::DockerResponseServerError {
+                    status_code: 404, ..
+                }) => return Ok(()),
                 Err(error) => return Err(Box::<dyn Error>::from(error)),
                 Ok(_) => tokio::time::sleep(Duration::from_millis(25)).await,
             }
         }
-    }).await?
+    })
+    .await?
 }
 
 async fn id(sandbox: &Sandbox) -> Result<String> {
     let status = sandbox.status().await?;
     assert_eq!(status.phase, SandboxPhase::Running);
-    Ok(status.instance_id.ok_or("running sandbox has no container ID")?)
+    Ok(status
+        .instance_id
+        .ok_or("running sandbox has no container ID")?)
 }
 
 fn accounted(status: &PoolStatus) {
-    assert_eq!(status.ready + status.creating + status.leased + status.retiring
-        + status.cleanup_required + status.absent, status.capacity);
+    assert_eq!(
+        status.ready
+            + status.creating
+            + status.leased
+            + status.retiring
+            + status.cleanup_required
+            + status.absent,
+        status.capacity
+    );
 }
 
 async fn ready(pool: &DockerPool, count: usize) -> Result {
@@ -95,7 +124,8 @@ async fn ready(pool: &DockerPool, count: usize) -> Result {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-    }).await??;
+    })
+    .await??;
     Ok(())
 }
 
@@ -124,10 +154,20 @@ async fn baseline_single_use_release_and_drop_are_real() -> Result {
     let config = config()?;
     let docker = docker(&backend)?;
     let bytes = b"\0baseline\xff\n";
-    let pool = DockerPool::create(PoolConfig::new(backend.clone(), config, 1, Some(baseline(bytes)?), Duration::from_secs(120))?).await?;
+    let pool = DockerPool::create(PoolConfig::new(
+        backend.clone(),
+        config,
+        1,
+        Some(baseline(bytes)?),
+        Duration::from_secs(120),
+    )?)
+    .await?;
     let initial = pool.status().await?;
     assert_eq!(initial.ready, 1);
-    assert_eq!(initial.creating + initial.leased + initial.retiring + initial.cleanup_required, 0);
+    assert_eq!(
+        initial.creating + initial.leased + initial.retiring + initial.cleanup_required,
+        0
+    );
     let first = pool.acquire(WAIT).await?;
     let first_id = id(first.sandbox()).await?;
     assert_eq!(first.sandbox().read_file("baseline.bin").await?, bytes);
@@ -165,9 +205,19 @@ async fn baseline_single_use_release_and_drop_are_real() -> Result {
 #[ignore = "requires an explicit real Linux Docker Engine"]
 async fn leased_capacity_times_out_and_cancelled_waiter_does_not_steal_refill() -> Result {
     let _serial = DOCKER_TEST.lock().await;
-    let pool = DockerPool::create(PoolConfig::new(backend()?, config()?, 1, None, Duration::from_secs(120))?).await?;
+    let pool = DockerPool::create(PoolConfig::new(
+        backend()?,
+        config()?,
+        1,
+        None,
+        Duration::from_secs(120),
+    )?)
+    .await?;
     let lease = pool.acquire(WAIT).await?;
-    assert!(matches!(pool.acquire(Duration::from_millis(100)).await, Err(PoolError::AcquireTimeout)));
+    assert!(matches!(
+        pool.acquire(Duration::from_millis(100)).await,
+        Err(PoolError::AcquireTimeout)
+    ));
     let mut cancelled = Box::pin(pool.acquire(WAIT));
     tokio::select! {
         result = &mut cancelled => panic!("occupied pool unexpectedly completed: {:?}", result.err()),
@@ -193,7 +243,14 @@ async fn concurrent_leases_are_bounded_and_shutdown_revokes_without_pruning() ->
     let survivor = Sandbox::create(backend.clone(), config.clone()).await?;
     survivor.start().await?;
     let survivor_id = id(&survivor).await?;
-    let pool = DockerPool::create(PoolConfig::new(backend.clone(), config, 2, None, Duration::from_secs(120))?).await?;
+    let pool = DockerPool::create(PoolConfig::new(
+        backend.clone(),
+        config,
+        2,
+        None,
+        Duration::from_secs(120),
+    )?)
+    .await?;
     let (first, second) = tokio::join!(pool.acquire(WAIT), pool.acquire(WAIT));
     let first = first?;
     let second = second?;
@@ -202,8 +259,14 @@ async fn concurrent_leases_are_bounded_and_shutdown_revokes_without_pruning() ->
     let status = pool.status().await?;
     accounted(&status);
     assert_eq!(status.leased, 2);
-    assert_eq!(status.ready + status.creating + status.retiring + status.cleanup_required, 0);
-    assert!(matches!(pool.acquire(Duration::from_millis(100)).await, Err(PoolError::AcquireTimeout)));
+    assert_eq!(
+        status.ready + status.creating + status.retiring + status.cleanup_required,
+        0
+    );
+    assert!(matches!(
+        pool.acquire(Duration::from_millis(100)).await,
+        Err(PoolError::AcquireTimeout)
+    ));
     let mut pending = Box::pin(pool.acquire(WAIT));
     tokio::select! {
         result = &mut pending => panic!("occupied pool unexpectedly completed: {:?}", result.err()),
@@ -217,11 +280,33 @@ async fn concurrent_leases_are_bounded_and_shutdown_revokes_without_pruning() ->
     }
     let closed = pool.status().await?;
     assert!(closed.closing);
-    assert_eq!(closed.ready + closed.creating + closed.leased + closed.retiring + closed.cleanup_required, 0);
-    assert!(first.sandbox().exec(command("print('revoked')")).await.is_err());
-    assert!(second.sandbox().exec(command("print('revoked')")).await.is_err());
+    assert_eq!(
+        closed.ready + closed.creating + closed.leased + closed.retiring + closed.cleanup_required,
+        0
+    );
+    assert!(
+        first
+            .sandbox()
+            .exec(command("print('revoked')"))
+            .await
+            .is_err()
+    );
+    assert!(
+        second
+            .sandbox()
+            .exec(command("print('revoked')"))
+            .await
+            .is_err()
+    );
     assert_eq!(id(&survivor).await?, survivor_id);
-    assert!(docker.inspect_container(&survivor_id, None).await?.state.and_then(|state| state.running).unwrap_or(false));
+    assert!(
+        docker
+            .inspect_container(&survivor_id, None)
+            .await?
+            .state
+            .and_then(|state| state.running)
+            .unwrap_or(false)
+    );
     let output = survivor.exec(command("print('survivor')")).await?;
     assert_eq!(output.exit_code, 0);
     assert_eq!(output.stdout, b"survivor\n");
@@ -242,7 +327,14 @@ async fn preparation_failure_preserves_source_and_any_cleanup_owner() -> Result 
     let docker = docker(&backend)?;
     let before = owned_ids(&docker).await?;
     // A real container can be created, but its 1024-byte file cap cannot restore this baseline.
-    let outcome = DockerPool::create(PoolConfig::new(backend.clone(), config, 1, Some(baseline(&[7; 2048])?), Duration::from_secs(120))?).await;
+    let outcome = DockerPool::create(PoolConfig::new(
+        backend.clone(),
+        config,
+        1,
+        Some(baseline(&[7; 2048])?),
+        Duration::from_secs(120),
+    )?)
+    .await;
     let error = match outcome {
         Ok(pool) => {
             pool.shutdown().await?;
@@ -250,14 +342,23 @@ async fn preparation_failure_preserves_source_and_any_cleanup_owner() -> Result 
         }
         Err(error) => error,
     };
-    assert!(error.source().is_some(), "preparation failure must retain its structured source");
+    assert!(
+        error.source().is_some(),
+        "preparation failure must retain its structured source"
+    );
     match error {
         PoolError::Operation { source } => {
-            assert!(matches!(source.as_ref(), circus_sandbox::PoolFailure::Sandbox { .. }));
+            assert!(matches!(
+                source.as_ref(),
+                circus_sandbox::PoolFailure::Sandbox { .. }
+            ));
             assert!(source.source().is_some());
         }
         PoolError::CleanupRequired { pool, source } => {
-            assert!(matches!(source.as_ref(), circus_sandbox::PoolFailure::Sandbox { .. }));
+            assert!(matches!(
+                source.as_ref(),
+                circus_sandbox::PoolFailure::Sandbox { .. }
+            ));
             assert!(source.source().is_some());
             pool.shutdown().await?;
             let status = pool.status().await?;
@@ -268,7 +369,11 @@ async fn preparation_failure_preserves_source_and_any_cleanup_owner() -> Result 
         other => panic!("expected structured preparation error, got {other:?}"),
     }
     let after = owned_ids(&docker).await?;
-    assert!(after.is_subset(&before), "failed preparation leaked owned containers: {:?}", after.difference(&before).collect::<Vec<_>>());
+    assert!(
+        after.is_subset(&before),
+        "failed preparation leaked owned containers: {:?}",
+        after.difference(&before).collect::<Vec<_>>()
+    );
     Ok(())
 }
 
@@ -282,21 +387,36 @@ async fn lease_ttl_revokes_running_child_and_refills_without_touching_survivor()
     let survivor = Sandbox::create(backend.clone(), config.clone()).await?;
     survivor.start().await?;
     let survivor_id = id(&survivor).await?;
-    let pool = DockerPool::create(PoolConfig::new(backend.clone(), config, 1, None, Duration::from_secs(5))?).await?;
+    let pool = DockerPool::create(PoolConfig::new(
+        backend.clone(),
+        config,
+        1,
+        None,
+        Duration::from_secs(5),
+    )?)
+    .await?;
     let expired = pool.acquire(WAIT).await?;
     let expired_id = id(expired.sandbox()).await?;
-    expired.sandbox().write_file("private", b"expired tenant").await?;
+    expired
+        .sandbox()
+        .write_file("private", b"expired tenant")
+        .await?;
     let request = CommandRequest {
         argv: vec!["python3".into(), "-c".into(),
             "import subprocess,sys; subprocess.run([sys.executable,'-c','import time; time.sleep(60)'],check=True)".into()],
         timeout: Duration::from_secs(90),
         output_limit_bytes: 4096,
     };
-    let execution = tokio::time::timeout(Duration::from_secs(30), expired.sandbox().exec(request)).await?;
-    assert!(matches!(&execution,
-        Err(circus_sandbox::SandboxError::Cancelled { .. })
-        | Err(circus_sandbox::SandboxError::WorkerGone { .. })
-    ), "TTL must interrupt the long-running command, got {execution:?}");
+    let execution =
+        tokio::time::timeout(Duration::from_secs(30), expired.sandbox().exec(request)).await?;
+    assert!(
+        matches!(
+            &execution,
+            Err(circus_sandbox::SandboxError::Cancelled { .. })
+                | Err(circus_sandbox::SandboxError::WorkerGone { .. })
+        ),
+        "TTL must interrupt the long-running command, got {execution:?}"
+    );
     // Expiry requests revocation; only an actual inspect 404 confirms destruction.
     eventually_absent(&docker, &expired_id).await?;
     ready(&pool, 1).await?;

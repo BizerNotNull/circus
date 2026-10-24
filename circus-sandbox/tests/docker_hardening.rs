@@ -12,8 +12,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use circus_sandbox::{
-    BackendConfig, CommandRequest, IoLimits, IsolationConfig, OutputPhase, Ownership, ResourceLimits,
-    Sandbox, SandboxConfig, SandboxError, SandboxOperation, SandboxPhase,
+    BackendConfig, CommandRequest, IoLimits, IsolationConfig, OutputPhase, Ownership,
+    ResourceLimits, Sandbox, SandboxConfig, SandboxError, SandboxOperation, SandboxPhase,
 };
 
 const PY: &str = "python3";
@@ -60,13 +60,7 @@ fn config() -> Result<SandboxConfig, Box<dyn std::error::Error>> {
 fn config_with_lifecycle(
     lifecycle_timeout: Duration,
 ) -> Result<SandboxConfig, Box<dyn std::error::Error>> {
-    let limits = ResourceLimits::new(
-        MEMORY,
-        100,
-        TEST_PIDS,
-        WORKSPACE,
-        1024,
-    )?;
+    let limits = ResourceLimits::new(MEMORY, 100, TEST_PIDS, WORKSPACE, 1024)?;
     Ok(SandboxConfig::new(
         limits,
         IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
@@ -103,7 +97,10 @@ fn require_inspect(host: &str, id: &str) -> Result<(), Box<dyn std::error::Error
 }
 
 fn owned_container_ids(host: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let output = docker(host, &["ps", "-aq", "--filter", &format!("label={OWNER_LABEL}")])?;
+    let output = docker(
+        host,
+        &["ps", "-aq", "--filter", &format!("label={OWNER_LABEL}")],
+    )?;
     assert!(
         output.status.success(),
         "docker ps failed: {}",
@@ -143,7 +140,9 @@ impl Fixture {
         let before = owned_container_ids(&host)?;
         let sandbox = Sandbox::create(backend, config).await?;
         let after = owned_container_ids(&host)?;
-        let id = after.into_iter().find(|candidate| !before.contains(candidate));
+        let id = after
+            .into_iter()
+            .find(|candidate| !before.contains(candidate));
         Ok(Self {
             sandbox: Some(sandbox),
             host,
@@ -234,12 +233,18 @@ async fn docker_post_create_policy_is_verified_against_inspect()
     assert!(fields[1] == "[]" || fields[1] == "null", "{}", fields[1]);
     assert_eq!(fields[2], r#"["no-new-privileges:true"]"#);
     for empty in [fields[3], fields[4], fields[5]] {
-        assert!(empty == "[]" || empty == "null", "unexpected mounts: {empty}");
+        assert!(
+            empty == "[]" || empty == "null",
+            "unexpected mounts: {empty}"
+        );
     }
     let tmpfs = fields[6];
     assert!(tmpfs.contains(r#""/workspace""#), "{tmpfs}");
     for required in ["nosuid", "nodev", "uid=65534", "gid=65534", "size=8388608"] {
-        assert!(tmpfs.contains(required), "tmpfs missing {required}: {tmpfs}");
+        assert!(
+            tmpfs.contains(required),
+            "tmpfs missing {required}: {tmpfs}"
+        );
     }
 
     // The public status evidence agrees with the engine.
@@ -276,7 +281,10 @@ async fn docker_normal_delete_confirms_absence_and_inspect_fails_after_delete()
     assert_eq!(status.phase, SandboxPhase::Destroyed);
     assert_eq!(status.instance_id, None);
     f.sandbox().destroy().await?;
-    assert!(!inspect_exists(&f.host, &id)?, "container {id} still exists");
+    assert!(
+        !inspect_exists(&f.host, &id)?,
+        "container {id} still exists"
+    );
     Ok(())
 }
 
@@ -408,11 +416,8 @@ async fn docker_status_timeout_does_not_destroy_the_instance()
 -> Result<(), Box<dyn std::error::Error>> {
     enabled();
     let _serial = SERIAL.lock().await;
-    let f = Fixture::with_config(
-        backend()?,
-        config_with_lifecycle(Duration::from_nanos(1))?,
-    )
-    .await?;
+    let f =
+        Fixture::with_config(backend()?, config_with_lifecycle(Duration::from_nanos(1))?).await?;
     let id = f.id.clone().expect("created container id");
 
     match f.sandbox().status().await {
@@ -439,8 +444,7 @@ async fn docker_status_timeout_does_not_destroy_the_instance()
 
 #[tokio::test]
 #[ignore = "requires an explicit real Linux Docker Engine"]
-async fn docker_cancelled_create_retains_owned_cleanup()
--> Result<(), Box<dyn std::error::Error>> {
+async fn docker_cancelled_create_retains_owned_cleanup() -> Result<(), Box<dyn std::error::Error>> {
     enabled();
     let _serial = SERIAL.lock().await;
     let backend = backend()?;

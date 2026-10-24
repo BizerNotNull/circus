@@ -68,10 +68,13 @@ impl CleanupReceipt {
                     return Ok(current.report.clone());
                 }
             }
-            progress.changed().await.map_err(|_| SandboxError::WorkerGone {
-                detail: "cleanup worker ended before confirming instance and staging cleanup"
-                    .to_string(),
-            })?;
+            progress
+                .changed()
+                .await
+                .map_err(|_| SandboxError::WorkerGone {
+                    detail: "cleanup worker ended before confirming instance and staging cleanup"
+                        .to_string(),
+                })?;
         }
     }
 }

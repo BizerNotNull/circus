@@ -55,10 +55,7 @@ pub(crate) struct HostReport {
 /// Builds the create request. Every field here has a matching verification in
 /// [`verify`]; a value added here without verification must not claim
 /// enforcement.
-pub(crate) fn create_body(
-    name: &str,
-    spec: &CreateSpec,
-) -> bollard::models::ContainerCreateBody {
+pub(crate) fn create_body(name: &str, spec: &CreateSpec) -> bollard::models::ContainerCreateBody {
     let mut labels = HashMap::new();
     labels.insert(OWNER_LABEL_KEY.to_string(), spec.owner_label.clone());
     labels.insert("circus.sandbox.name".to_string(), name.to_string());
@@ -147,7 +144,7 @@ impl PolicyMismatch {
             create_pending: false,
             create_id: None,
             output: None,
-            policy: Some(self),
+            policy: Some(Box::new(self)),
         }
     }
 }
@@ -278,9 +275,8 @@ fn verify_contains(
 
 fn verify_empty(field: &'static str, actual: Option<&[String]>) -> Result<(), PolicyMismatch> {
     match actual {
-        Some(values) if values.is_empty() => Ok(()),
+        Some([]) | None => Ok(()),
         Some(values) => Err(mismatch(field, "empty", format!("{values:?}"))),
-        None => Ok(()),
     }
 }
 
@@ -296,11 +292,7 @@ fn verify_tmpfs(
     actual: Option<&BTreeMap<String, String>>,
 ) -> Result<(), PolicyMismatch> {
     let Some(tmpfs) = actual else {
-        return Err(mismatch(
-            "tmpfs",
-            expected_tmpfs(spec),
-            "not reported",
-        ));
+        return Err(mismatch("tmpfs", expected_tmpfs(spec), "not reported"));
     };
     if tmpfs.len() != 1 || !tmpfs.contains_key(&spec.workspace_path) {
         let actual = tmpfs

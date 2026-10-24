@@ -51,7 +51,13 @@ impl PoolConfig {
         if lease_ttl.is_zero() || tokio::time::Instant::now().checked_add(lease_ttl).is_none() {
             return Err(PoolError::InvalidLeaseTtl);
         }
-        Ok(Self { backend, sandbox, capacity, baseline, lease_ttl })
+        Ok(Self {
+            backend,
+            sandbox,
+            capacity,
+            baseline,
+            lease_ttl,
+        })
     }
 }
 
@@ -148,14 +154,22 @@ impl DockerPool {
     pub async fn create(config: PoolConfig) -> Result<Self, PoolError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let close = CancellationToken::new();
-        let pool = Self { client: Arc::new(Client { tx: tx.clone(), close: close.clone() }) };
+        let pool = Self {
+            client: Arc::new(Client {
+                tx: tx.clone(),
+                close: close.clone(),
+            }),
+        };
         let (ready, result) = oneshot::channel();
         tokio::spawn(worker::run(config, rx, tx, close, ready));
         match result.await.map_err(|_| PoolError::WorkerGone)? {
             Ok(()) => Ok(pool),
             Err(source) => match pool.shutdown().await {
                 Ok(()) => Err(PoolError::Operation { source }),
-                Err(_) => Err(PoolError::CleanupRequired { pool: Box::new(pool), source }),
+                Err(_) => Err(PoolError::CleanupRequired {
+                    pool: Box::new(pool),
+                    source,
+                }),
             },
         }
     }
@@ -163,14 +177,23 @@ impl DockerPool {
     /// Waits FIFO among live waiters for a single-use lease. The explicit,
     /// positive deadline includes queueing; cancelled waiters never own a slot.
     pub async fn acquire(&self, timeout: Duration) -> Result<PoolLease, PoolError> {
-        let deadline = tokio::time::Instant::now().checked_add(timeout)
-            .filter(|_| !timeout.is_zero()).ok_or(PoolError::InvalidTimeout)?;
+        let deadline = tokio::time::Instant::now()
+            .checked_add(timeout)
+            .filter(|_| !timeout.is_zero())
+            .ok_or(PoolError::InvalidTimeout)?;
         let (reply, result) = oneshot::channel();
         let cancelled = CancellationToken::new();
         let _guard = CancelWaiter(cancelled.clone());
-        self.client.tx.send(worker::Request::Acquire { reply, cancelled, deadline })
+        self.client
+            .tx
+            .send(worker::Request::Acquire {
+                reply,
+                cancelled,
+                deadline,
+            })
             .map_err(|_| PoolError::WorkerGone)?;
-        tokio::time::timeout_at(deadline, result).await
+        tokio::time::timeout_at(deadline, result)
+            .await
             .map_err(|_| PoolError::AcquireTimeout)?
             .map_err(|_| PoolError::WorkerGone)?
     }
@@ -178,7 +201,10 @@ impl DockerPool {
     /// Returns disjoint slot counts without blocking behind slow Docker calls.
     pub async fn status(&self) -> Result<PoolStatus, PoolError> {
         let (reply, result) = oneshot::channel();
-        self.client.tx.send(worker::Request::Status(reply)).map_err(|_| PoolError::WorkerGone)?;
+        self.client
+            .tx
+            .send(worker::Request::Status(reply))
+            .map_err(|_| PoolError::WorkerGone)?;
         result.await.map_err(|_| PoolError::WorkerGone)
     }
 
@@ -190,12 +216,17 @@ impl DockerPool {
     pub async fn shutdown(&self) -> Result<(), PoolError> {
         self.client.close.cancel();
         let (reply, result) = oneshot::channel();
-        self.client.tx.send(worker::Request::Shutdown(reply)).map_err(|_| PoolError::WorkerGone)?;
+        self.client
+            .tx
+            .send(worker::Request::Shutdown(reply))
+            .map_err(|_| PoolError::WorkerGone)?;
         result.await.map_err(|_| PoolError::WorkerGone)?
     }
 }
 
 struct CancelWaiter(CancellationToken);
 impl Drop for CancelWaiter {
-    fn drop(&mut self) { self.0.cancel(); }
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }

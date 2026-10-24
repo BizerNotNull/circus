@@ -137,8 +137,6 @@ impl DockerConfig {
         }
         Ok(())
     }
-
-
 }
 
 /// Why Docker configuration was rejected before any container allocation.
@@ -158,8 +156,10 @@ pub(crate) struct DockerBackend {
 
 impl DockerBackend {
     /// Connects and negotiates the Engine API version. Does not allocate.
-    pub(crate) async fn connect(config: DockerConfig) -> Result<Self, EngineError> {
-        let engine = Engine::connect(config.endpoint.socket_kind(), config.endpoint.path()).await?;
+    pub(crate) async fn connect(config: DockerConfig) -> Result<Self, Box<EngineError>> {
+        let engine = Engine::connect(config.endpoint.socket_kind(), config.endpoint.path())
+            .await
+            .map_err(Box::new)?;
         Ok(Self { engine, config })
     }
 
@@ -179,6 +179,10 @@ impl DockerBackend {
     }
 }
 
+// The trait returns explicit `impl Future + Send` bounds for static dispatch, so
+// these implementations cannot use `async fn` syntax without erasing the Send
+// guarantee that the lifecycle worker's spawned future depends on.
+#[allow(clippy::manual_async_fn)]
 impl Backend for DockerBackend {
     fn capabilities(&self) -> Capabilities {
         Capabilities {

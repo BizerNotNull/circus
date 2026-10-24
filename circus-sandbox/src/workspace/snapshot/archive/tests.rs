@@ -101,9 +101,7 @@ fn rejects_escape_and_nonportable_raw_paths() {
 
 #[test]
 fn rejects_links_special_nodes_and_extension_metadata() {
-    for kind in [
-        b'1', b'2', b'3', b'4', b'6', b'7', b'x', b'g', b'L', b'K', b'S',
-    ] {
+    for kind in *b"123467xgLKS" {
         assert!(
             capture(
                 archive(&[(b"workspace/", b'5', b""), (b"workspace/node", kind, b"")]),

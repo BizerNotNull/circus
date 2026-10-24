@@ -194,12 +194,7 @@ impl IoLimits {
     /// Returns [`ConfigError::InvalidOutputLimit`] for `0` or `usize::MAX` and
     /// [`ConfigError::InvalidFileTimeout`] for a zero file deadline.
     pub fn new(output_limit_bytes: usize, file_timeout: Duration) -> Result<Self, ConfigError> {
-        Self::with_deadlines(
-            output_limit_bytes,
-            file_timeout,
-            file_timeout,
-            file_timeout,
-        )
+        Self::with_deadlines(output_limit_bytes, file_timeout, file_timeout, file_timeout)
     }
 
     /// Validates a distinct positive deadline for each operation class.
@@ -467,11 +462,21 @@ mod tests {
         assert_eq!(io.file_timeout(), Duration::from_secs(2));
         assert_eq!(io.lifecycle_timeout(), Duration::from_secs(9));
         assert_eq!(
-            IoLimits::with_deadlines(1, Duration::ZERO, Duration::from_secs(1), Duration::from_secs(1)),
+            IoLimits::with_deadlines(
+                1,
+                Duration::ZERO,
+                Duration::from_secs(1),
+                Duration::from_secs(1)
+            ),
             Err(ConfigError::InvalidCommandTimeout)
         );
         assert_eq!(
-            IoLimits::with_deadlines(1, Duration::from_secs(1), Duration::from_secs(1), Duration::ZERO),
+            IoLimits::with_deadlines(
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::ZERO
+            ),
             Err(ConfigError::InvalidLifecycleTimeout)
         );
         assert_eq!(
@@ -482,11 +487,7 @@ mod tests {
 
     #[test]
     fn backend_descriptor_is_plain_data() {
-        let backend = BackendConfig::docker(
-            "unix:///var/run/docker.sock",
-            "alpine:3.20",
-            "runc",
-        );
+        let backend = BackendConfig::docker("unix:///var/run/docker.sock", "alpine:3.20", "runc");
         match backend {
             BackendConfig::Docker(docker) => {
                 assert_eq!(docker.endpoint(), "unix:///var/run/docker.sock");

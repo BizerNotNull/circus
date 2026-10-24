@@ -20,8 +20,7 @@ async fn rejected_without_worker(request: CommandRequest, expected: CommandError
     );
     assert!(matches!(&err, SandboxError::Command(actual) if actual == &expected));
     assert_eq!(
-        std::error::Error::source(&err)
-            .and_then(|source| source.downcast_ref::<CommandError>()),
+        std::error::Error::source(&err).and_then(|source| source.downcast_ref::<CommandError>()),
         Some(&expected)
     );
     assert!(matches!(
@@ -130,6 +129,8 @@ impl FakeBackend {
     }
 }
 
+// The production trait returns explicit `impl Future + Send` bounds.
+#[allow(clippy::manual_async_fn)]
 impl Backend for FakeBackend {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
@@ -174,24 +175,15 @@ impl Backend for FakeBackend {
         async move { outcome }
     }
 
-    fn start(
-        &self,
-        _id: &InstanceId,
-    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+    fn start(&self, _id: &InstanceId) -> impl Future<Output = Result<(), EngineError>> + Send {
         async { Ok(()) }
     }
 
-    fn pause(
-        &self,
-        _id: &InstanceId,
-    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+    fn pause(&self, _id: &InstanceId) -> impl Future<Output = Result<(), EngineError>> + Send {
         async { Ok(()) }
     }
 
-    fn resume(
-        &self,
-        _id: &InstanceId,
-    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+    fn resume(&self, _id: &InstanceId) -> impl Future<Output = Result<(), EngineError>> + Send {
         async { Ok(()) }
     }
 
@@ -288,8 +280,7 @@ fn engine_error(message: &str) -> EngineError {
 fn config() -> SandboxConfig {
     let limits = ResourceLimits::new(1024 * 1024, 100, 8, 8 * 1024, 1024).unwrap();
     let isolation =
-        IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 1000, 1000)
-            .unwrap();
+        IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 1000, 1000).unwrap();
     let io = IoLimits::with_deadlines(
         4096,
         Duration::from_millis(200),
@@ -342,7 +333,8 @@ async fn destroy_retains_identity_and_staging_until_absence_is_confirmed() {
     assert_eq!(report.instance_id.as_deref(), Some("fake-instance"));
     let error = error.expect("destroy must not claim success while present");
     assert!(matches!(
-        std::error::Error::source(&error).and_then(|source| source.downcast_ref::<CleanupFailure>()),
+        std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<CleanupFailure>()),
         Some(CleanupFailure::StillPresent { .. })
     ));
     match error {
@@ -553,11 +545,11 @@ async fn policy_mismatch_fails_creation_and_destroys_the_instance() {
     let backend = FakeBackend::new();
     backend.set_create_error(EngineError {
         create_id: Some("fake-instance".to_string()),
-        policy: Some(PolicyMismatch {
+        policy: Some(Box::new(PolicyMismatch {
             field: "network_mode",
             expected: "none".to_string(),
             actual: "bridge".to_string(),
-        }),
+        })),
         ..engine_error("effective policy mismatch")
     });
     backend.push_recovery(Recovered::Removed);
@@ -586,11 +578,11 @@ async fn policy_mismatch_retains_cleanup_ownership_when_removal_is_unconfirmed()
     let backend = FakeBackend::new();
     backend.set_create_error(EngineError {
         create_id: Some("fake-instance".to_string()),
-        policy: Some(PolicyMismatch {
+        policy: Some(Box::new(PolicyMismatch {
             field: "tmpfs",
             expected: "size=8192".to_string(),
             actual: "size=1".to_string(),
-        }),
+        })),
         ..engine_error("effective policy mismatch")
     });
     backend.push_recovery(Recovered::StillPresent {
@@ -625,11 +617,11 @@ async fn cancelled_cleanup_wait_does_not_stop_owned_retry() {
     let backend = FakeBackend::new();
     backend.set_create_error(EngineError {
         create_id: Some("fake-instance".to_string()),
-        policy: Some(PolicyMismatch {
+        policy: Some(Box::new(PolicyMismatch {
             field: "cap_drop",
             expected: "ALL".to_string(),
             actual: "none".to_string(),
-        }),
+        })),
         ..engine_error("effective policy mismatch")
     });
     backend.push_recovery(Recovered::StillPresent {

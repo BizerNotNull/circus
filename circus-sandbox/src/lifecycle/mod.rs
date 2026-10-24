@@ -131,13 +131,18 @@ impl Sandbox {
     /// [`SandboxError::CreationCleanupRequired`] carries the original error and
     /// a receipt for instance and staging cleanup. Its worker retries
     /// independently of the receipt or this future's lifetime.
-    pub async fn create(backend: BackendConfig, config: SandboxConfig) -> Result<Self, SandboxError> {
+    pub async fn create(
+        backend: BackendConfig,
+        config: SandboxConfig,
+    ) -> Result<Self, SandboxError> {
         let docker = backend_config(&backend)?;
         let spec = common_spec(&config);
         docker
             .validate_common(&spec)
             .map_err(|err| SandboxError::BackendConfig(map_docker_config(err)))?;
-        let backend = DockerBackend::connect(docker).await.map_err(engine_err)?;
+        let backend = DockerBackend::connect(docker)
+            .await
+            .map_err(|err| engine_err(*err))?;
         Self::create_with_backend(backend, spec, config).await
     }
 
@@ -654,7 +659,11 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
             // The configured command timeout is an operator ceiling; a request
             // may ask for a shorter deadline but never a longer one.
             let timeout = request.timeout.min(state.config.command_timeout());
-            let result = run!(operations::exec(state, request), timeout, SandboxOperation::Exec);
+            let result = run!(
+                operations::exec(state, request),
+                timeout,
+                SandboxOperation::Exec
+            );
             let _ = reply.send(result);
         }
         Op::Status(reply) => {
@@ -678,4 +687,3 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
 
 #[cfg(test)]
 mod tests;
-

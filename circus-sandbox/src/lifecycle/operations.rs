@@ -4,10 +4,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::infrastructure::{
-    Backend, CommonSpec, EngineError, EngineErrorKind, InstanceId, OutputPhase as EngineOutputPhase,
-    Recovered, StagedBytes,
+    Backend, CommonSpec, EngineError, EngineErrorKind, InstanceId,
+    OutputPhase as EngineOutputPhase, Recovered, StagedBytes,
 };
-use crate::runtime::{check_relative, SandboxConfig};
+use crate::runtime::{SandboxConfig, check_relative};
 use crate::workspace::{StagedNode, WorkspaceError};
 
 use super::{
@@ -461,9 +461,7 @@ pub(super) async fn destroy_report<B: Backend>(state: &mut State<B>) -> CleanupR
     destroy_attempt(state).await.0
 }
 
-pub(super) async fn status<B: Backend>(
-    state: &State<B>,
-) -> Result<SandboxStatus, SandboxError> {
+pub(super) async fn status<B: Backend>(state: &State<B>) -> Result<SandboxStatus, SandboxError> {
     let Some(id) = state.id.as_ref() else {
         return Ok(SandboxStatus {
             phase: state.phase,
@@ -493,9 +491,7 @@ pub(super) async fn status<B: Backend>(
     })
 }
 
-pub(super) async fn staged<B: Backend>(
-    state: &State<B>,
-) -> Result<Vec<StagedBytes>, SandboxError> {
+pub(super) async fn staged<B: Backend>(state: &State<B>) -> Result<Vec<StagedBytes>, SandboxError> {
     let workspace = Arc::clone(&state.workspace);
     let nodes = spawn_block(move || {
         workspace
@@ -551,10 +547,7 @@ pub(super) fn need<B: Backend>(
     }
 }
 
-pub(super) fn phase_err<B: Backend>(
-    state: &State<B>,
-    operation: &'static str,
-) -> SandboxError {
+pub(super) fn phase_err<B: Backend>(state: &State<B>, operation: &'static str) -> SandboxError {
     SandboxError::InvalidPhase {
         current: state.phase,
         operation,

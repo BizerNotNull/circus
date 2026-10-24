@@ -247,7 +247,10 @@ mod tests {
             Ok(()),
         );
         let outcome = recover_with(&control, "name", "owner", None).await;
-        assert!(matches!(outcome, Recovered::StillPresent { .. }), "{outcome:?}");
+        assert!(
+            matches!(outcome, Recovered::StillPresent { .. }),
+            "{outcome:?}"
+        );
         assert_eq!(control.remove_calls.load(Ordering::SeqCst), 1);
     }
 

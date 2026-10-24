@@ -76,8 +76,9 @@ pub use api::{
 };
 #[doc(inline)]
 pub use workspace::{
-    CodeCopyError, CodeSnapshot, CodeSource, GitCheckout, GitCleanup, GitError, GitOptions, GitRevision,
-    GitSource, GitWorktree, PathRejectReason, SnapshotBudget, SnapshotError, Workspace, WorkspaceError,
+    CodeCopyError, CodeSnapshot, CodeSource, GitCheckout, GitCleanup, GitError, GitOptions,
+    GitRevision, GitSource, GitWorktree, PathRejectReason, SnapshotBudget, SnapshotError,
+    Workspace, WorkspaceError,
 };
 
 #[doc(inline)]

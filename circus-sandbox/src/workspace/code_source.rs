@@ -1,10 +1,10 @@
 //! Explicitly authorized source directories copied into owned workspaces.
 
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
-use cap_std::ambient_authority;
-use cap_std::fs::Dir;
 
 use super::snapshot::{self, Kind};
 use super::{SnapshotBudget, SnapshotError, Workspace, WorkspaceError};
@@ -169,12 +169,17 @@ impl CodeSource {
         Ok(workspace)
     }
 
-    pub(crate) fn copy_to_workspace_excluding_git(&self, max_file_bytes: usize, budget: SnapshotBudget) -> Result<Workspace, CodeCopyError> {
+    pub(crate) fn copy_to_workspace_excluding_git(
+        &self,
+        max_file_bytes: usize,
+        budget: SnapshotBudget,
+    ) -> Result<Workspace, CodeCopyError> {
         let workspace = Workspace::new(max_file_bytes)?;
-        if let Err(copy) = self.populate(&workspace, max_file_bytes, budget, true) { return Err(abandon_failed_copy(workspace, copy)); }
+        if let Err(copy) = self.populate(&workspace, max_file_bytes, budget, true) {
+            return Err(abandon_failed_copy(workspace, copy));
+        }
         Ok(workspace)
     }
-
 
     fn populate(
         &self,
@@ -211,7 +216,10 @@ impl CodeSource {
             for entry in listing {
                 let entry = entry.map_err(|err| source_io(relative_dir, err))?;
                 let name = entry.file_name();
-                if exclude_git && frame.prefix.as_os_str().is_empty() && name == OsStr::new(".git") { continue; }
+                if exclude_git && frame.prefix.as_os_str().is_empty() && name == OsStr::new(".git")
+                {
+                    continue;
+                }
                 let rel = snapshot::child_path(&frame.prefix, &name)
                     .map_err(|err| source_error(err, &frame.prefix.join(&name)))?;
                 if name.to_str().is_none() {

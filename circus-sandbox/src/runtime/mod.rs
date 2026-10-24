@@ -23,7 +23,11 @@ pub(crate) use config::check_relative;
 pub enum ProcessError {
     /// An operating-system operation failed.
     #[error("process {operation} failed: {source}")]
-    Io { operation: &'static str, #[source] source: std::io::Error },
+    Io {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
     /// The whole operation exceeded its deadline.
     #[error("process deadline exceeded")]
     Timeout,

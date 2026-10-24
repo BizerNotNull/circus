@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use circus_sandbox::environment::{EnvironmentError, ImagePlatform, ImageRequest, prepare_docker_image};
+use circus_sandbox::environment::{
+    EnvironmentError, ImagePlatform, ImageRequest, prepare_docker_image,
+};
 use circus_sandbox::{
     BackendConfig, CommandRequest, IoLimits, IsolationConfig, ResourceLimits, Sandbox,
     SandboxConfig, SandboxPhase,

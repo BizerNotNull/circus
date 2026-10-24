@@ -8,8 +8,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::{CleanupReceipt, Sandbox, SandboxError, SandboxPhase};
 use super::{PoolConfig, PoolError, PoolFailure, PoolLease, PoolStatus};
+use crate::{CleanupReceipt, Sandbox, SandboxError, SandboxPhase};
 
 type Reply = oneshot::Sender<Result<(), PoolError>>;
 type Failure = Arc<PoolFailure>;
@@ -20,7 +20,11 @@ pub(super) enum Request {
         cancelled: CancellationToken,
         deadline: Instant,
     },
-    Return { slot: usize, generation: u64, reply: Option<Reply> },
+    Return {
+        slot: usize,
+        generation: u64,
+        reply: Option<Reply>,
+    },
     Status(oneshot::Sender<PoolStatus>),
     Shutdown(Reply),
 }
@@ -34,7 +38,10 @@ struct Waiter {
 enum State {
     Creating,
     Ready(Arc<Sandbox>),
-    Leased { sandbox: Arc<Sandbox>, expires: Instant },
+    Leased {
+        sandbox: Arc<Sandbox>,
+        expires: Instant,
+    },
     Retiring {
         sandbox: Arc<Sandbox>,
         receipt: CleanupReceipt,
@@ -56,9 +63,19 @@ struct Slot {
 }
 
 enum Completion {
-    Created { slot: usize, sandbox: Option<Arc<Sandbox>>, result: Result<(), Failure> },
-    Destroyed { slot: usize, result: Result<(), Failure> },
-    Receipt { slot: usize, result: Result<(), Failure> },
+    Created {
+        slot: usize,
+        sandbox: Option<Arc<Sandbox>>,
+        result: Result<(), Failure>,
+    },
+    Destroyed {
+        slot: usize,
+        result: Result<(), Failure>,
+    },
+    Receipt {
+        slot: usize,
+        result: Result<(), Failure>,
+    },
 }
 
 struct Worker {
@@ -85,26 +102,45 @@ pub(super) async fn run(
     ready: oneshot::Sender<Result<(), Failure>>,
 ) {
     let mut worker = Worker {
-        slots: (0..config.capacity).map(|_| Slot {
-            generation: 0, state: State::Absent, returns: Vec::new(),
-        }).collect(),
-        config, jobs: FuturesUnordered::new(), waiters: VecDeque::new(),
-        shutdowns: Vec::new(), ready: Some(ready), tx: tx.downgrade(), close,
+        slots: (0..config.capacity)
+            .map(|_| Slot {
+                generation: 0,
+                state: State::Absent,
+                returns: Vec::new(),
+            })
+            .collect(),
+        config,
+        jobs: FuturesUnordered::new(),
+        waiters: VecDeque::new(),
+        shutdowns: Vec::new(),
+        ready: Some(ready),
+        tx: tx.downgrade(),
+        close,
         closing: false,
     };
     drop(tx);
-    for slot in 0..worker.slots.len() { worker.create(slot); }
+    for slot in 0..worker.slots.len() {
+        worker.create(slot);
+    }
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut receiver_closed = false;
     loop {
-        if worker.close.is_cancelled() && !worker.closing { worker.begin_close(); }
+        if worker.close.is_cancelled() && !worker.closing {
+            worker.begin_close();
+        }
         worker.maintain();
-        if receiver_closed && worker.all_absent() { return; }
-        let next_expiry = worker.slots.iter().filter_map(|slot| match slot.state {
-            State::Leased { expires, .. } => Some(expires),
-            _ => None,
-        }).min();
+        if receiver_closed && worker.all_absent() {
+            return;
+        }
+        let next_expiry = worker
+            .slots
+            .iter()
+            .filter_map(|slot| match slot.state {
+                State::Leased { expires, .. } => Some(expires),
+                _ => None,
+            })
+            .min();
         let expiry = async {
             match next_expiry {
                 Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -137,30 +173,62 @@ impl Worker {
         // Owned by the worker's bounded future set. Never abort a create or
         // discard its eventual ownership receipt when closing/caller cancels.
         self.jobs.push(Box::pin(async move {
-            let PoolConfig { backend, sandbox: sandbox_config, baseline, .. } = config;
-            if refill { tokio::time::sleep(Duration::from_secs(1)).await; }
+            let PoolConfig {
+                backend,
+                sandbox: sandbox_config,
+                baseline,
+                ..
+            } = config;
+            if refill {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
             let sandbox = match Sandbox::create(backend, sandbox_config).await {
                 Ok(sandbox) => Arc::new(sandbox),
-                Err(source) => return Completion::Created {
-                    slot, sandbox: None, result: Err(failure("create", source)),
-                },
+                Err(source) => {
+                    return Completion::Created {
+                        slot,
+                        sandbox: None,
+                        result: Err(failure("create", source)),
+                    };
+                }
             };
             let result = async {
-                if close.is_cancelled() { return Ok(()); }
+                if close.is_cancelled() {
+                    return Ok(());
+                }
                 if let Some(baseline) = baseline {
-                    sandbox.restore_workspace_snapshot(baseline).await
+                    sandbox
+                        .restore_workspace_snapshot(baseline)
+                        .await
                         .map_err(|source| failure("restore workspace", source))?;
                 }
-                if close.is_cancelled() { return Ok(()); }
-                sandbox.start().await.map_err(|source| failure("start", source))?;
-                if close.is_cancelled() { return Ok(()); }
-                let status = sandbox.status().await.map_err(|source| failure("status", source))?;
+                if close.is_cancelled() {
+                    return Ok(());
+                }
+                sandbox
+                    .start()
+                    .await
+                    .map_err(|source| failure("start", source))?;
+                if close.is_cancelled() {
+                    return Ok(());
+                }
+                let status = sandbox
+                    .status()
+                    .await
+                    .map_err(|source| failure("status", source))?;
                 if status.phase != SandboxPhase::Running {
-                    return Err(Arc::new(PoolFailure::NotRunning { phase: status.phase }));
+                    return Err(Arc::new(PoolFailure::NotRunning {
+                        phase: status.phase,
+                    }));
                 }
                 Ok(())
-            }.await;
-            Completion::Created { slot, sandbox: Some(sandbox), result }
+            }
+            .await;
+            Completion::Created {
+                slot,
+                sandbox: Some(sandbox),
+                result,
+            }
         }));
     }
 
@@ -171,14 +239,19 @@ impl Worker {
             receipt: receipt.clone(),
         };
         self.jobs.push(Box::pin(async move {
-            let result = receipt.wait().await.map(|_| ())
+            let result = receipt
+                .wait()
+                .await
+                .map(|_| ())
                 .map_err(|source| failure("revoke and destroy", source));
             Completion::Destroyed { slot, result }
         }));
     }
 
     fn begin_close(&mut self) {
-        if self.closing { return; }
+        if self.closing {
+            return;
+        }
         self.closing = true;
         self.close.cancel();
         while let Some(waiter) = self.waiters.pop_front() {
@@ -189,7 +262,9 @@ impl Worker {
                 State::Ready(sandbox) | State::Leased { sandbox, .. } => Some(sandbox.clone()),
                 _ => None,
             };
-            if let Some(sandbox) = sandbox { self.retire(slot, sandbox); }
+            if let Some(sandbox) = sandbox {
+                self.retire(slot, sandbox);
+            }
         }
     }
 
@@ -198,10 +273,18 @@ impl Worker {
             Completion::Receipt { slot, result } => match result {
                 Ok(()) => {
                     self.slots[slot].state = State::Absent;
-                    if !self.closing { self.create(slot); }
+                    if !self.closing {
+                        self.create(slot);
+                    }
                 }
                 Err(source) => {
-                    if let State::CleanupRequired { waiting, retry, source: retained, .. } = &mut self.slots[slot].state {
+                    if let State::CleanupRequired {
+                        waiting,
+                        retry,
+                        source: retained,
+                        ..
+                    } = &mut self.slots[slot].state
+                    {
                         *waiting = false;
                         *retry = Instant::now() + Duration::from_secs(1);
                         *retained = source.clone();
@@ -209,41 +292,66 @@ impl Worker {
                     self.fail_shutdowns(source);
                 }
             },
-            Completion::Created { slot, sandbox, result } => match (sandbox, result) {
+            Completion::Created {
+                slot,
+                sandbox,
+                result,
+            } => match (sandbox, result) {
                 (Some(sandbox), Ok(())) if !self.closing => {
                     self.slots[slot].state = State::Ready(sandbox);
                 }
                 (Some(sandbox), result) => {
-                    if let Err(source) = result { self.preparation_failed(source); }
+                    if let Err(source) = result {
+                        self.preparation_failed(source);
+                    }
                     self.retire(slot, sandbox);
                 }
                 (None, Err(source)) => {
                     let receipt = match source.as_ref() {
                         PoolFailure::Sandbox {
-                            source: SandboxError::CreationCleanupRequired { cleanup, .. }, ..
+                            source: SandboxError::CreationCleanupRequired { cleanup, .. },
+                            ..
                         } => Some(cleanup.clone()),
                         _ => None,
                     };
-                    let uncertain = receipt.is_some() || matches!(source.as_ref(), PoolFailure::Sandbox {
-                        source: SandboxError::CleanupRequired { .. } | SandboxError::WorkerGone { .. }, ..
-                    });
+                    let uncertain = receipt.is_some()
+                        || matches!(
+                            source.as_ref(),
+                            PoolFailure::Sandbox {
+                                source: SandboxError::CleanupRequired { .. }
+                                    | SandboxError::WorkerGone { .. },
+                                ..
+                            }
+                        );
                     self.slots[slot].state = if uncertain {
                         State::CleanupRequired {
-                            sandbox: None, receipt, waiting: false,
-                            source: source.clone(), retry: Instant::now(),
+                            sandbox: None,
+                            receipt,
+                            waiting: false,
+                            source: source.clone(),
+                            retry: Instant::now(),
                         }
-                    } else { State::Absent };
+                    } else {
+                        State::Absent
+                    };
                     self.preparation_failed(source.clone());
-                    if uncertain { self.fail_shutdowns(source); }
-                    else if !self.closing { self.create(slot); }
+                    if uncertain {
+                        self.fail_shutdowns(source);
+                    } else if !self.closing {
+                        self.create(slot);
+                    }
                 }
                 (None, Ok(())) => unreachable!("successful create has an owner"),
             },
             Completion::Destroyed { slot, result } => match result {
                 Ok(()) => {
                     self.slots[slot].state = State::Absent;
-                    for reply in self.slots[slot].returns.drain(..) { let _ = reply.send(Ok(())); }
-                    if !self.closing { self.create(slot); }
+                    for reply in self.slots[slot].returns.drain(..) {
+                        let _ = reply.send(Ok(()));
+                    }
+                    if !self.closing {
+                        self.create(slot);
+                    }
                 }
                 Err(source) => {
                     let (sandbox, receipt) = match &self.slots[slot].state {
@@ -253,11 +361,16 @@ impl Worker {
                         _ => unreachable!("cleanup future owns a retiring slot"),
                     };
                     self.slots[slot].state = State::CleanupRequired {
-                        sandbox, receipt, waiting: false,
-                        source: source.clone(), retry: Instant::now() + Duration::from_secs(1),
+                        sandbox,
+                        receipt,
+                        waiting: false,
+                        source: source.clone(),
+                        retry: Instant::now() + Duration::from_secs(1),
                     };
                     for reply in self.slots[slot].returns.drain(..) {
-                        let _ = reply.send(Err(PoolError::Operation { source: source.clone() }));
+                        let _ = reply.send(Err(PoolError::Operation {
+                            source: source.clone(),
+                        }));
                     }
                     self.fail_shutdowns(source);
                 }
@@ -276,20 +389,32 @@ impl Worker {
 
     fn fail_shutdowns(&mut self, source: Failure) {
         for reply in self.shutdowns.drain(..) {
-            let _ = reply.send(Err(PoolError::Operation { source: source.clone() }));
+            let _ = reply.send(Err(PoolError::Operation {
+                source: source.clone(),
+            }));
         }
     }
 
     fn request(&mut self, request: Request) {
         match request {
-            Request::Acquire { reply, cancelled, deadline } => {
+            Request::Acquire {
+                reply,
+                cancelled,
+                deadline,
+            } => {
                 if self.closing || self.close.is_cancelled() {
                     let _ = reply.send(Err(PoolError::Closing));
                 } else {
-                    self.waiters.push_back(Waiter { reply, cancelled, deadline });
+                    self.waiters.push_back(Waiter {
+                        reply,
+                        cancelled,
+                        deadline,
+                    });
                 }
             }
-            Request::Status(reply) => { let _ = reply.send(self.status()); }
+            Request::Status(reply) => {
+                let _ = reply.send(self.status());
+            }
             Request::Shutdown(reply) => {
                 self.begin_close();
                 if let Some(source) = self.slots.iter().find_map(|slot| match &slot.state {
@@ -297,27 +422,49 @@ impl Worker {
                     _ => None,
                 }) {
                     let _ = reply.send(Err(PoolError::Operation { source }));
-                } else { self.shutdowns.push(reply); }
+                } else {
+                    self.shutdowns.push(reply);
+                }
             }
-            Request::Return { slot, generation, reply } => {
-                let Some(owned) = self.slots.get_mut(slot) else { return; };
+            Request::Return {
+                slot,
+                generation,
+                reply,
+            } => {
+                let Some(owned) = self.slots.get_mut(slot) else {
+                    return;
+                };
                 if owned.generation != generation {
-                    if let Some(reply) = reply { let _ = reply.send(Ok(())); }
+                    if let Some(reply) = reply {
+                        let _ = reply.send(Ok(()));
+                    }
                     return;
                 }
                 match &owned.state {
                     State::Leased { sandbox, .. } => {
                         let sandbox = sandbox.clone();
-                        if let Some(reply) = reply { owned.returns.push(reply); }
+                        if let Some(reply) = reply {
+                            owned.returns.push(reply);
+                        }
                         self.retire(slot, sandbox);
                     }
-                    State::Retiring { .. } => { if let Some(reply) = reply { owned.returns.push(reply); } }
-                    State::CleanupRequired { source, .. } => {
+                    State::Retiring { .. } => {
                         if let Some(reply) = reply {
-                            let _ = reply.send(Err(PoolError::Operation { source: source.clone() }));
+                            owned.returns.push(reply);
                         }
                     }
-                    _ => { if let Some(reply) = reply { let _ = reply.send(Ok(())); } }
+                    State::CleanupRequired { source, .. } => {
+                        if let Some(reply) = reply {
+                            let _ = reply.send(Err(PoolError::Operation {
+                                source: source.clone(),
+                            }));
+                        }
+                    }
+                    _ => {
+                        if let Some(reply) = reply {
+                            let _ = reply.send(Ok(()));
+                        }
+                    }
                 }
             }
         }
@@ -325,11 +472,15 @@ impl Worker {
 
     fn maintain(&mut self) {
         let now = Instant::now();
-        self.waiters.retain(|waiter| !waiter.cancelled.is_cancelled() && !waiter.reply.is_closed());
+        self.waiters
+            .retain(|waiter| !waiter.cancelled.is_cancelled() && !waiter.reply.is_closed());
         let mut live = VecDeque::new();
         while let Some(waiter) = self.waiters.pop_front() {
-            if waiter.deadline <= now { let _ = waiter.reply.send(Err(PoolError::AcquireTimeout)); }
-            else { live.push_back(waiter); }
+            if waiter.deadline <= now {
+                let _ = waiter.reply.send(Err(PoolError::AcquireTimeout));
+            } else {
+                live.push_back(waiter);
+            }
         }
         self.waiters = live;
         for slot in 0..self.slots.len() {
@@ -337,23 +488,38 @@ impl Worker {
                 State::Leased { sandbox, expires } if *expires <= now => Some(sandbox.clone()),
                 _ => None,
             };
-            if let Some(sandbox) = expired { self.retire(slot, sandbox); }
+            if let Some(sandbox) = expired {
+                self.retire(slot, sandbox);
+            }
             let retry = match &self.slots[slot].state {
-                State::CleanupRequired { sandbox: Some(sandbox), retry, .. } if *retry <= now => Some(sandbox.clone()),
+                State::CleanupRequired {
+                    sandbox: Some(sandbox),
+                    retry,
+                    ..
+                } if *retry <= now => Some(sandbox.clone()),
                 _ => None,
             };
-            if let Some(sandbox) = retry { self.retire(slot, sandbox); }
+            if let Some(sandbox) = retry {
+                self.retire(slot, sandbox);
+            }
             let receipt = match &mut self.slots[slot].state {
-                State::CleanupRequired { receipt: Some(receipt), waiting, retry, .. }
-                    if !*waiting && *retry <= now => {
-                        *waiting = true;
-                        Some(receipt.clone())
-                    }
+                State::CleanupRequired {
+                    receipt: Some(receipt),
+                    waiting,
+                    retry,
+                    ..
+                } if !*waiting && *retry <= now => {
+                    *waiting = true;
+                    Some(receipt.clone())
+                }
                 _ => None,
             };
             if let Some(receipt) = receipt {
                 self.jobs.push(Box::pin(async move {
-                    let result = receipt.wait().await.map(|_| ())
+                    let result = receipt
+                        .wait()
+                        .await
+                        .map(|_| ())
                         .map_err(|source| failure("observe owned cleanup", source));
                     Completion::Receipt { slot, result }
                 }));
@@ -361,16 +527,23 @@ impl Worker {
         }
         if !self.closing {
             for slot in 0..self.slots.len() {
-                let State::Ready(sandbox) = &self.slots[slot].state else { continue; };
+                let State::Ready(sandbox) = &self.slots[slot].state else {
+                    continue;
+                };
                 let sandbox = sandbox.clone();
                 while let Some(waiter) = self.waiters.pop_front() {
-                    if waiter.cancelled.is_cancelled() || waiter.reply.is_closed() { continue; }
+                    if waiter.cancelled.is_cancelled() || waiter.reply.is_closed() {
+                        continue;
+                    }
                     if waiter.deadline <= Instant::now() {
                         let _ = waiter.reply.send(Err(PoolError::AcquireTimeout));
                         continue;
                     }
-                    let Some(tx) = self.tx.upgrade() else { break; };
-                    let lease = PoolLease::new(sandbox.clone(), slot, self.slots[slot].generation, tx);
+                    let Some(tx) = self.tx.upgrade() else {
+                        break;
+                    };
+                    let lease =
+                        PoolLease::new(sandbox.clone(), slot, self.slots[slot].generation, tx);
                     // Transfer atomically through oneshot. If receiver vanished,
                     // disarm its return event and keep the never-used slot ready.
                     match waiter.reply.send(Ok(lease)) {
@@ -381,26 +554,45 @@ impl Worker {
                             };
                             break;
                         }
-                        Err(Ok(mut lease)) => { lease.disarm(); }
+                        Err(Ok(mut lease)) => {
+                            lease.disarm();
+                        }
                         Err(Err(_)) => unreachable!("sent a lease"),
                     }
                 }
             }
-            if self.slots.iter().all(|slot| matches!(slot.state, State::Ready(_) | State::Leased { .. })) {
-                if let Some(reply) = self.ready.take() { let _ = reply.send(Ok(())); }
+            if self
+                .slots
+                .iter()
+                .all(|slot| matches!(slot.state, State::Ready(_) | State::Leased { .. }))
+                && let Some(reply) = self.ready.take()
+            {
+                let _ = reply.send(Ok(()));
             }
         }
         if self.closing && self.all_absent() {
-            for reply in self.shutdowns.drain(..) { let _ = reply.send(Ok(())); }
+            for reply in self.shutdowns.drain(..) {
+                let _ = reply.send(Ok(()));
+            }
         }
     }
 
-    fn all_absent(&self) -> bool { self.slots.iter().all(|slot| matches!(slot.state, State::Absent)) }
+    fn all_absent(&self) -> bool {
+        self.slots
+            .iter()
+            .all(|slot| matches!(slot.state, State::Absent))
+    }
 
     fn status(&self) -> PoolStatus {
         let mut status = PoolStatus {
-            capacity: self.slots.len(), ready: 0, creating: 0, leased: 0,
-            retiring: 0, cleanup_required: 0, absent: 0, closing: self.closing,
+            capacity: self.slots.len(),
+            ready: 0,
+            creating: 0,
+            leased: 0,
+            retiring: 0,
+            cleanup_required: 0,
+            absent: 0,
+            closing: self.closing,
         };
         for slot in &self.slots {
             match &slot.state {

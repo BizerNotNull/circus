@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::Sandbox;
 use super::{PoolError, worker::Request};
+use crate::Sandbox;
 
 /// Exclusive, single-use access to one prestarted sandbox.
 ///
@@ -37,23 +37,37 @@ impl PoolLease {
         generation: u64,
         tx: mpsc::UnboundedSender<Request>,
     ) -> Self {
-        Self { sandbox, slot, generation, tx, returned: false }
+        Self {
+            sandbox,
+            slot,
+            generation,
+            tx,
+            returned: false,
+        }
     }
 
-    pub(super) fn disarm(&mut self) { self.returned = true; }
+    pub(super) fn disarm(&mut self) {
+        self.returned = true;
+    }
 
     /// Borrows this lease's sandbox; no cloneable/escaping ownership is exposed.
     /// Pool shutdown revokes the underlying container even during this borrow.
-    pub fn sandbox(&self) -> &Sandbox { &self.sandbox }
+    pub fn sandbox(&self) -> &Sandbox {
+        &self.sandbox
+    }
 
     /// Destroys this container. A successful result confirms absence, not a
     /// reusable clean container. Failed cleanup remains owned and is retried.
     /// Cancelling this future still leaves the worker responsible for cleanup.
     pub async fn release(mut self) -> Result<(), PoolError> {
         let (reply, result) = oneshot::channel();
-        self.tx.send(Request::Return {
-            slot: self.slot, generation: self.generation, reply: Some(reply),
-        }).map_err(|_| PoolError::WorkerGone)?;
+        self.tx
+            .send(Request::Return {
+                slot: self.slot,
+                generation: self.generation,
+                reply: Some(reply),
+            })
+            .map_err(|_| PoolError::WorkerGone)?;
         self.returned = true;
         result.await.map_err(|_| PoolError::WorkerGone)?
     }
@@ -63,7 +77,9 @@ impl Drop for PoolLease {
     fn drop(&mut self) {
         if !self.returned {
             let _ = self.tx.send(Request::Return {
-                slot: self.slot, generation: self.generation, reply: None,
+                slot: self.slot,
+                generation: self.generation,
+                reply: None,
             });
         }
     }

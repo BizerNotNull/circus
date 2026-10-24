@@ -1,20 +1,42 @@
 use super::*;
 
 fn git(repo: &std::path::Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git").current_dir(repo).args(args).output().unwrap();
-    assert!(out.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&out.stderr));
+    let out = std::process::Command::new("git")
+        .current_dir(repo)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {:?}: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
 fn options(root: &std::path::Path) -> GitOptions {
-    let executable = if cfg!(windows) { "C:/Program Files/Git/cmd/git.exe" } else { "/usr/bin/git" };
-    GitOptions::new(executable.into(), root.to_owned(), Duration::from_secs(30), 1 << 20).unwrap()
+    let executable = if cfg!(windows) {
+        "C:/Program Files/Git/cmd/git.exe"
+    } else {
+        "/usr/bin/git"
+    };
+    GitOptions::new(
+        executable.into(),
+        root.to_owned(),
+        Duration::from_secs(30),
+        1 << 20,
+    )
+    .unwrap()
 }
 
 fn repository() -> (tempfile::TempDir, String) {
     let repo = tempfile::tempdir().unwrap();
     git(repo.path(), &["init", "-q"]);
-    git(repo.path(), &["config", "user.email", "test@example.invalid"]);
+    git(
+        repo.path(),
+        &["config", "user.email", "test@example.invalid"],
+    );
     git(repo.path(), &["config", "user.name", "Test"]);
     std::fs::write(repo.path().join("code.txt"), b"original").unwrap();
     git(repo.path(), &["add", "."]);
@@ -41,17 +63,26 @@ async fn dirty_worktree_is_force_removed_without_touching_siblings_or_primary() 
 
     first.cleanup().await.unwrap();
     // The sibling still copies its own fixed commit, not the dirty modification.
-    let mut sibling = second.copy_to_workspace(1024, SnapshotBudget::new(1024, 16).unwrap()).await.unwrap();
+    let mut sibling = second
+        .copy_to_workspace(1024, SnapshotBudget::new(1024, 16).unwrap())
+        .await
+        .unwrap();
     assert_eq!(sibling.read_file("code.txt").unwrap(), b"original");
     assert!(sibling.read_file("untracked.txt").is_err());
     sibling.cleanup().unwrap();
     second.cleanup().await.unwrap();
 
     // The primary checkout and the source repository are untouched.
-    let mut primary = checkout.copy_to_workspace(1024, SnapshotBudget::new(1024, 16).unwrap()).await.unwrap();
+    let mut primary = checkout
+        .copy_to_workspace(1024, SnapshotBudget::new(1024, 16).unwrap())
+        .await
+        .unwrap();
     assert_eq!(primary.read_file("code.txt").unwrap(), b"original");
     primary.cleanup().unwrap();
-    assert_eq!(std::fs::read(repo.path().join("code.txt")).unwrap(), b"original");
+    assert_eq!(
+        std::fs::read(repo.path().join("code.txt")).unwrap(),
+        b"original"
+    );
     checkout.cleanup().await.unwrap();
     assert_eq!(std::fs::read_dir(storage.path()).unwrap().count(), 0);
 }

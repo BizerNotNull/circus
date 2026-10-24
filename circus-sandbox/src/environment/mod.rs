@@ -109,8 +109,11 @@ impl ImageRequest {
         timeout: Duration,
     ) -> Result<Self, EnvironmentError> {
         let raw_endpoint = endpoint.into();
-        let endpoint = DockerEndpoint::parse(&raw_endpoint)
-            .map_err(|_| EnvironmentError::InvalidEndpoint { value: raw_endpoint })?;
+        let endpoint = DockerEndpoint::parse(&raw_endpoint).map_err(|_| {
+            EnvironmentError::InvalidEndpoint {
+                value: raw_endpoint,
+            }
+        })?;
         let reference = reference.into();
         if reference.is_empty()
             || reference

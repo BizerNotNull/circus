@@ -32,17 +32,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cold_start = Instant::now();
     let cold = Sandbox::create(backend.clone(), config.clone()).await?;
     let cold_result = async {
-        cold.restore_workspace_snapshot(Arc::clone(&baseline)).await?;
+        cold.restore_workspace_snapshot(Arc::clone(&baseline))
+            .await?;
         cold.start().await?;
         Ok::<_, circus_sandbox::SandboxError>(cold_start.elapsed())
-    }.await;
+    }
+    .await;
     // Explicit cleanup is attempted even if restoration or startup failed.
     let cold_cleanup = cold.destroy().await;
     let cold_elapsed = cold_result?;
     cold_cleanup?;
 
     let warmup_start = Instant::now();
-    let pool = match DockerPool::create(PoolConfig::new(backend, config, 1, Some(baseline), Duration::from_secs(120))?).await {
+    let pool = match DockerPool::create(PoolConfig::new(
+        backend,
+        config,
+        1,
+        Some(baseline),
+        Duration::from_secs(120),
+    )?)
+    .await
+    {
         Ok(pool) => pool,
         Err(PoolError::CleanupRequired { pool, source, .. }) => {
             eprintln!("pool preparation failed; retrying retained cleanup: {source}");
@@ -58,21 +68,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let acquire_elapsed = acquire_start.elapsed();
         let execution = async {
             assert_eq!(lease.sandbox().read_file("hello.py").await?, program);
-            let output = lease.sandbox().exec(CommandRequest {
-                argv: vec!["python3".into(), "/workspace/hello.py".into()],
-                timeout: Duration::from_secs(10),
-                output_limit_bytes: 4096,
-            }).await?;
+            let output = lease
+                .sandbox()
+                .exec(CommandRequest {
+                    argv: vec!["python3".into(), "/workspace/hello.py".into()],
+                    timeout: Duration::from_secs(10),
+                    output_limit_bytes: 4096,
+                })
+                .await?;
             assert_eq!(output.exit_code, 0);
             assert_eq!(output.stdout, b"executed baseline bytes\n");
             print!("{}", String::from_utf8_lossy(&output.stdout));
             Ok::<(), Box<dyn std::error::Error>>(())
-        }.await;
+        }
+        .await;
         let release = lease.release().await;
         execution?;
         release?;
         Ok::<_, Box<dyn std::error::Error>>(acquire_elapsed)
-    }.await;
+    }
+    .await;
     // Shutdown revokes outstanding leases; completion, not Drop, confirms cleanup.
     let shutdown = pool.shutdown().await;
     let acquire_elapsed = result?;

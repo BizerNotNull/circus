@@ -10,7 +10,7 @@ pub(crate) use output::{OutputLimit, OutputPhase};
 
 #[path = "engine_policy.rs"]
 mod policy;
-pub(crate) use policy::{create_body, HostReport, PolicyMismatch, OWNER_LABEL_KEY};
+pub(crate) use policy::{HostReport, OWNER_LABEL_KEY, PolicyMismatch, create_body};
 
 #[path = "engine_recovery.rs"]
 mod recovery;
@@ -67,7 +67,7 @@ pub(crate) struct EngineError {
     /// collecting stdout/stderr.
     pub output: Option<OutputLimit>,
     /// Typed effective-policy mismatch when creation verification failed.
-    pub policy: Option<PolicyMismatch>,
+    pub policy: Option<Box<PolicyMismatch>>,
 }
 
 impl EngineError {
@@ -295,11 +295,11 @@ impl Engine {
             .map_err(|err| {
                 file_error(
                     EngineErrorKind::FileIo,
-                    &format!("archive tempfile task: {err}"),
+                    format!("archive tempfile task: {err}"),
                 )
             })?
             .map_err(|err| {
-                file_error(EngineErrorKind::FileIo, &format!("archive tempfile: {err}"))
+                file_error(EngineErrorKind::FileIo, format!("archive tempfile: {err}"))
             })?;
         let mut file = tokio::fs::File::from_std(file);
         let options = bollard::query_parameters::DownloadFromContainerOptionsBuilder::new()
@@ -321,7 +321,7 @@ impl Engine {
                     )
                 })?;
             file.write_all(&chunk).await.map_err(|err| {
-                file_error(EngineErrorKind::FileIo, &format!("archive write: {err}"))
+                file_error(EngineErrorKind::FileIo, format!("archive write: {err}"))
             })?;
         }
         if total == 0 {
@@ -332,10 +332,10 @@ impl Engine {
         }
         file.flush()
             .await
-            .map_err(|err| file_error(EngineErrorKind::FileIo, &format!("archive flush: {err}")))?;
-        file.rewind().await.map_err(|err| {
-            file_error(EngineErrorKind::FileIo, &format!("archive rewind: {err}"))
-        })?;
+            .map_err(|err| file_error(EngineErrorKind::FileIo, format!("archive flush: {err}")))?;
+        file.rewind()
+            .await
+            .map_err(|err| file_error(EngineErrorKind::FileIo, format!("archive rewind: {err}")))?;
         Ok(file.into_std().await)
     }
 
@@ -683,6 +683,9 @@ impl Engine {
     }
 }
 
+// Explicit `impl Future + Send` bounds keep this private seam statically
+// dispatched inside the lifecycle worker's spawned future.
+#[allow(clippy::manual_async_fn)]
 impl RemovalControl for Engine {
     fn inspect_owner(
         &self,

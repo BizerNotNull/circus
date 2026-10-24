@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use circus_sandbox::runtime::ResourceLimits;
 use circus_sandbox::{
-    BackendConfig, BackendConfigError, ConfigError, IoLimits, IsolationConfig, Sandbox, SandboxConfig,
-    SandboxError,
+    BackendConfig, BackendConfigError, ConfigError, IoLimits, IsolationConfig, Sandbox,
+    SandboxConfig, SandboxError,
 };
 
 fn limits(pids: u32) -> ResourceLimits {

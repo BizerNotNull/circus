@@ -99,10 +99,11 @@ fn import(
                 actual: entries,
             });
         }
-        if let Some(parent) = rel.parent() {
-            if !parent.as_os_str().is_empty() && !directories.contains(parent) {
-                return Err(invalid("parent directory must precede its children"));
-            }
+        if let Some(parent) = rel.parent()
+            && !parent.as_os_str().is_empty()
+            && !directories.contains(parent)
+        {
+            return Err(invalid("parent directory must precede its children"));
         }
         if ty.is_dir() {
             workspace.create_dir_all(rel)?;
