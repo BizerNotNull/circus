@@ -14,7 +14,12 @@
 //! running writes, but are not process, memory, VM, or Docker-commit
 //! checkpoints. [`environment::prepare_docker_image`] resolves an explicit
 //! reference to an immutable local image identity; it never pulls from or
-//! authenticates against a registry.
+//! authenticates against a registry. [`environment::EnvironmentPlan`] adds an
+//! ordered, pinned preparation plan that executes separate-argv guest commands
+//! in one owned sandbox and confirms cleanup, and
+//! [`environment::EnvironmentId`] derives an opaque SHA-256 identity from the
+//! resolved image, platform, pinned steps, and an explicit tenant domain. The
+//! identity is not a cache, registry, or persisted lookup.
 //!
 //! The bounded Docker pool prestarts fresh single-use containers and never
 //! resets dirty leases. [`GitCheckout`] prepares a fixed commit with a controlled

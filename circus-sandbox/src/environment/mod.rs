@@ -15,31 +15,71 @@
 //! [`PreparedImage::id`] to [`crate::BackendConfig::docker`] to avoid using a
 //! mutable tag; callers remain responsible for retaining the image in the
 //! daemon.
+//!
+//! [`EnvironmentPlan`] is a separate, explicitly ordered preparation plan. It
+//! requires a pinned version for every step, executes each step as a separate
+//! argv (never through a shell), records bounded output, and destroys its
+//! sandbox with confirmed cleanup. [`EnvironmentId`] derives an opaque SHA-256
+//! identity from the resolved image ID and repository digests, platform,
+//! ordered pinned steps, and a caller-supplied tenant security domain. Identity
+//! derivation has no cache, registry, persistence, or lookup behavior.
+
+mod identity;
+mod plan;
+mod sha256;
+
+pub use identity::{EnvironmentId, IdentityError, TenantDomain};
+pub use plan::{
+    EnvironmentPlan, PinnedVersion, PlanError, PreparationError, PrepareStep, PreparedEnvironment,
+    StepObservation,
+};
 
 use std::time::Duration;
 
 use crate::infrastructure::{DockerEndpoint, Engine, EngineError, ImageInfo};
 
-/// An explicit Linux OS and canonical Docker architecture, without a variant.
+/// An explicit Linux OS, canonical Docker architecture, and optional variant.
 ///
 /// Architecture names are Docker names such as `amd64` and `arm64`, not host
 /// aliases such as `x86_64` or `aarch64`. No host-platform default is inferred.
+/// [`ImagePlatform::new`] requests no variant; [`ImagePlatform::with_variant`]
+/// adds an explicit one. Docker image inspection reports only OS and
+/// architecture, so a variant is carried into an [`EnvironmentId`] but is not
+/// verified against the inspected manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImagePlatform {
     os: String,
     architecture: String,
+    variant: Option<String>,
 }
 
 impl ImagePlatform {
-    /// Validates the explicitly requested platform.
+    /// Validates an explicitly requested platform without a variant.
     ///
     /// # Errors
     ///
     /// Returns [`EnvironmentError::InvalidPlatform`] for a non-Linux OS or an
-    /// unsupported/noncanonical Docker architecture. Variants are not supported.
+    /// unsupported Docker architecture. Use [`Self::with_variant`] to request a
+    /// variant.
     pub fn new(
         os: impl Into<String>,
         architecture: impl Into<String>,
+    ) -> Result<Self, EnvironmentError> {
+        Self::with_variant(os, architecture, None)
+    }
+
+    /// Validates an explicitly requested platform and optional variant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EnvironmentError::InvalidPlatform`] for a non-Linux OS or an
+    /// unsupported Docker architecture, and
+    /// [`EnvironmentError::InvalidPlatformVariant`] for an empty variant or one
+    /// containing whitespace/control characters.
+    pub fn with_variant(
+        os: impl Into<String>,
+        architecture: impl Into<String>,
+        variant: Option<String>,
     ) -> Result<Self, EnvironmentError> {
         let os = os.into();
         let architecture = architecture.into();
@@ -62,7 +102,21 @@ impl ImagePlatform {
         {
             return Err(EnvironmentError::InvalidPlatform { os, architecture });
         }
-        Ok(Self { os, architecture })
+        if variant.as_deref().is_some_and(|value| {
+            value.is_empty()
+                || value
+                    .chars()
+                    .any(|character| character.is_whitespace() || character.is_control())
+        }) {
+            return Err(EnvironmentError::InvalidPlatformVariant {
+                variant: variant.unwrap_or_default(),
+            });
+        }
+        Ok(Self {
+            os,
+            architecture,
+            variant,
+        })
     }
 
     /// Requested OS (always `linux`).
@@ -75,6 +129,12 @@ impl ImagePlatform {
     #[must_use]
     pub fn architecture(&self) -> &str {
         &self.architecture
+    }
+
+    /// Explicit variant, if one was requested.
+    #[must_use]
+    pub fn variant(&self) -> Option<&str> {
+        self.variant.as_deref()
     }
 }
 
@@ -209,6 +269,8 @@ pub enum EnvironmentError {
         "unsupported image platform {os}/{architecture}; explicit Linux Docker architecture required"
     )]
     InvalidPlatform { os: String, architecture: String },
+    #[error("platform variant must be nonempty without whitespace or control characters: {variant}")]
+    InvalidPlatformVariant { variant: String },
     #[error("image {reference} is absent from the local daemon cache; this crate does not pull")]
     ImageNotFound { reference: String },
     #[error(
@@ -296,6 +358,14 @@ mod tests {
         assert!(ImagePlatform::new("linux", "x86_64").is_err());
         assert!(ImagePlatform::new("linux", "arm64/v8").is_err());
         let platform = ImagePlatform::new("linux", "amd64").unwrap();
+        assert_eq!(platform.variant(), None);
+        let variant =
+            ImagePlatform::with_variant("linux", "arm64", Some("v8".to_string())).unwrap();
+        assert_eq!(variant.variant(), Some("v8"));
+        assert!(matches!(
+            ImagePlatform::with_variant("linux", "arm64", Some(" ".to_string())),
+            Err(EnvironmentError::InvalidPlatformVariant { .. })
+        ));
         for reference in ["", " ", "image\ntag", "image\0tag"] {
             assert!(matches!(
                 ImageRequest::new(
