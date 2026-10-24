@@ -1,4 +1,5 @@
 mod code_source;
+mod git;
 mod snapshot;
 
 use std::io::{self, Read, Write};
@@ -622,6 +623,8 @@ mod snapshot_tests;
 
 #[doc(inline)]
 pub use code_source::{CodeCopyError, CodeSource};
+#[doc(inline)]
+pub use git::{GitCheckout, GitCleanup, GitError, GitOptions, GitRevision, GitSource};
 #[doc(inline)]
 pub use snapshot::{CodeSnapshot, SnapshotBudget, SnapshotError};
 #[cfg(test)]

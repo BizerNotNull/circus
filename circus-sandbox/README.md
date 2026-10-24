@@ -76,6 +76,16 @@ cargo run --locked --example code_copy
 cargo test --locked --test code_copy
 ```
 
+## Fixed-revision Git workspaces
+
+`GitSource::local` and `GitSource::https` accept only explicitly authorized absolute local paths or HTTPS URLs without credentials, queries, fragments, or alternate protocols. `GitRevision` accepts only a complete 40- or 64-character commit ID. `GitCheckout::clone` prepares that commit with the configured absolute Git binary in a private temporary repository, disables ambient configuration and credentials, disables recursive submodules and tags, and verifies the checked-out object ID.
+
+`GitCheckout::copy_to_workspace` returns a code-only `Workspace`: the checkout's private `.git` metadata is retained by `GitCheckout` and is never copied. The copy is independent and bounded by the per-file and one-shot snapshot budgets. The source path, repository root, private home, hooks, and configuration are not exposed publicly.
+
+Git preparation is trusted host-side work, not an OS process or filesystem isolation boundary. A local grant trusts the filesystem repository; an HTTPS grant is not an SSRF policy. The storage parent has no library-enforced disk quota and must be bounded by the deployer. A detached worker owns allocation, processes, blocking copies, and explicit removal. Dropping a clone/copy future cancels work but does not drop that owner; started blocking work drains before its destination is explicitly removed. Each clone or copy has one whole-operation deadline. Clone output has one combined stdout/stderr budget across all commands. Only the selected source protocol is enabled. Private home, config, temporary files, and empty hooks live beside, not inside, the repository.
+
+Call `GitCheckout::cleanup().await` for observable, idempotent removal. `GitError::CleanupRequired { source, cleanup }` preserves the initiating error and an opaque `GitCleanup` receipt: `cleanup.wait().await` succeeds only after process termination and directory removal are confirmed. Cleanup retries retain directory identity and continue independently of receipt cancellation/drop. A failed ordinary copy can retain its partial destination in `CodeCopyError::CopyCleanup`; explicitly clean that destination. These are library ownership guarantees, not crash recovery or disk quota enforcement. Git behavior depends on the configured trusted binary.
+
 ## 资源请求值模型
 
 通过 `circus_sandbox::runtime::{ResourceLimits, ResourceLimitsError}` 使用。`ResourceLimits::new(memory_bytes, cpu_millis, pids, workspace_bytes, max_file_bytes)` 返回 `Result`；字段私有，提供同名 getter，支持 `Clone`、`Copy`、`Debug`、`PartialEq`、`Eq`，没有 `Default`。

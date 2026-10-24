@@ -7,6 +7,55 @@
 
 use thiserror::Error;
 
+/// Failure of a privately owned preparation process, independent of its SDK.
+#[derive(Debug, Error)]
+pub enum ProcessError {
+    /// An operating-system operation failed.
+    #[error("process {operation} failed: {source}")]
+    Io { operation: &'static str, #[source] source: std::io::Error },
+    /// The whole operation exceeded its deadline.
+    #[error("process deadline exceeded")]
+    Timeout,
+    /// The owner requested cancellation.
+    #[error("process cancelled")]
+    Cancelled,
+    /// Combined stdout and stderr exceeded the capture budget.
+    #[error("process output exceeded {limit} bytes")]
+    OutputLimit { limit: usize },
+    /// Termination or resource draining failed. The process owner remains alive.
+    /// Await `cleanup.wait()` before deleting any directory the process can use.
+    #[error("process cleanup failed: {source}")]
+    Cleanup {
+        primary: Option<Box<ProcessError>>,
+        #[source]
+        source: std::io::Error,
+        cleanup: ProcessCleanup,
+    },
+}
+
+/// A retained process owner's completion notification; contains no host paths.
+///
+/// Dropping this handle does not stop cleanup. The private owner retries failures
+/// with a delay, retaining the child identity until termination can be proved.
+#[derive(Clone, Debug)]
+pub struct ProcessCleanup {
+    pub(crate) done: tokio::sync::watch::Receiver<bool>,
+}
+
+impl ProcessCleanup {
+    /// Waits for confirmed process-tree cleanup. This may wait indefinitely if
+    /// the operating system cannot confirm termination; it never reports a
+    /// failed cleanup as success.
+    pub async fn wait(&self) {
+        let mut done = self.done.clone();
+        while !*done.borrow_and_update() {
+            if done.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
 /// A validated, backend-neutral resource request for one sandbox.
 ///
 /// Memory and workspace sizes are positive byte counts representable by a
