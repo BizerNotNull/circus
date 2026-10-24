@@ -1,21 +1,63 @@
 //! Docker Engine calls. Bollard types stay in this module.
 
+#[path = "images.rs"]
+mod images;
+pub(crate) use images::ImageInfo;
+
+#[path = "engine_output.rs"]
+mod output;
+pub(crate) use output::{OutputLimit, OutputPhase};
+
+#[path = "engine_policy.rs"]
+mod policy;
+pub(crate) use policy::{HostReport, OWNER_LABEL_KEY, PolicyMismatch, create_body};
+
+#[path = "engine_recovery.rs"]
+mod recovery;
+pub(crate) use recovery::{OwnerCheck, Recovered, RemovalControl, recover_with};
+
 mod process;
 pub(crate) use process::{EngineProcess, ProcessChunk, ProcessSpec};
 
-use std::collections::HashMap;
+use std::future::Future;
 
 use futures_util::StreamExt;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 const GUEST_FILES: &str = include_str!("guest_files.py");
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StagedBytes {
+/// One bounded host-to-guest copy buffer. The guest helper reads stdin in the
+/// same 64 KiB units, so neither side needs a whole-file buffer.
+const TRANSFER_CHUNK_BYTES: usize = 64 * 1024;
+
+/// One staging entry presented to a backend.
+///
+/// Payloads are never accumulated for the whole tree. A directory carries no
+/// payload, an in-memory value is used for a single API write, and a staged
+/// file is transferred from an already-opened host handle in bounded chunks.
+pub(crate) struct UploadEntry {
     pub path: String,
-    pub is_dir: bool,
-    pub bytes: Vec<u8>,
+    pub source: UploadSource,
+}
+
+pub(crate) enum UploadSource {
+    Directory,
+    Bytes(Vec<u8>),
+    File { file: std::fs::File, len: u64 },
+}
+
+/// Stdin framing for one guest exec.
+enum Stdin<'a> {
+    None,
+    Bytes(&'a [u8]),
+    File { file: std::fs::File, len: u64 },
+}
+
+impl Stdin<'_> {
+    fn attached(&self) -> bool {
+        !matches!(self, Self::None)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,8 +73,6 @@ pub(crate) enum EngineErrorKind {
 }
 
 const CLIENT_TIMEOUT_SECS: u64 = 90;
-
-pub(crate) const OWNER_LABEL_KEY: &str = "circus.sandbox.owner";
 
 #[derive(Clone, Copy)]
 pub(crate) enum SocketKind {
@@ -52,6 +92,11 @@ pub(crate) struct EngineError {
     pub kind: EngineErrorKind,
     pub create_pending: bool,
     pub create_id: Option<String>,
+    /// Typed output-budget violation when this error was produced while
+    /// collecting stdout/stderr.
+    pub output: Option<OutputLimit>,
+    /// Typed effective-policy mismatch when creation verification failed.
+    pub policy: Option<Box<PolicyMismatch>>,
 }
 
 impl EngineError {
@@ -62,14 +107,10 @@ impl EngineError {
             kind: EngineErrorKind::Other,
             create_pending: false,
             create_id: None,
+            output: None,
+            policy: None,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Recovered {
-    Removed,
-    Absent,
 }
 
 pub(crate) struct CreateSpec {
@@ -85,19 +126,6 @@ pub(crate) struct CreateSpec {
     pub owner_label: String,
 }
 
-pub(crate) struct HostReport {
-    pub runtime: String,
-    pub memory_bytes: i64,
-    pub nano_cpus: i64,
-    pub pids_limit: i64,
-    pub readonly_root: bool,
-    pub network_mode: String,
-    pub cap_drop: Vec<String>,
-    pub security_opt: Vec<String>,
-    pub bind_count: usize,
-    pub tmpfs_workspace: Option<String>,
-}
-
 pub(crate) struct ExecDone {
     pub exit_code: i64,
     pub stdout: Vec<u8>,
@@ -107,14 +135,19 @@ pub(crate) struct ExecDone {
 struct FileRequest<'a> {
     relative: &'a str,
     mode: &'static str,
-    input: &'a [u8],
+    stdin: Stdin<'a>,
     max_bytes: usize,
 }
 
 struct ExecIo<'a> {
-    stdin: Option<&'a [u8]>,
-    output_limit: usize,
+    stdin: Stdin<'a>,
+    /// Per-stream allowance for stdout.
+    stdout_limit: usize,
+    /// Per-stream allowance for stderr.
     stderr_limit: usize,
+    /// Combined stdout+stderr budget. Always the explicit sum of the two
+    /// allowances, never an accidental doubling.
+    combined_limit: usize,
 }
 
 impl Engine {
@@ -183,7 +216,7 @@ impl Engine {
         {
             return Err(EngineError::new("images declaring VOLUME are unsupported"));
         }
-        let mut body = container_body(name, spec);
+        let mut body = create_body(name, spec);
         body.image = Some(
             image
                 .id
@@ -210,6 +243,8 @@ impl Engine {
                 kind: EngineErrorKind::Other,
                 create_pending: false,
                 create_id: Some(created_id),
+                output: None,
+                policy: None,
             });
         }
         let inspected = self
@@ -220,51 +255,39 @@ impl Engine {
                 create_id: Some(created_id.clone()),
                 ..map_err(err)
             })?;
-        let host = inspected.host_config.ok_or_else(|| EngineError {
-            message: "missing effective host configuration".to_string(),
-            not_found: false,
-            kind: EngineErrorKind::Other,
-            create_pending: false,
-            create_id: Some(created_id.clone()),
-        })?;
-        if host.memory != Some(spec.memory)
-            || host.memory_swap != Some(spec.memory)
-            || host.nano_cpus != Some(spec.nano_cpus)
-            || host.pids_limit != Some(spec.pids)
-            || host.readonly_rootfs != Some(true)
-            || host.init != Some(true)
-        {
+        let Some(host) = inspected.host_config else {
             return Err(EngineError {
-                message: "engine did not preserve required resource limits and isolation"
-                    .to_string(),
-                not_found: false,
-                kind: EngineErrorKind::Other,
-                create_pending: false,
                 create_id: Some(created_id),
+                ..PolicyMismatch {
+                    field: "host_config",
+                    expected: "reported by engine".to_string(),
+                    actual: "not reported".to_string(),
+                }
+                .error()
+            });
+        };
+        let report = policy::report_from(Some(host));
+        if let Err(mismatch) = policy::verify(spec, &report) {
+            return Err(EngineError {
+                create_id: Some(created_id),
+                ..mismatch.error()
             });
         }
         Ok(created_id)
     }
 
+    /// Confirms absence of the owned instance and force-removes it.
+    ///
+    /// Uses the retained identity when a transient inspection failure prevents
+    /// confirming the name, and always attempts forced removal even when the
+    /// best-effort stop call fails. Returns an explicit ownership outcome.
     pub(crate) async fn recover_owned(
         &self,
         name: &str,
         owner_label: &str,
-    ) -> Result<Recovered, EngineError> {
-        match self.confirm_owner(name, owner_label).await {
-            Ok(id) => {
-                self.force_remove(&id).await?;
-                match self.confirm_owner(name, owner_label).await {
-                    Err(err) if err.not_found => Ok(Recovered::Removed),
-                    Ok(_) => Err(EngineError::new(format!(
-                        "container {name} still present after forced removal"
-                    ))),
-                    Err(err) => Err(err),
-                }
-            }
-            Err(err) if err.not_found => Ok(Recovered::Absent),
-            Err(err) => Err(err),
-        }
+        retained_id: Option<&str>,
+    ) -> Recovered {
+        recover_with(self, name, owner_label, retained_id).await
     }
 
     pub(crate) async fn start(&self, id: &str) -> Result<(), EngineError> {
@@ -282,37 +305,137 @@ impl Engine {
         self.docker.unpause_container(id).await.map_err(map_err)
     }
 
+    /// Download only the configured workspace, never the container root.
+    /// The anonymous file is deleted on close, including cancellation/errors.
+    pub(crate) async fn download_workspace_archive(
+        &self,
+        id: &str,
+        workspace: &str,
+        max_archive_bytes: u64,
+    ) -> Result<std::fs::File, EngineError> {
+        if max_archive_bytes == 0 {
+            return Err(file_error(
+                EngineErrorKind::Limit,
+                "archive byte limit must be positive",
+            ));
+        }
+        let file = tokio::task::spawn_blocking(tempfile::tempfile)
+            .await
+            .map_err(|err| {
+                file_error(
+                    EngineErrorKind::FileIo,
+                    format!("archive tempfile task: {err}"),
+                )
+            })?
+            .map_err(|err| {
+                file_error(EngineErrorKind::FileIo, format!("archive tempfile: {err}"))
+            })?;
+        let mut file = tokio::fs::File::from_std(file);
+        let options = bollard::query_parameters::DownloadFromContainerOptionsBuilder::new()
+            .path(workspace)
+            .build();
+        let mut stream = self.docker.download_from_container(id, Some(options));
+        let mut total = 0u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(map_err)?;
+            let size = u64::try_from(chunk.len())
+                .map_err(|_| file_error(EngineErrorKind::Limit, "archive chunk size overflow"))?;
+            total = total
+                .checked_add(size)
+                .filter(|total| *total <= max_archive_bytes)
+                .ok_or_else(|| {
+                    file_error(
+                        EngineErrorKind::Limit,
+                        "workspace archive exceeds transport byte limit",
+                    )
+                })?;
+            file.write_all(&chunk).await.map_err(|err| {
+                file_error(EngineErrorKind::FileIo, format!("archive write: {err}"))
+            })?;
+        }
+        if total == 0 {
+            return Err(file_error(
+                EngineErrorKind::Protocol,
+                "empty workspace archive response",
+            ));
+        }
+        file.flush()
+            .await
+            .map_err(|err| file_error(EngineErrorKind::FileIo, format!("archive flush: {err}")))?;
+        file.rewind()
+            .await
+            .map_err(|err| file_error(EngineErrorKind::FileIo, format!("archive rewind: {err}")))?;
+        Ok(file.into_std().await)
+    }
+
+    /// Transfers one entry. A file source is streamed from its host handle in
+    /// [`TRANSFER_CHUNK_BYTES`] chunks; the payload is never rebuilt as one
+    /// buffer. The lifecycle owner calls this once per planned entry, so live
+    /// payload memory is bounded by one chunk.
     pub(crate) async fn upload(
         &self,
         id: &str,
         user: &str,
         workspace: &str,
-        entries: &[StagedBytes],
+        entry: UploadEntry,
         max_bytes: u64,
     ) -> Result<(), EngineError> {
-        let total = entries
-            .iter()
-            .filter(|entry| !entry.is_dir)
-            .try_fold(0u64, |n, entry| n.checked_add(entry.bytes.len() as u64));
-        if total.is_none_or(|total| total > max_bytes) {
-            return Err(file_error(
-                EngineErrorKind::Limit,
-                "staged bytes exceed workspace limit",
-            ));
-        }
-        for entry in entries {
-            self.file_helper(
-                id,
-                user,
-                workspace,
-                FileRequest {
-                    relative: &entry.path,
-                    mode: if entry.is_dir { "mkdir" } else { "write" },
-                    input: if entry.is_dir { &[] } else { &entry.bytes },
-                    max_bytes: 0,
-                },
-            )
-            .await?;
+        let UploadEntry { path, source } = entry;
+        match source {
+            UploadSource::Directory => {
+                self.file_helper(
+                    id,
+                    user,
+                    workspace,
+                    FileRequest {
+                        relative: &path,
+                        mode: "mkdir",
+                        stdin: Stdin::None,
+                        max_bytes: 0,
+                    },
+                )
+                .await?;
+            }
+            UploadSource::Bytes(bytes) => {
+                if bytes.len() as u64 > max_bytes {
+                    return Err(file_error(
+                        EngineErrorKind::Limit,
+                        "staged bytes exceed workspace limit",
+                    ));
+                }
+                self.file_helper(
+                    id,
+                    user,
+                    workspace,
+                    FileRequest {
+                        relative: &path,
+                        mode: "write",
+                        stdin: Stdin::Bytes(&bytes),
+                        max_bytes: 0,
+                    },
+                )
+                .await?;
+            }
+            UploadSource::File { file, len } => {
+                if len > max_bytes {
+                    return Err(file_error(
+                        EngineErrorKind::Limit,
+                        "staged bytes exceed workspace limit",
+                    ));
+                }
+                self.file_helper(
+                    id,
+                    user,
+                    workspace,
+                    FileRequest {
+                        relative: &path,
+                        mode: "write",
+                        stdin: Stdin::File { file, len },
+                        max_bytes: 0,
+                    },
+                )
+                .await?;
+            }
         }
         Ok(())
     }
@@ -333,7 +456,7 @@ impl Engine {
                 FileRequest {
                     relative,
                     mode: "read",
-                    input: &[],
+                    stdin: Stdin::None,
                     max_bytes,
                 },
             )
@@ -361,7 +484,7 @@ impl Engine {
             FileRequest {
                 relative,
                 mode: "unlink",
-                input: &[],
+                stdin: Stdin::None,
                 max_bytes: 0,
             },
         )
@@ -379,9 +502,14 @@ impl Engine {
         let FileRequest {
             relative,
             mode,
-            input,
+            stdin,
             max_bytes,
         } = request;
+        let bound = match &stdin {
+            Stdin::None => 0,
+            Stdin::Bytes(bytes) => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            Stdin::File { len, .. } => *len,
+        };
         let argv = vec![
             "python3".to_string(),
             "-I".to_string(),
@@ -392,12 +520,17 @@ impl Engine {
             workspace.to_string(),
             relative.to_string(),
             if mode == "write" {
-                input.len()
+                bound
             } else {
-                max_bytes
+                u64::try_from(max_bytes).unwrap_or(u64::MAX)
             }
             .to_string(),
         ];
+        // The helper contract is explicit: stdout may carry up to
+        // `max_bytes + 1` (the extra byte proves an over-limit file), stderr may
+        // carry at most 4 KiB of diagnostics, and both share exactly their sum.
+        let stdout_limit = max_bytes.saturating_add(1);
+        let stderr_limit = 4096;
         let result = self
             .exec_input(
                 id,
@@ -405,9 +538,10 @@ impl Engine {
                 "/",
                 &argv,
                 ExecIo {
-                    stdin: Some(input),
-                    output_limit: max_bytes.saturating_add(1),
-                    stderr_limit: 4096,
+                    stdin,
+                    stdout_limit,
+                    stderr_limit,
+                    combined_limit: stdout_limit.saturating_add(stderr_limit),
                 },
             )
             .await?;
@@ -445,9 +579,10 @@ impl Engine {
             workdir,
             argv,
             ExecIo {
-                stdin: None,
-                output_limit,
+                stdin: Stdin::None,
+                stdout_limit: output_limit,
                 stderr_limit: output_limit,
+                combined_limit: output_limit,
             },
         )
         .await
@@ -463,15 +598,16 @@ impl Engine {
     ) -> Result<ExecDone, EngineError> {
         let ExecIo {
             stdin,
-            output_limit,
+            stdout_limit,
             stderr_limit,
+            combined_limit,
         } = io;
         let created = self
             .docker
             .create_exec(
                 id,
                 bollard::models::ExecConfig {
-                    attach_stdin: Some(stdin.is_some()),
+                    attach_stdin: Some(stdin.attached()),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
                     cmd: Some(argv.to_vec()),
@@ -496,13 +632,48 @@ impl Engine {
         else {
             return Err(EngineError::new("exec did not attach stdout"));
         };
+        let stdin_attached = stdin.attached();
         let send = async {
             let result = async {
-                if let Some(bytes) = stdin {
-                    input
-                        .write_all(bytes)
-                        .await
-                        .map_err(|err| EngineError::new(err.to_string()))?;
+                match stdin {
+                    Stdin::None => {}
+                    Stdin::Bytes(bytes) => {
+                        input
+                            .write_all(bytes)
+                            .await
+                            .map_err(|err| EngineError::new(err.to_string()))?;
+                    }
+                    Stdin::File { file, len } => {
+                        let mut source = tokio::fs::File::from_std(file);
+                        let mut chunk = vec![0u8; TRANSFER_CHUNK_BYTES];
+                        let mut remaining = len;
+                        while remaining > 0 {
+                            let want = usize::try_from(remaining)
+                                .unwrap_or(TRANSFER_CHUNK_BYTES)
+                                .min(chunk.len());
+                            let read = source.read(&mut chunk[..want]).await.map_err(|err| {
+                                file_error(
+                                    EngineErrorKind::FileIo,
+                                    format!("staged file read: {err}"),
+                                )
+                            })?;
+                            if read == 0 {
+                                return Err(file_error(
+                                    EngineErrorKind::FileIo,
+                                    format!(
+                                        "staged file ended before its declared {len} byte bound"
+                                    ),
+                                ));
+                            }
+                            input
+                                .write_all(&chunk[..read])
+                                .await
+                                .map_err(|err| EngineError::new(err.to_string()))?;
+                            remaining -= u64::try_from(read).unwrap_or(0);
+                        }
+                    }
+                }
+                if stdin_attached {
                     input
                         .shutdown()
                         .await
@@ -515,21 +686,21 @@ impl Engine {
             Ok::<_, EngineError>(result)
         };
         let receive = async {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
+            let mut collector =
+                output::OutputCollector::new(stdout_limit, stderr_limit, combined_limit);
             while let Some(item) = output.next().await {
                 match item.map_err(map_err)? {
                     bollard::container::LogOutput::StdOut { message }
                     | bollard::container::LogOutput::Console { message } => {
-                        push_bounded(&mut stdout, &message, output_limit)?;
+                        collector.push(OutputPhase::Stdout, &message)?;
                     }
                     bollard::container::LogOutput::StdErr { message } => {
-                        push_bounded(&mut stderr, &message, stderr_limit)?;
+                        collector.push(OutputPhase::Stderr, &message)?;
                     }
                     bollard::container::LogOutput::StdIn { .. } => {}
                 }
             }
-            Ok::<_, EngineError>((stdout, stderr))
+            Ok::<_, EngineError>(collector.finish())
         };
         // An output-limit/transport error cancels a blocked stdin writer immediately.
         let (sent, (stdout, stderr)) = tokio::try_join!(send, receive)?;
@@ -555,54 +726,48 @@ impl Engine {
             .inspect_container(id, None)
             .await
             .map_err(map_err)?;
-        let host = inspected.host_config.unwrap_or_default();
-        Ok(HostReport {
-            runtime: host.runtime.unwrap_or_default(),
-            memory_bytes: host.memory.unwrap_or(0),
-            nano_cpus: host.nano_cpus.unwrap_or(0),
-            pids_limit: host.pids_limit.unwrap_or(0),
-            readonly_root: host.readonly_rootfs.unwrap_or(false),
-            network_mode: host.network_mode.unwrap_or_default(),
-            cap_drop: host.cap_drop.unwrap_or_default(),
-            security_opt: host.security_opt.unwrap_or_default(),
-            bind_count: host.binds.unwrap_or_default().len(),
-            tmpfs_workspace: host.tmpfs.and_then(|map| map.into_values().next()),
-        })
+        Ok(policy::report_from(inspected.host_config))
     }
 
-    async fn confirm_owner(&self, name: &str, owner_label: &str) -> Result<String, EngineError> {
+    async fn owner_check(&self, name: &str, owner_label: &str) -> OwnerCheck {
         let inspected = match self.docker.inspect_container(name, None).await {
             Ok(value) => value,
-            Err(err) if is_not_found(&err) => {
-                return Err(EngineError {
-                    message: "owned container is absent".to_string(),
-                    not_found: true,
-                    kind: EngineErrorKind::Other,
-                    create_pending: false,
-                    create_id: None,
-                });
+            Err(err) if is_not_found(&err) => return OwnerCheck::Absent,
+            Err(err) => {
+                return OwnerCheck::Unknown {
+                    message: err.to_string(),
+                };
             }
-            Err(err) => return Err(map_err(err)),
         };
         let labels = inspected
             .config
             .and_then(|config| config.labels)
             .unwrap_or_default();
         if labels.get(OWNER_LABEL_KEY).map(String::as_str) != Some(owner_label) {
-            return Err(EngineError {
-                message: format!("container {name} does not carry the owner label"),
-                not_found: false,
-                kind: EngineErrorKind::Other,
-                create_pending: false,
-                create_id: None,
-            });
+            return OwnerCheck::Foreign {
+                name: name.to_string(),
+            };
         }
-        inspected
-            .id
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| EngineError::new("inspect returned no container id"))
+        match inspected.id.filter(|id| !id.is_empty()) {
+            Some(id) => OwnerCheck::Owned(id),
+            None => OwnerCheck::Unknown {
+                message: "inspect returned no container id".to_string(),
+            },
+        }
     }
 
+    async fn stop_best_effort(&self, id: &str) -> Result<(), EngineError> {
+        let options = bollard::query_parameters::StopContainerOptionsBuilder::new()
+            .t(1)
+            .build();
+        self.docker
+            .stop_container(id, Some(options))
+            .await
+            .map_err(map_err)
+    }
+
+    /// Forced removal with dependent anonymous volumes; an already-absent
+    /// instance counts as removed.
     async fn force_remove(&self, id: &str) -> Result<(), EngineError> {
         match self
             .docker
@@ -624,72 +789,24 @@ impl Engine {
     }
 }
 
-fn container_body(name: &str, spec: &CreateSpec) -> bollard::models::ContainerCreateBody {
-    let mut labels = HashMap::new();
-    labels.insert(OWNER_LABEL_KEY.to_string(), spec.owner_label.clone());
-    labels.insert("circus.sandbox.name".to_string(), name.to_string());
-    let mut tmpfs = HashMap::new();
-    tmpfs.insert(
-        spec.workspace_path.clone(),
-        format!(
-            "rw,nosuid,nodev,uid={},gid={},mode=0755,size={}",
-            spec.guest_uid, spec.guest_gid, spec.workspace_bytes
-        ),
-    );
-    bollard::models::ContainerCreateBody {
-        image: Some(spec.image.clone()),
-        user: Some(format!("{}:{}", spec.guest_uid, spec.guest_gid)),
-        tty: Some(false),
-        open_stdin: Some(false),
-        attach_stdin: Some(false),
-        env: Some(Vec::new()),
-        cmd: Some(Vec::new()),
-        entrypoint: Some(vec![
-            "python3".to_string(),
-            "-I".to_string(),
-            "-B".to_string(),
-            "-c".to_string(),
-            "import time; time.sleep(31536000)".to_string(),
-        ]),
-        working_dir: Some(spec.workspace_path.clone()),
-        network_disabled: Some(true),
-        exposed_ports: Some(Vec::new()),
-        volumes: Some(Vec::new()),
-        labels: Some(labels),
-        stop_signal: Some("SIGKILL".to_string()),
-        stop_timeout: Some(1),
-        host_config: Some(bollard::models::HostConfig {
-            memory: Some(spec.memory),
-            memory_swap: Some(spec.memory),
-            nano_cpus: Some(spec.nano_cpus),
-            pids_limit: Some(spec.pids),
-            readonly_rootfs: Some(true),
-            network_mode: Some("none".to_string()),
-            cap_drop: Some(vec!["ALL".to_string()]),
-            cap_add: Some(Vec::new()),
-            security_opt: Some(vec!["no-new-privileges:true".to_string()]),
-            privileged: Some(false),
-            publish_all_ports: Some(false),
-            binds: Some(Vec::new()),
-            mounts: Some(Vec::new()),
-            tmpfs: Some(tmpfs),
-            runtime: Some(spec.runtime.clone()),
-            auto_remove: Some(false),
-            init: Some(true),
-            ipc_mode: Some("private".to_string()),
-            cgroupns_mode: Some(bollard::models::HostConfigCgroupnsModeEnum::PRIVATE),
-            oom_kill_disable: Some(false),
-            shm_size: Some(65_536),
-            restart_policy: Some(bollard::models::RestartPolicy {
-                name: Some(bollard::models::RestartPolicyNameEnum::NO),
-                maximum_retry_count: Some(0),
-            }),
-            devices: Some(Vec::new()),
-            extra_hosts: Some(Vec::new()),
-            dns: Some(Vec::new()),
-            ..Default::default()
-        }),
-        ..Default::default()
+// Explicit `impl Future + Send` bounds keep this private seam statically
+// dispatched inside the lifecycle worker's spawned future.
+#[allow(clippy::manual_async_fn)]
+impl RemovalControl for Engine {
+    fn inspect_owner(
+        &self,
+        name: &str,
+        owner_label: &str,
+    ) -> impl Future<Output = OwnerCheck> + Send {
+        async move { Engine::owner_check(self, name, owner_label).await }
+    }
+
+    fn stop(&self, id: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
+        async move { Engine::stop_best_effort(self, id).await }
+    }
+
+    fn remove(&self, id: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
+        async move { Engine::force_remove(self, id).await }
     }
 }
 
@@ -700,18 +817,9 @@ fn file_error(kind: EngineErrorKind, message: impl Into<String>) -> EngineError 
         kind,
         create_pending: false,
         create_id: None,
+        output: None,
+        policy: None,
     }
-}
-
-fn push_bounded(buf: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<(), EngineError> {
-    if buf.len().saturating_add(chunk.len()) > limit {
-        return Err(file_error(
-            EngineErrorKind::Limit,
-            "command output exceeded the byte limit",
-        ));
-    }
-    buf.extend_from_slice(chunk);
-    Ok(())
 }
 
 fn connect_socket(kind: SocketKind, path: &str) -> Result<bollard::Docker, EngineError> {
@@ -762,6 +870,8 @@ fn map_err(err: bollard::errors::Error) -> EngineError {
         message: err.to_string(),
         create_pending: false,
         create_id: None,
+        output: None,
+        policy: None,
     }
 }
 

@@ -5,45 +5,48 @@ use std::process::Command;
 use std::time::Duration;
 
 use circus_sandbox::{
-    CommandRequest, DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig, Ownership,
-    ProcessExit, ProcessOutput, ProcessRequest, ProcessSession, ProcessTermination, ResourceLimits,
-    RuntimeName, SandboxConfig, SandboxError, SandboxPhase,
+    BackendConfig, CommandRequest, IoLimits, IsolationConfig, Ownership, ProcessExit,
+    ProcessOutput, ProcessRequest, ProcessSession, ProcessTermination, ResourceLimits, Sandbox,
+    SandboxConfig, SandboxError, SandboxPhase,
 };
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 struct Fixture {
-    sandbox: DockerSandbox,
-    endpoint: String,
+    sandbox: Sandbox,
+    host: String,
     id: String,
 }
 
 impl Fixture {
     async fn new() -> Result<Self> {
         assert_eq!(std::env::var("CIRCUS_DOCKER_SANDBOX").as_deref(), Ok("1"));
-        let endpoint = std::env::var("CIRCUS_DOCKER_ENDPOINT")?;
-        let sandbox = DockerSandbox::create(SandboxConfig::new(
-            DockerEndpoint::parse(&endpoint)?,
+        let backend = BackendConfig::docker(
+            std::env::var("CIRCUS_DOCKER_ENDPOINT")?,
             std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
-            RuntimeName::runc(),
+            "runc",
+        );
+        let host = match &backend {
+            BackendConfig::Docker(docker) => match docker.endpoint() {
+                endpoint if endpoint.starts_with('/') => format!("unix://{endpoint}"),
+                endpoint => endpoint.to_string(),
+            },
+        };
+        let config = SandboxConfig::new(
             ResourceLimits::new(64 * 1024 * 1024, 1000, 32, 8 * 1024 * 1024, 1024 * 1024)?,
             IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
             IoLimits::new(4 * 1024 * 1024, Duration::from_secs(10))?,
-        )?)
-        .await?;
-        let id = sandbox.status().await?.container_id.ok_or("missing id")?;
-        let fixture = Self {
-            sandbox,
-            endpoint,
-            id,
-        };
+        )?;
+        let sandbox = Sandbox::create(backend, config).await?;
+        let id = sandbox.status().await?.instance_id.ok_or("missing id")?;
+        let fixture = Self { sandbox, host, id };
         fixture.sandbox.start().await?;
         Ok(fixture)
     }
 
     fn assert_removed(&self) -> Result {
         let result = Command::new("docker")
-            .args(["--host", &self.endpoint, "inspect", &self.id])
+            .args(["--host", &self.host, "inspect", &self.id])
             .output()?;
         assert!(!result.status.success());
         assert!(String::from_utf8_lossy(&result.stderr).contains("No such"));
@@ -54,7 +57,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = Command::new("docker")
-            .args(["--host", &self.endpoint, "rm", "-f", &self.id])
+            .args(["--host", &self.host, "rm", "-f", &self.id])
             .output();
     }
 }

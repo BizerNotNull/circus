@@ -1,4 +1,8 @@
-//! One interactive process per sandbox; only lifecycle publishes its final outcome.
+//! One interactive process per sandbox; only lifecycle publishes its outcome.
+//!
+//! The transport is backend-neutral: the worker holds the backend, so the I/O
+//! task receives an already-attached `BackendProcess` instead of reaching into
+//! a backend itself.
 
 mod io;
 #[cfg(test)]
@@ -11,11 +15,10 @@ use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    CleanupReport, CommandGuard, Ownership, SandboxError, SandboxPhase, State, config,
-    destroy_report, need, required_id,
-};
-use crate::infrastructure::ProcessSpec;
+use super::operations::{cleanup_engine_error, destroy_report, need, required_id};
+use super::{CleanupReport, CommandGuard, Ownership, SandboxError, SandboxPhase, State};
+use crate::infrastructure::{Backend, ProcessSpec};
+use crate::runtime::check_relative;
 
 const CHUNK_BYTES: usize = 16 * 1024;
 const BUFFER_CHUNKS: usize = 8;
@@ -68,7 +71,7 @@ impl ProcessRequest {
             return Err(invalid("process output limit must be in 1..usize::MAX"));
         }
         if let Some(dir) = &self.working_dir {
-            config::check_relative(dir)?;
+            check_relative(dir)?;
             if dir.contains('\0') {
                 return Err(invalid("working directory contains NUL"));
             }
@@ -109,7 +112,7 @@ pub enum ProcessTermination {
 
 /// A normal exit retains the sandbox and workspace, including for nonzero codes.
 /// Termination reports an actual cleanup attempt; unknown ownership requires
-/// retrying `DockerSandbox::destroy` on the retained sandbox handle.
+/// retrying `Sandbox::destroy` on the retained sandbox handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessExit {
     Exited {
@@ -234,8 +237,8 @@ pub(super) struct ActiveProcess {
     exit: watch::Sender<Option<ProcessExit>>,
 }
 
-pub(super) async fn spawn(
-    state: &mut State,
+pub(super) async fn spawn<B: Backend>(
+    state: &mut State<B>,
     request: ProcessRequest,
 ) -> Result<ProcessSession, SandboxError> {
     need(state, SandboxPhase::Running, "spawn_process")?;
@@ -254,29 +257,30 @@ pub(super) async fn spawn(
         .as_ref()
         .map_or_else(|| base.to_string(), |dir| format!("{base}/{dir}"));
     let process = state
-        .engine
-        .spawn_process(ProcessSpec {
-            container: &id,
-            user: &state.user,
-            workdir: &workdir,
-            argv: &request.argv,
-            env: request
-                .env
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect(),
-        })
+        .backend
+        .spawn_process(
+            &id,
+            ProcessSpec {
+                user: &state.user,
+                workdir: &workdir,
+                argv: &request.argv,
+                env: request
+                    .env
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect(),
+            },
+        )
         .await;
     let process = match process {
         Ok(process) => process,
-        Err(err) => return super::cleanup_engine_error(state, err).await,
+        Err(err) => return cleanup_engine_error(state, err).await,
     };
     let (input_tx, input_rx) = mpsc::channel(BUFFER_CHUNKS);
     let (output_tx, output_rx) = mpsc::channel(BUFFER_CHUNKS);
     let (exit_tx, exit_rx) = watch::channel(None);
     let cancel = CancellationToken::new();
     let task = tokio::spawn(io::run(
-        state.engine.clone(),
         process,
         input_rx,
         output_tx,
@@ -311,7 +315,10 @@ pub(super) async fn completed(
     }
 }
 
-pub(super) async fn finish(state: &mut State, result: Result<i64, ProcessTermination>) {
+pub(super) async fn finish<B: Backend>(
+    state: &mut State<B>,
+    result: Result<i64, ProcessTermination>,
+) {
     if let Some(process) = state.process.take() {
         let outcome = match result {
             Ok(exit_code) => ProcessExit::Exited { exit_code },
@@ -326,7 +333,7 @@ pub(super) async fn finish(state: &mut State, result: Result<i64, ProcessTermina
 
 /// Called by the lifecycle owner before removing the container. Closing the
 /// transport alone never claims the guest or its descendants have stopped.
-pub(super) async fn stop(state: &mut State) {
+pub(super) async fn stop<B: Backend>(state: &mut State<B>) {
     if let Some(process) = &mut state.process {
         process.cancel.cancel();
         if let Some(task) = &mut process.task {
@@ -340,18 +347,27 @@ pub(super) async fn stop(state: &mut State) {
 
 pub(super) fn destroyed(
     process: Option<ActiveProcess>,
-    id: Option<String>,
+    instance_id: Option<String>,
     result: &Result<(), SandboxError>,
 ) {
     if let Some(process) = process {
         let cleanup = match result {
             Ok(()) => CleanupReport {
-                container_id: None,
+                instance_id: None,
                 ownership: Ownership::ConfirmedAbsent,
-                detail: "owned container confirmed absent".into(),
+                detail: "owned instance confirmed absent and staging removed".to_string(),
+            },
+            // A typed cleanup failure reports the ownership it actually
+            // observed; anything else leaves ownership unknown and retryable.
+            Err(SandboxError::CleanupRequired {
+                ownership, detail, ..
+            }) => CleanupReport {
+                instance_id,
+                ownership: *ownership,
+                detail: format!("cancellation cleanup failed: {detail}"),
             },
             Err(err) => CleanupReport {
-                container_id: id,
+                instance_id,
                 ownership: Ownership::Unknown,
                 detail: err.to_string(),
             },

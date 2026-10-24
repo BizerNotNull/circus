@@ -1,10 +1,10 @@
 # circus-sandbox
 
-Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace 文件能力、受预算约束的进程内代码快照、`runtime::ResourceLimits` 请求校验，以及显式配置的本地 Linux Docker Engine + `runc` 异步容器后端。workspace 文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；容器后端通过私有 lifecycle/infrastructure 模块运行 Linux 容器。
+Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace 文件能力、受预算约束的进程内代码快照、`runtime::ResourceLimits` 请求校验、本地 OCI 镜像解析，以及后端中立的 `Sandbox::create(BackendConfig, SandboxConfig)` API。该 API 目前只有一个已实现后端：显式本地 Linux Docker Engine + `runc`。workspace 文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；容器后端通过私有 lifecycle/infrastructure 模块运行 Linux 容器，`BackendConfig::Docker` 只是公开的后端选择描述，不暴露 bollard 或 Engine 类型。
 
-容器后端不是通用进程沙箱：它只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。Kubernetes、containerd、gVisor、Kata、Firecracker、OCI 环境准备、HTTP/RPC、Git、容器/VM 快照与预启动/沙箱池仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker + runc slice 当作全部七领域交付。
+容器后端不是通用进程沙箱：`BackendConfig::Docker` 只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。`environment::prepare_docker_image` 只做本地镜像 inspect，把显式 reference 解析成不可变 image ID 并检查平台；它不会访问 registry，也不会读取凭据。`environment::EnvironmentPlan` 执行显式有序、逐步固定且不经过 shell 的准备工作，并在返回前确认容器与 staging 清理；`environment::EnvironmentId` 从解析后的镜像、平台、固定步骤和显式 tenant 域派生不透明 SHA-256 标识，不提供缓存或持久化。Kubernetes、containerd、gVisor、Kata、Firecracker、registry pull/认证、HTTP/RPC 仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker + runc slice 当作全部七领域交付。
 
-workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Docker 后端不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；Docker 设置的实际效果需要真实 Linux Engine 验证，独立 workspace 仍没有总字节或宿主磁盘配额执行机制。
+workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Docker 后端不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；Docker 设置的实际效果需要真实 Linux Engine 验证，独立 workspace 仍没有总字节或宿主磁盘配额执行机制。`CodeSource::open` 仅供可信库调用方显式授予源目录读取能力，再复制到新建的 `Workspace`，不是挂载或直接接管源目录。`GitCheckout` 用受控宿主 Git 进程准备固定提交并可创建独立 worktree，属于可信准备流程，不是对抗性进程沙箱。
 
 工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖还包括 bollard **0.21.1**、tokio **1.x**、tokio-util **0.7.x**、uuid **1.x**、futures-util **0.3.x** 和 thiserror **2.0.21**；`Cargo.lock` 固定解析版本，检查和运行都加 `--locked`。workspace 仍使用 cap-std **4.0.3**、cap-fs-ext **4.0.3**、tempfile **3.27.0**。
 
@@ -66,6 +66,57 @@ cargo run --locked --example workspace
 
 示例为 `examples/code_snapshot.rs`，公开 API 测试在 `tests/code_snapshot.rs`。
 
+## 显式授权的代码副本
+
+`CodeSource::open(path)` 打开调用方已经授权读取的源目录，返回只读 capability；不公开源根路径。路径字符串不是租户授权凭证：服务必须先自行决定调用方可读哪个目录，不能把不可信请求里的宿主路径直接传入。打开根目录按宿主路径解析语义处理；此后子项遍历和读取通过 cap-std 目录能力约束在源目录内，不修改源文件。
+
+`source.copy_to_workspace(max_file_bytes, SnapshotBudget::new(max_total_bytes, max_entries)?)` 返回新的、独立拥有的 `Workspace`，不经过内存 `CodeSnapshot` 中间副本。原有 `Workspace::capture_code_snapshot` 仍是工作区到进程内快照的独立能力，不等同于外部源目录导入。
+
+- `max_file_bytes` 沿用 workspace 单文件限制（拒绝 `0` 与 `usize::MAX`）；预算两个值必须为正。总字节只计文件内容；条目计目录和文件（包括空目录、零字节文件），不计根目录。恰好等于上限允许。
+- 预算只约束这一次复制，不是以后写入的总配额、磁盘预留或原子配额。复制逐文件读取，不按不可信 metadata 分配整个源树。
+- 拒绝所有源子项符号链接（包括指向目录内的链接）、非普通节点和不满足 workspace 可移植路径规则的名称；不复制所有权、权限或其他文件 metadata。
+- `CodeCopyError` 可匹配 `ByteLimit { limit, actual }`、`EntryLimit { limit, actual }`、`Symlink { path }`、`NotRegular { path }`、`NotPortable { path }`、`Workspace(WorkspaceError)` 和 `SourceIo { path, source }`。单文件超限是 `Workspace(WorkspaceError::LimitExceeded { .. })`；遍历错误路径相对源根，打开失败的 `SourceIo.path` 是调用方传入的授权路径。失败不返回成功工作区；若回收部分目的工作区也失败，`CopyCleanup { copy, destination, cleanup }` 保留原始复制错误及 boxed 工作区所有权，调用方应取回 `destination` 并重试 `cleanup`，不能把 Drop 当成清理成功。
+- 打开、复制和清理是同步阻塞调用；异步调用方应使用 `spawn_blocking`，已经开始的阻塞任务不能靠 abort 终止。外部仍可修改源文件，本 API 不承诺一致时间点快照、崩溃原子性或跨进程隔离。
+- 不推断 Git clone/worktree、沙箱池或运行时能力；没有 Git metadata 特殊策略，也不会隐式分享源凭据。授权范围内的普通文件会按普通内容复制，调用方必须自行排除不应授予的秘密。
+
+真实临时目录示例创建授权源、读取复制后的实际字节并显式清理双方；公开 API 测试覆盖独立副本、精确预算、嵌套文件与拒绝边界。在 `circus-sandbox/` 执行：
+
+```bash
+cargo run --locked --example code_copy
+cargo test --locked --test code_copy
+cargo run --locked --example git_worktree
+cargo test --locked --test git_worktree
+```
+
+## Fixed-revision Git workspaces
+
+`GitSource::local` and `GitSource::https` accept only explicitly authorized absolute local paths or HTTPS URLs without credentials, queries, fragments, or alternate protocols. `GitRevision` accepts only a complete 40- or 64-character commit ID. `GitCheckout::clone` prepares that commit with the configured absolute Git binary in a private temporary repository, disables ambient configuration and credentials, disables recursive submodules and tags, and verifies the checked-out object ID.
+
+`GitCheckout::copy_to_workspace` returns a code-only `Workspace`: the checkout's private `.git` metadata is retained by `GitCheckout` and is never copied. The copy is independent and bounded by the per-file and one-shot snapshot budgets. The source path, repository root, private home, hooks, and configuration are not exposed publicly.
+
+`GitCheckout::create_worktree` adds a detached worktree of that prepared repository at the same verified commit with `git worktree add --detach`, in a separate newly created private directory under the configured storage root, with its administrative entry recorded in the checkout's private repository. The checkout retains ownership of the shared repository and its primary directory; each returned `GitWorktree` owns only its own private directory and administrative entry. Two worktrees are independent, and removing one through `GitWorktree::cleanup` never removes the source repository, the primary checkout directory, or a sibling worktree. Concurrent worktrees are supported. Cleaning the checkout removes its private repository and therefore the administrative metadata of any live worktree, but it does not remove those worktrees' own directories; such a worktree can still be copied from and must still be cleaned explicitly (or by dropping its handle).
+
+`GitWorktree::copy_to_workspace` uses the same filtered, code-only copy as the checkout: the worktree's root `.git` file and its private administrative metadata are excluded, so copies contain no Git state. Symlinks, non-regular nodes, path violations, and the per-file or snapshot budget fail the copy exactly as for the checkout, and each call produces an independent `Workspace`. Worktree creation uses the checkout's configured timeout as its whole-operation deadline; every worktree copy starts its own whole-operation deadline of the same length, covering queueing and the blocking copy. Dropping a worktree handle cancels its owner, and dropping a copy future cancels that copy; either path drains started blocking work, explicitly removes the created destination, and retains cleanup responsibility if removal cannot be confirmed.
+
+`GitWorktree::cleanup` is explicit and idempotent and uses `git worktree remove --force` for that worktree, then `git worktree prune --expire now`, then removes its private directory. A dirty worktree is therefore removed with `--force`: modified and untracked files in that worktree are discarded, not preserved, and no other worktree is affected. A removal that cannot be confirmed returns `GitError::CleanupRequired` with an opaque `GitCleanup` receipt, and the retained owner keeps retrying; the same handle may call `cleanup` again while that retry is pending. Repeated calls after success return `Ok(())`, while copies after successful cleanup return `GitError::Closed`; creation after checkout cleanup also returns `GitError::Closed`. If the checkout's private repository has already been removed, worktree cleanup still removes its own private directory because no administrative entry remains. Each removal Git command has the checkout's configured per-process timeout.
+
+Git preparation is trusted host-side work, not an OS process or filesystem isolation boundary. A local grant trusts the filesystem repository; an HTTPS grant is not an SSRF policy. The storage parent has no library-enforced disk quota and must be bounded by the deployer. A detached worker owns allocation, processes, blocking copies, and explicit removal. Dropping a clone/copy future cancels work but does not drop that owner; started blocking work drains before its destination is explicitly removed. Each clone or copy has one whole-operation deadline. Clone output has one combined stdout/stderr budget across all commands. Only the selected source protocol is enabled. Private home, config, temporary files, and empty hooks live beside, not inside, the repository.
+
+Call `GitCheckout::cleanup().await` for observable, idempotent removal. `GitError::CleanupRequired { source, cleanup }` preserves the initiating error and an opaque `GitCleanup` receipt: `cleanup.wait().await` succeeds only after process termination and directory removal are confirmed. Cleanup retries retain directory identity and continue independently of receipt cancellation/drop. A failed ordinary copy can retain its partial destination in `CodeCopyError::CopyCleanup`; explicitly clean that destination. These are library ownership guarantees, not crash recovery or disk quota enforcement. Git behavior depends on the configured trusted binary.
+
+## 后端选择与创建
+
+公开创建入口是 `Sandbox::create(BackendConfig, SandboxConfig).await`：
+
+- `runtime::SandboxConfig::new(limits, isolation, io_limits)` 只承载所有后端共有的要求：`ResourceLimits` 请求、`IsolationConfig` 隔离要求（no-new-privileges、drop all capabilities、read-only root、disabled network 必须全部为真）和 `IoLimits`。它不包含 endpoint、image 或 runtime。
+- `runtime::BackendConfig` 是后端选择枚举，当前只有一个已实现变体 `BackendConfig::Docker(DockerBackendConfig)`。该描述包含显式本地 endpoint、已存在的 image reference 和 OCI runtime 名称；构造它不连接 Docker。
+- Docker endpoint/image/runtime 的解析、仅 runc、以及 Docker 特有的 PID 下限等校验都在私有 `infrastructure::DockerConfig` 中完成。`Sandbox::create` 在分配任何容器之前返回 `SandboxError::BackendConfig(BackendConfigError)`；本地镜像不存在时返回 `SandboxError::BackendImageUnavailable { image }`；其他后端失败是 `SandboxError::Backend { message }`，不泄露 SDK 类型。真实 Engine 的 restrict/limit 结果由 create 时的 inspect 校验，不匹配会清理已创建容器，而不是降级。
+- `Sandbox::create` 还会在连接前检查后端是否声明支持 pause/resume、guest 文件传输和 workspace archive 捕获；不支持时返回 `SandboxError::UnsupportedCapability`。这些检查不表示其他后端已实现。
+
+`SandboxStatus` 只报告当前 phase、`instance_id: Option<String>` 和 `enforcement: Option<EnforcementReport>`。`EnforcementReport` 的每个字段都是 inspect 到的证据，类型为 `Option`；`None` 表示后端没有报告该项。请求值不会复制成“已强制”的值。
+
+示例：`examples/sandbox_config.rs` 构造中立配置、展示 `BackendConfig::Docker` 描述，并观察无效 endpoint 与 Docker PID 下限在分配前被类型化拒绝；`examples/image_environment.rs` 解析本地不可变镜像 ID。两者都不需要连接成功，也不代表容器隔离已验证。
+
 ## 资源请求值模型
 
 通过 `circus_sandbox::runtime::{ResourceLimits, ResourceLimitsError}` 使用。`ResourceLimits::new(memory_bytes, cpu_millis, pids, workspace_bytes, max_file_bytes)` 返回 `Result`；字段私有，提供同名 getter，支持 `Clone`、`Copy`、`Debug`、`PartialEq`、`Eq`，没有 `Default`。
@@ -85,8 +136,7 @@ cargo run --locked --example resource_policy
 
 ## Linux Docker + runc
 
-可手动构建的 [Codex Agent 镜像](images/codex/README.md) 固定 CLI 与 Node 版本，包含 Python 3、Git、ripgrep，并提供可写 HOME/缓存/临时目录的启动脚本。镜像验收沿用当前禁网策略，范围是工具和 Codex stdio 离线启动。
-
+可手动构建的 [Codex Agent 镜像](images/codex/README.md) 固定 CLI 与 Node 版本，包含 Python 3、Git、ripgrep，并提供可写 HOME/缓存/临时目录的启动脚本。镜像验收沿用当前禁网策略，范围是工具和 Codex stdio 离线
 [Codex 单任务调用示例](docs/codex-agent.md) 通过 `ProcessSession` 转发受限模型请求，保持容器禁网、上游密钥留在宿主，并在任务完成后取回文件。需要显式配置支持 Responses 的模型服务；脚本化模型对端测试不代表真实模型验收或 Paseo 接入。
 
 交互进程入口为 `DockerSandbox::spawn_process(ProcessRequest)`。返回的 `ProcessSession` 支持持续 stdin、分开的 stdout/stderr 流、EOF、退出通知和取消；每个沙箱同时允许一个交互进程，运行时仍可读写文件、查询状态及销毁。输出背压、超时、取消与工作区保留语义见下述后端文档。可运行示例为 `examples/interactive_process.rs`；Paseo 接入仍待实现。
@@ -97,26 +147,81 @@ cargo run --locked --example resource_policy
 
 ```bash
 CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
-  cargo test --locked --test docker_sandbox -- --ignored
+  cargo test --locked --test docker_sandbox --test docker_process -- --ignored
 ```
 
 测试使用 `python:3.12-slim`，可用 `CIRCUS_DOCKER_IMAGE` 指定另一个包含 Python 3 的本地 Linux 镜像。实际运行环境、命令、结果和限制应记录在对应 PR；不要把编译、忽略测试或 CI 通过写成隔离验证。
+
+本地镜像解析测试同样默认忽略，且需要 `CIRCUS_DOCKER_ARCH` 指定 Docker 架构名（例如 `amd64` 或 `arm64`）：
+
+```bash
+CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
+CIRCUS_DOCKER_ARCH=amd64 \
+  cargo test --locked --test docker_environment -- --ignored
+CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock CIRCUS_DOCKER_ARCH=amd64 \
+  cargo run --locked --example image_environment
+```
+
+`prepare_docker_image` 只 inspect 本地镜像并返回不可变 ID；缺失镜像是 `EnvironmentError::ImageNotFound`，不会触发拉取，也不读取任何 registry 凭据。
+
+### 环境准备计划与稳定标识
+
+`EnvironmentPlan::new(ImageRequest, Vec<PrepareStep>)` 构造显式有序的准备计划。`PrepareStep::new(argv, PinnedVersion, timeout, output_limit_bytes)` 只接受分开的 argv，不经过 shell；`PrepareStep::unpinned(...)` 可以表示未固定的步骤，但 `EnvironmentPlan::new` 会在任何 Docker 连接或容器分配之前以 `PlanError::UnpinnedInput { index }` 拒绝它，不会静默接受不可复现的输入。
+
+`EnvironmentPlan::execute(SandboxConfig)` 在私有 lifecycle 钩子中执行真实准备：只 inspect 本地镜像；创建并启动一个 sandbox；按顺序对每一步调用 `Sandbox::exec`，只传入该步 argv、超时和输出上限，不继承宿主环境变量或凭据；最后销毁 sandbox，并等待实例与 staging 清理确认。非零退出返回 `PreparationError::StepFailed { index, argv, exit_code, stdout, stderr, output_limit_bytes, cleanup }`，其中 stdout/stderr 不超过该步配置的 output limit；超时、其他执行失败和清理无法确认也各有类型化错误。调用方丢弃 `execute` future 时，lifecycle owner 的 Drop 撤销会继续后台清理，但被丢弃的 future 不能报告清理结果。
+
+`PreparedEnvironment` 记录解析后的不可变 image ID、repo digests、请求平台、每一步的精确 argv、pinned version 和有界观察输出。`EnvironmentId::new(image_id, repo_digests, platform, steps, tenant)` 或 `PreparedEnvironment::identity(TenantDomain)` 用 SHA-256（FIPS 180-4，规范序列化格式版本 1）对这些输入派生 64 个字符的小写十六进制不透明标识。repo digest 按集合排序比较；步骤顺序、argv、pinned version、image ID/digest、平台 os/arch/variant（Docker inspect 只报告 os/arch，variant 会参与标识但不会被验证）或 tenant domain 任一变化都会产生新标识。tenant domain 是调用方显式提供的安全域，必须非空且不含空白/控制字符，用于避免跨租户碰撞；identity 不包含 endpoint、宿主路径、环境变量、凭据、超时或输出上限。任何输入变化都意味着旧标识失效；等价输入得到相同标识。该模块只派生标识，不实现缓存、registry、持久化或查询服务。
+
+```bash
+CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
+CIRCUS_DOCKER_ARCH=amd64 \
+  cargo test --locked --test docker_environment_prep -- --ignored
+CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock CIRCUS_DOCKER_ARCH=amd64 \
+  cargo run --locked --example environment_identity
+```
+
+真实测试覆盖固定步骤的精确输出、失败步骤的 index/exit code 与容器清理、执行中取消后的清理、未固定输入在分配前被拒绝，以及标识稳定性/敏感性和 Debug/Display 不泄露输入。示例打印观察到的 image ID、步骤输出和 identity hex；`execute` 返回即表示已确认清理。示例的 pinned version 可用 `CIRCUS_PYTHON_VERSION`（默认 `3`）覆盖，tenant domain 可用 `CIRCUS_TENANT`（默认 `example-tenant`）覆盖。身份派生测试不需要 Docker，可直接随 `cargo test --locked` 运行。真实 Docker 用例保持 `#[ignore]`；本检出没有可用的 Docker Engine，因此代码存在不等于已运行验证。
+
+### 预启动 Docker 池
+
+`PoolConfig::new(backend: BackendConfig, sandbox: SandboxConfig, capacity, baseline, lease_ttl: Duration)` 要求正容量和显式正 TTL；`DockerPool::create(config).await` 在所有槽位完成实际 create、可选基线恢复、start 和 Running 检查后才成功。TTL 从租约分配时开始，不从预热或排队开始；到期请求撤销并中断仍在执行的命令，实际销毁是异步的，必须等待清理确认，不能把到期当作容器已不存在。`acquire(Duration)` 必须给出正超时；超时为 `PoolError::AcquireTimeout`，存活等待者 FIFO，取消等待不会占用租约。`PoolLease::sandbox()` 借用真实后端；租约不可克隆。每次租约只使用一次，`release().await`、Drop 或到期都销毁容器，确认不存在后才按不可变配置补充全新容器，绝不 reset 或跨租用复用脏容器。
+
+基线 `Option<Arc<CodeSnapshot>>` 只能包含调用者明确授权共享的输入；它不是凭据扫描器，也不是进程/内存检查点。容量约束包含 ready、creating、leased、retiring 和 cleanup_required；`status().await` 的这些互斥计数连同关闭后的 absent 合计为 capacity。`ResourceLimits` 是每容器限制，不是宿主聚合资源预留。
+
+`shutdown().await` 关闭准入、取消等待并**撤销尚未归还的租约**，销毁所有池拥有的容器；成功才证明全部已不存在。取消 shutdown future 不会停止清理。最后一个池客户端 Drop 只请求同样的关闭，不证明成功；失败清理仍由后台所有者持有并重试。构造失败若返回 `PoolError::CleanupRequired { pool, source }`，必须保留该 pool 并重试 shutdown，可沿标准错误 source 链查看原因。真实测试与计时示例在 `circus-sandbox/` 执行（默认镜像须已存在，测试请求 32 PIDs）：
+
+```bash
+CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
+  cargo test --locked --test docker_pool -- --ignored
+CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
+  cargo run --locked --example docker_pool
+```
+
+示例分别观察 cold create + restore + start、完整预热和 warm acquire 的 Instant 耗时，并执行基线字节、显式 release/shutdown；不是承诺加速比。Windows 端点可设为 `npipe:////./pipe/dockerDesktopLinuxEngine`；环境变量由所用 shell 显式设置。
 
 ## 命令
 
 同样在 `circus-sandbox/` 下执行：
 
-| 目的                | 命令                                                                                            |
-| ------------------- | ----------------------------------------------------------------------------------------------- |
-| 格式检查 / 格式化   | `cargo fmt --check` / `cargo fmt`                                                               |
-| Clippy              | `cargo clippy --locked --all-targets -- -D warnings`                                            |
-| 构建                | `cargo build --locked`                                                                          |
-| 测试                | `cargo test --locked`                                                                           |
-| 只跑本 API 集成测试 | `cargo test --locked --test workspace`                                                          |
-| 文档                | `RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`                                         |
-| 运行示例            | `cargo run --locked --example workspace`                                                        |
-| 资源请求示例        | `cargo run --locked --example resource_policy`                                                  |
-| 依赖策略            | 先 `cargo install --locked --version 0.20.2 cargo-deny`，再在本目录 `cargo deny --locked check` |
+| 目的              | 命令                                                                                            |
+| ----------------- | ----------------------------------------------------------------------------------------------- |
+| 格式检查 / 格式化 | `cargo fmt --check` / `cargo fmt`                                                               |
+| Clippy            | `cargo clippy --locked --all-targets -- -D warnings`                                            |
+| 构建              | `cargo build --locked`                                                                          |
+| 测试              | `cargo test --locked`                                                                           |
+| 只跑文件 API 测试 | `cargo test --locked --test workspace`                                                          |
+| 文档              | `RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`                                         |
+| 运行示例          | `cargo run --locked --example workspace`                                                        |
+| 资源请求示例      | `cargo run --locked --example resource_policy`                                                  |
+| 镜像解析示例      | `cargo run --locked --example image_environment`                                                |
+| 镜像解析测试      | `cargo test --locked --test docker_environment -- --ignored`                                    |
+| 环境准备示例      | `cargo run --locked --example environment_identity`                                             |
+| 环境准备测试      | `cargo test --locked --test docker_environment_prep -- --ignored`                               |
+| 代码副本测试      | `cargo test --locked --test code_copy`                                                          |
+| 代码副本示例      | `cargo run --locked --example code_copy`                                                        |
+| Git worktree 测试 | `cargo test --locked --test git_worktree`                                                       |
+| Git worktree 示例 | `cargo run --locked --example git_worktree`                                                     |
+| 依赖策略          | 先 `cargo install --locked --version 0.20.2 cargo-deny`，再在本目录 `cargo deny --locked check` |
 
 `cargo test --locked` 覆盖库测试和 `tests/`。要连示例一起编译，使用 `cargo test --locked --all-targets`。不要手改 `Cargo.lock` 来绕过解析失败。
 
@@ -171,11 +276,38 @@ npm --prefix circus-sandbox/qa run architecture
 
 ## 变更
 
-### 未发布：当前能力与完整交付边界
+### 未发布：后端中立的创建 API 与本地镜像解析
 
-- 同步 workspace、受字节/条目预算约束的进程内代码快照、资源请求值校验，以及显式配置的异步 Linux Docker + runc 后端是当前实现；Docker API 的生命周期、命令/文件操作与前提见[后端文档](docs/docker-linux-runc.md)。
-- 进程内代码副本与尚未实现的容器/VM 快照明确区分；Kubernetes、containerd、gVisor、Kata、Firecracker、OCI 环境准备、Git、预启动与池仍保留在完整交付范围，没有 HTTP/RPC 或 Paseo 接入。
-- 本次修订只纠正文档事实，不声明发布、合并、检查或真实运行成功。
+- 公开创建入口改为 `Sandbox::create(BackendConfig, SandboxConfig)`；`SandboxConfig` 只保留 limits、isolation 与 I/O 上限，Docker endpoint/image/runtime 与 Docker 专用校验移入私有 infrastructure。旧的容器 sandbox 公共类型名和 Docker 专用配置/endpoint 公共名称已移除，没有别名。
+- `SandboxStatus` 改为 `phase`、`instance_id` 与 inspected `enforcement` 证据；未报告的字段是 `None`，请求值不再显示为已强制。`SandboxError` 保留可匹配含义：`BackendConfig`、`BackendImageUnavailable { image }`、`Backend { message }`，以及原有的阶段、staging、snapshot 与清理归属错误。
+- 新增私有 `Backend` trait、`DockerBackend` 和静态泛型 `State<B>`；lifecycle 仍独占状态转换、取消、清理回执与 create 未决归属。`Sandbox::create` 在分配前检查后端能力并拒绝不支持的组合。
+- 新增 `environment`：`prepare_docker_image(ImageRequest)` 只 inspect 本地镜像，返回不可变 ID、repo digests 与平台；不拉取、不访问 registry、不读取凭据。平台不匹配和本地缺失都是类型化错误。示例 `image_environment`、真实集成测试 `docker_environment` 与单元测试均不声明 registry pull 或认证能力。
+
+### 未发布：环境准备计划与稳定标识
+
+- 新增 `EnvironmentPlan`/`PrepareStep`：有序、带 pinned version 的准备步骤，使用分开的 argv、逐步超时和输出上限；未固定步骤在连接 Docker 或分配容器前以 `PlanError::UnpinnedInput` 拒绝。
+- `EnvironmentPlan::execute(SandboxConfig)` 通过既有 `Sandbox::create`/`start`/`exec`/`destroy` 执行真实准备，成功或失败都等待实例与 staging 清理确认；失败步骤保留 index、argv、exit code 和有界 stdout/stderr。取消时由 lifecycle Drop 撤销继续清理。
+- 新增 `EnvironmentId`/`TenantDomain`：SHA-256（格式版本 1）对 image ID、repo digests 集合、平台 os/arch/variant、有序 argv/pinned version 和显式 tenant domain 派生不透明十六进制标识；不缓存、不持久化，不包含宿主路径、endpoint、凭据或环境变量。
+- 新增示例 `environment_identity`、真实集成测试 `docker_environment_prep`，并扩展 `docker_environment`；身份派生测试不需要 Docker。
+
+### 未发布：Docker 工作区文件快照
+
+- 新增 `capture_workspace_snapshot` 和 `restore_workspace_snapshot`：使用 Docker archive API 捕获运行中 tmpfs 的普通文件/目录，并替换新建 sandbox 的启动暂存区；复用 `Arc<CodeSnapshot>`，不复制队列中的快照载荷。
+- 运行态捕获临时暂停后恢复，已暂停的 sandbox 保持暂停；独立限制 archive 传输、文件载荷与条目数量，恢复使用目标配置限制。清理失败保留所有权，完整语义见[后端文档](docs/docker-linux-runc.md)。
+- 不代表进程、内存、VM checkpoint 或 Docker commit，不声明本次改动已经通过真实 Docker 验证。
+
+### 未发布：显式授权的代码副本与固定提交 Git 检出
+
+- 新增只读 `CodeSource`，将调用方显式授权的源目录逐文件复制到新建的能力工作区；原有内存 `CodeSnapshot` 不变。
+- 使用单文件限制与单次内容/条目预算，拒绝链接、特殊节点和不可移植名称；清理失败保留部分工作区所有权以供重试。
+- 新增受控宿主 Git 进程、固定 40/64 位提交校验、代码-only 工作区复制和 `GitCleanup` 清理回执；恢复环境隔离边界与清理责任不适用项。
+- 新增 `GitCheckout::create_worktree` 与独立 `GitWorktree`：固定提交的 detached worktree、代码-only 复制、并发 worktree 与幂等清理；`--force` 删除脏 worktree 会丢弃其未提交修改，不删除源仓库、主检出或其他 worktree，也不声明进程/磁盘隔离。
+- 新增真实临时目录公开 API 测试和 `code_copy`、`git_clone`、`git_worktree` 示例；不声明 Git 进程隔离、池、运行时隔离、一致快照或未来写入总配额。
+
+### 未发布：预启动 Docker 租约池
+
+- 新增 `DockerPool`/`PoolLease`：固定容量内预启动新鲜容器，租约单次使用，释放、Drop、TTL 到期或 shutdown 都走真实销毁与确认回收。
+- 新增 `PoolConfig::new(backend, sandbox, capacity, baseline, lease_ttl)`、显式 acquire 超时、FIFO 等待者、容量统计与 `CleanupReceipt` 归属观察；不代表聚合宿主资源预留或进程检查点。
 
 ### 未发布：声明依赖架构门禁
 

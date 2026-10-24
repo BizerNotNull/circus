@@ -2,21 +2,23 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use circus_sandbox::{
-    DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig, ProcessExit, ProcessOutput,
-    ProcessRequest, ResourceLimits, RuntimeName, SandboxConfig,
+    BackendConfig, IoLimits, IsolationConfig, ProcessExit, ProcessOutput, ProcessRequest,
+    ResourceLimits, Sandbox, SandboxConfig,
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sandbox = DockerSandbox::create(SandboxConfig::new(
-        DockerEndpoint::parse(&std::env::var("CIRCUS_DOCKER_ENDPOINT")?)?,
+    let backend = BackendConfig::docker(
+        std::env::var("CIRCUS_DOCKER_ENDPOINT")?,
         std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
-        RuntimeName::runc(),
+        "runc",
+    );
+    let config = SandboxConfig::new(
         ResourceLimits::new(64 * 1024 * 1024, 1000, 32, 8 * 1024 * 1024, 1024 * 1024)?,
         IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
         IoLimits::new(64 * 1024, Duration::from_secs(10))?,
-    )?)
-    .await?;
+    )?;
+    let sandbox = Sandbox::create(backend, config).await?;
     sandbox.start().await?;
     let session = sandbox
         .spawn_process(ProcessRequest {

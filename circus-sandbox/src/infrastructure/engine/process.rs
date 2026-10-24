@@ -7,19 +7,22 @@ use tokio::io::AsyncWrite;
 
 use super::{Engine, EngineError, map_err};
 
+/// One attached process request. The backend supplies the instance identity.
 pub(crate) struct ProcessSpec<'a> {
-    pub container: &'a str,
     pub user: &'a str,
     pub workdir: &'a str,
     pub argv: &'a [String],
     pub env: Vec<String>,
 }
 
+/// Raw, ordered transport chunk. Not a line and may split UTF-8 characters.
 pub(crate) enum ProcessChunk {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
 }
 
+/// Engine-level attach handle. The exec identity is engine-owned and never
+/// crosses the backend boundary.
 pub(crate) struct EngineProcess {
     pub id: String,
     pub input: Pin<Box<dyn AsyncWrite + Send>>,
@@ -29,12 +32,13 @@ pub(crate) struct EngineProcess {
 impl Engine {
     pub(crate) async fn spawn_process(
         &self,
+        container: &str,
         spec: ProcessSpec<'_>,
     ) -> Result<EngineProcess, EngineError> {
         let created = self
             .docker
             .create_exec(
-                spec.container,
+                container,
                 bollard::models::ExecConfig {
                     attach_stdin: Some(true),
                     attach_stdout: Some(true),
@@ -77,6 +81,7 @@ impl Engine {
         })
     }
 
+    /// Confirms the exit status after the attached output stream has ended.
     pub(crate) async fn process_exit(&self, id: &str) -> Result<i64, EngineError> {
         let status = self.docker.inspect_exec(id).await.map_err(map_err)?;
         if status.running != Some(false) {
