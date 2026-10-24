@@ -77,6 +77,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The API answers before the node object is registered; wait for it
+          # to appear first, then for Ready.
+          for _ in $(seq 1 60); do
+            if sudo k3s kubectl get nodes -o name 2>/dev/null | grep -q node; then break; fi
+            sleep 5
+          done
           sudo k3s kubectl wait --for=condition=Ready node --all --timeout=300s
           sudo k3s kubectl get nodes -o wide
           sudo k3s version
