@@ -200,6 +200,7 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
 示例分别观察 cold create + restore + start、完整预热和 warm acquire 的 Instant 耗时，并执行基线字节、显式 release/shutdown；不是承诺加速比。Windows 端点可设为 `npipe:////./pipe/dockerDesktopLinuxEngine`；环境变量由所用 shell 显式设置。
 
 <<<<<<< HEAD
+
 ## 可观测性（调用方计数与 tracing 事件）
 
 `observability::SandboxMetrics` 是调用方显式创建、可克隆的固定计数器句柄；`SandboxMetrics::new()` 分配一组原子计数，`SandboxMetrics::disabled()`（也是 `Default`）不分配且每次记录立即返回。把句柄传给 `Sandbox::create_with_metrics(backend, config, metrics)` 或 `PoolConfig::with_metrics(metrics)` 后，lifecycle、pool 和 backend 会记录 create 成功/失败、create cleanup pending/completed、按 `OperationKind` 与 `OperationOutcome` 分类的操作、cleanup 尝试/失败、pool ready/leased/retired/refilled、snapshot capture/restore，以及按 `TerminationKind` 分类的进程会话结束。`metrics.snapshot()` 返回纯数据 `MetricsSnapshot`；计数饱和而不是回绕，pending cleanup 是永不为负的 gauge。没有句柄时是分支级 no-op，不存在进程级注册表，也不接受租户或调用方自定义标签。
@@ -208,6 +209,7 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
 
 本 crate 是库：它不安装全局 `tracing` subscriber，不提供 exporter，也没有 health/readiness/metrics HTTP endpoint；是否采集、采到哪里由嵌入应用决定。事件与计数只描述已观察到的事实，不表示 Docker 隔离已在当前机器验证。
 =======
+
 ## HTTP API
 
 `circus-sandbox` 的 `http` feature（默认启用）把同一领域 `Sandbox` API 暴露为认证 JSON HTTP 服务。`HttpConfig::new(bind, token, allowed_tenants)` 要求显式非空 bearer token 和非空租户 allow-list，没有环境默认值或匿名模式。每个路由（含 `GET /healthz`）都先验证 token；缺失/错误 token 是 `401`，租户缺失或不在 allow-list 是 `403`。sandbox 与 snapshot id 均为随机 UUID，注册表按租户隔离，跨租户 id 返回 `404`。
@@ -222,7 +224,8 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
 CIRCUS_HTTP_TOKEN=example-token CIRCUS_HTTP_TENANT=local \
   cargo run --locked --example http_api
 ```
->>>>>>> origin/main
+
+> > > > > > > origin/main
 
 ## 命令
 
