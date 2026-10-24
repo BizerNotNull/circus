@@ -1,6 +1,7 @@
 //! Lifecycle owner for one sandbox instance.
 
 mod cleanup;
+mod environment;
 mod input;
 mod model;
 mod operations;

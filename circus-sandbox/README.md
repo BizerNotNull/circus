@@ -2,7 +2,7 @@
 
 Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace 文件能力、受预算约束的进程内代码快照、`runtime::ResourceLimits` 请求校验、本地 OCI 镜像解析，以及后端中立的 `Sandbox::create(BackendConfig, SandboxConfig)` API。该 API 目前只有一个已实现后端：显式本地 Linux Docker Engine + `runc`。workspace 文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；容器后端通过私有 lifecycle/infrastructure 模块运行 Linux 容器，`BackendConfig::Docker` 只是公开的后端选择描述，不暴露 bollard 或 Engine 类型。
 
-容器后端不是通用进程沙箱：`BackendConfig::Docker` 只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。`environment::prepare_docker_image` 只做本地镜像 inspect，把显式 reference 解析成不可变 image ID 并检查平台；它不会访问 registry，也不会读取凭据。Kubernetes、containerd、gVisor、Kata、Firecracker、registry pull/认证、HTTP/RPC 仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker + runc slice 当作全部七领域交付。
+容器后端不是通用进程沙箱：`BackendConfig::Docker` 只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。`environment::prepare_docker_image` 只做本地镜像 inspect，把显式 reference 解析成不可变 image ID 并检查平台；它不会访问 registry，也不会读取凭据。`environment::EnvironmentPlan` 执行显式有序、逐步固定且不经过 shell 的准备工作，并在返回前确认容器与 staging 清理；`environment::EnvironmentId` 从解析后的镜像、平台、固定步骤和显式 tenant 域派生不透明 SHA-256 标识，不提供缓存或持久化。Kubernetes、containerd、gVisor、Kata、Firecracker、registry pull/认证、HTTP/RPC 仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker + runc slice 当作全部七领域交付。
 
 workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Docker 后端不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；Docker 设置的实际效果需要真实 Linux Engine 验证，独立 workspace 仍没有总字节或宿主磁盘配额执行机制。`CodeSource::open` 仅供可信库调用方显式授予源目录读取能力，再复制到新建的 `Workspace`，不是挂载或直接接管源目录。`GitCheckout` 用受控宿主 Git 进程准备固定提交并可创建独立 worktree，属于可信准备流程，不是对抗性进程沙箱。
 
@@ -158,6 +158,24 @@ CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock CIRCUS_DOCKER_ARCH=amd64 \
 
 `prepare_docker_image` 只 inspect 本地镜像并返回不可变 ID；缺失镜像是 `EnvironmentError::ImageNotFound`，不会触发拉取，也不读取任何 registry 凭据。
 
+### 环境准备计划与稳定标识
+
+`EnvironmentPlan::new(ImageRequest, Vec<PrepareStep>)` 构造显式有序的准备计划。`PrepareStep::new(argv, PinnedVersion, timeout, output_limit_bytes)` 只接受分开的 argv，不经过 shell；`PrepareStep::unpinned(...)` 可以表示未固定的步骤，但 `EnvironmentPlan::new` 会在任何 Docker 连接或容器分配之前以 `PlanError::UnpinnedInput { index }` 拒绝它，不会静默接受不可复现的输入。
+
+`EnvironmentPlan::execute(SandboxConfig)` 在私有 lifecycle 钩子中执行真实准备：只 inspect 本地镜像；创建并启动一个 sandbox；按顺序对每一步调用 `Sandbox::exec`，只传入该步 argv、超时和输出上限，不继承宿主环境变量或凭据；最后销毁 sandbox，并等待实例与 staging 清理确认。非零退出返回 `PreparationError::StepFailed { index, argv, exit_code, stdout, stderr, output_limit_bytes, cleanup }`，其中 stdout/stderr 不超过该步配置的 output limit；超时、其他执行失败和清理无法确认也各有类型化错误。调用方丢弃 `execute` future 时，lifecycle owner 的 Drop 撤销会继续后台清理，但被丢弃的 future 不能报告清理结果。
+
+`PreparedEnvironment` 记录解析后的不可变 image ID、repo digests、请求平台、每一步的精确 argv、pinned version 和有界观察输出。`EnvironmentId::new(image_id, repo_digests, platform, steps, tenant)` 或 `PreparedEnvironment::identity(TenantDomain)` 用 SHA-256（FIPS 180-4，规范序列化格式版本 1）对这些输入派生 64 个字符的小写十六进制不透明标识。repo digest 按集合排序比较；步骤顺序、argv、pinned version、image ID/digest、平台 os/arch/variant（Docker inspect 只报告 os/arch，variant 会参与标识但不会被验证）或 tenant domain 任一变化都会产生新标识。tenant domain 是调用方显式提供的安全域，必须非空且不含空白/控制字符，用于避免跨租户碰撞；identity 不包含 endpoint、宿主路径、环境变量、凭据、超时或输出上限。任何输入变化都意味着旧标识失效；等价输入得到相同标识。该模块只派生标识，不实现缓存、registry、持久化或查询服务。
+
+```bash
+CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
+CIRCUS_DOCKER_ARCH=amd64 \
+  cargo test --locked --test docker_environment_prep -- --ignored
+CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock CIRCUS_DOCKER_ARCH=amd64 \
+  cargo run --locked --example environment_identity
+```
+
+真实测试覆盖固定步骤的精确输出、失败步骤的 index/exit code 与容器清理、执行中取消后的清理、未固定输入在分配前被拒绝，以及标识稳定性/敏感性和 Debug/Display 不泄露输入。示例打印观察到的 image ID、步骤输出和 identity hex；`execute` 返回即表示已确认清理。示例的 pinned version 可用 `CIRCUS_PYTHON_VERSION`（默认 `3`）覆盖，tenant domain 可用 `CIRCUS_TENANT`（默认 `example-tenant`）覆盖。身份派生测试不需要 Docker，可直接随 `cargo test --locked` 运行。真实 Docker 用例保持 `#[ignore]`；本检出没有可用的 Docker Engine，因此代码存在不等于已运行验证。
+
 ### 预启动 Docker 池
 
 `PoolConfig::new(backend: BackendConfig, sandbox: SandboxConfig, capacity, baseline, lease_ttl: Duration)` 要求正容量和显式正 TTL；`DockerPool::create(config).await` 在所有槽位完成实际 create、可选基线恢复、start 和 Running 检查后才成功。TTL 从租约分配时开始，不从预热或排队开始；到期请求撤销并中断仍在执行的命令，实际销毁是异步的，必须等待清理确认，不能把到期当作容器已不存在。`acquire(Duration)` 必须给出正超时；超时为 `PoolError::AcquireTimeout`，存活等待者 FIFO，取消等待不会占用租约。`PoolLease::sandbox()` 借用真实后端；租约不可克隆。每次租约只使用一次，`release().await`、Drop 或到期都销毁容器，确认不存在后才按不可变配置补充全新容器，绝不 reset 或跨租用复用脏容器。
@@ -191,6 +209,8 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
 | 资源请求示例      | `cargo run --locked --example resource_policy`                                                  |
 | 镜像解析示例      | `cargo run --locked --example image_environment`                                                |
 | 镜像解析测试      | `cargo test --locked --test docker_environment -- --ignored`                                    |
+| 环境准备示例      | `cargo run --locked --example environment_identity`                                             |
+| 环境准备测试      | `cargo test --locked --test docker_environment_prep -- --ignored`                               |
 | 代码副本测试      | `cargo test --locked --test code_copy`                                                          |
 | 代码副本示例      | `cargo run --locked --example code_copy`                                                        |
 | Git worktree 测试 | `cargo test --locked --test git_worktree`                                                       |
@@ -256,6 +276,13 @@ npm --prefix circus-sandbox/qa run architecture
 - `SandboxStatus` 改为 `phase`、`instance_id` 与 inspected `enforcement` 证据；未报告的字段是 `None`，请求值不再显示为已强制。`SandboxError` 保留可匹配含义：`BackendConfig`、`BackendImageUnavailable { image }`、`Backend { message }`，以及原有的阶段、staging、snapshot 与清理归属错误。
 - 新增私有 `Backend` trait、`DockerBackend` 和静态泛型 `State<B>`；lifecycle 仍独占状态转换、取消、清理回执与 create 未决归属。`Sandbox::create` 在分配前检查后端能力并拒绝不支持的组合。
 - 新增 `environment`：`prepare_docker_image(ImageRequest)` 只 inspect 本地镜像，返回不可变 ID、repo digests 与平台；不拉取、不访问 registry、不读取凭据。平台不匹配和本地缺失都是类型化错误。示例 `image_environment`、真实集成测试 `docker_environment` 与单元测试均不声明 registry pull 或认证能力。
+
+### 未发布：环境准备计划与稳定标识
+
+- 新增 `EnvironmentPlan`/`PrepareStep`：有序、带 pinned version 的准备步骤，使用分开的 argv、逐步超时和输出上限；未固定步骤在连接 Docker 或分配容器前以 `PlanError::UnpinnedInput` 拒绝。
+- `EnvironmentPlan::execute(SandboxConfig)` 通过既有 `Sandbox::create`/`start`/`exec`/`destroy` 执行真实准备，成功或失败都等待实例与 staging 清理确认；失败步骤保留 index、argv、exit code 和有界 stdout/stderr。取消时由 lifecycle Drop 撤销继续清理。
+- 新增 `EnvironmentId`/`TenantDomain`：SHA-256（格式版本 1）对 image ID、repo digests 集合、平台 os/arch/variant、有序 argv/pinned version 和显式 tenant domain 派生不透明十六进制标识；不缓存、不持久化，不包含宿主路径、endpoint、凭据或环境变量。
+- 新增示例 `environment_identity`、真实集成测试 `docker_environment_prep`，并扩展 `docker_environment`；身份派生测试不需要 Docker。
 
 ### 未发布：Docker 工作区文件快照
 

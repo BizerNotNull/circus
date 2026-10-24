@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use circus_sandbox::environment::{EnvironmentError, ImagePlatform, ImageRequest, prepare_docker_image};
+use circus_sandbox::environment::{
+    EnvironmentError, EnvironmentId, EnvironmentPlan, ImagePlatform, ImageRequest, PlanError,
+    PinnedVersion, PrepareStep, TenantDomain, prepare_docker_image,
+};
 use circus_sandbox::{
     BackendConfig, CommandRequest, IoLimits, IsolationConfig, ResourceLimits, Sandbox,
     SandboxConfig, SandboxPhase,
@@ -126,5 +129,84 @@ async fn local_platform_mismatch_is_an_error() -> TestResult {
         matches!(result, Err(EnvironmentError::PlatformMismatch { actual_os, actual_architecture, .. })
         if actual_os == actual.os() && actual_architecture == actual.architecture())
     );
+    Ok(())
+}
+
+fn unconnected_request() -> TestResult<ImageRequest> {
+    Ok(ImageRequest::new(
+        "unix:///var/run/docker.sock",
+        "python:3.12-slim",
+        ImagePlatform::new("linux", "amd64")?,
+        Duration::from_secs(10),
+    )?)
+}
+
+fn pinned_step(version: &str) -> TestResult<PrepareStep> {
+    Ok(PrepareStep::new(
+        vec!["python3".into(), "--version".into()],
+        PinnedVersion::new(version)?,
+        Duration::from_secs(10),
+        1024,
+    )?)
+}
+
+#[test]
+fn plan_rejects_unpinned_step_before_docker() -> TestResult {
+    let unpinned = PrepareStep::unpinned(
+        vec!["python3".into(), "--version".into()],
+        Duration::from_secs(10),
+        1024,
+    )?;
+    let result = EnvironmentPlan::new(unconnected_request()?, vec![unpinned]);
+    assert!(matches!(
+        result,
+        Err(PlanError::UnpinnedInput { index: 0 })
+    ));
+    Ok(())
+}
+
+#[test]
+fn identity_is_stable_and_scoped_to_tenant() -> TestResult {
+    let platform = ImagePlatform::new("linux", "amd64")?;
+    let step = pinned_step("3.12.1")?;
+    let first = EnvironmentId::new(
+        "sha256:1111",
+        vec!["repo@sha256:aaa".into()],
+        platform.clone(),
+        vec![step.clone()],
+        TenantDomain::new("tenant-a")?,
+    )?;
+    let repeated = EnvironmentId::new(
+        "sha256:1111",
+        vec!["repo@sha256:aaa".into()],
+        platform.clone(),
+        vec![step.clone()],
+        TenantDomain::new("tenant-a")?,
+    )?;
+    let other_tenant = EnvironmentId::new(
+        "sha256:1111",
+        vec!["repo@sha256:aaa".into()],
+        platform,
+        vec![step],
+        TenantDomain::new("tenant-b")?,
+    )?;
+    assert_eq!(first, repeated);
+    assert_ne!(first, other_tenant);
+    assert_eq!(first.to_string().len(), 64);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires explicit real Linux Docker Engine and local Python image"]
+async fn resolved_image_supports_plan_identity() -> TestResult {
+    let image = prepare_docker_image(request(local_image())?).await?;
+    let plan = EnvironmentPlan::new(request(local_image())?, vec![pinned_step("3")?])?;
+    let first = plan.identity(&image, TenantDomain::new("tenant-a")?)?;
+    let second = plan.identity(&image, TenantDomain::new("tenant-b")?)?;
+    assert_ne!(first, second);
+    assert_eq!(first.to_string().len(), 64);
+    assert!(first.to_string().bytes().all(|byte| {
+        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+    }));
     Ok(())
 }
