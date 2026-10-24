@@ -85,7 +85,9 @@ cargo run --locked --example resource_policy
 
 ## Linux Docker + runc
 
-交互进程入口为 `DockerSandbox::spawn_process(ProcessRequest)`。返回的 `ProcessSession` 支持持续 stdin、分开的 stdout/stderr 流、EOF、退出通知和取消；每个沙箱同时允许一个交互进程，运行时仍可读写文件、查询状态及销毁。输出背压、超时、取消与工作区保留语义见下述后端文档。可运行示例为 `examples/interactive_process.rs`；这还不包含 Agent 镜像、模型通道或 Paseo 接入。
+可手动构建的 [Codex Agent 镜像](images/codex/README.md) 固定 CLI 与 Node 版本，包含 Python 3、Git、ripgrep，并提供可写 HOME/缓存/临时目录的启动脚本。它沿用当前禁网策略，验收范围是工具和 Codex stdio 离线启动；模型通道与 Paseo 接入仍待实现。
+
+交互进程入口为 `DockerSandbox::spawn_process(ProcessRequest)`。返回的 `ProcessSession` 支持持续 stdin、分开的 stdout/stderr 流、EOF、退出通知和取消；每个沙箱同时允许一个交互进程，运行时仍可读写文件、查询状态及销毁。输出背压、超时、取消与工作区保留语义见下述后端文档。可运行示例为 `examples/interactive_process.rs`；模型通道与 Paseo 接入仍待实现。
 
 容器后端的配置、生命周期、文件传输和已知限制见 [Linux Docker + runc 文档](docs/docker-linux-runc.md)，设计取舍见 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。最小前置条件：Linux Docker Engine（本地 Unix socket；Windows 开发机可使用 Linux Docker Desktop named pipe）、已存在的 Linux 镜像、镜像内 Python 3，以及 cgroup v2 用于运行集成测试。镜像不会自动拉取；声明 `VOLUME` 的镜像不支持。
 
