@@ -410,7 +410,13 @@ async fn unpack_layer(
             snapshotter: snapshotter.to_string(),
             name: key.to_string(),
             key: key.to_string(),
-            labels: HashMap::new(),
+            // Referencing the layer content keeps the committed snapshot alive
+            // under containerd's garbage collector; an unlabelled snapshot can
+            // be reclaimed while another sandbox is mounting it.
+            labels: HashMap::from([(
+                "containerd.io/gc.ref.content.0".to_string(),
+                descriptor.digest.clone(),
+            )]),
         },
         namespace
     );

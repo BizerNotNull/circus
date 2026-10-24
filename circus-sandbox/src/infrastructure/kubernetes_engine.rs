@@ -99,9 +99,10 @@ impl KubernetesEngine {
         self.bounded(self.pods.list(&ListParams::default().limit(1)))
             .await
             .map_err(PrepareError::Engine)?;
+        let prepare_nonce = uuid::Uuid::new_v4().to_string();
         let mut pod = kubernetes_pod::build(
             "circus-sandbox-prepare",
-            "prepare",
+            &prepare_nonce,
             spec,
             &self.image,
             service_account,
@@ -399,7 +400,8 @@ mod tests {
             .collect(),
         );
         assert!(owned_by(&pod, "name", &owner));
+        let foreign = uuid::Uuid::new_v4().to_string();
         assert!(!owned_by(&pod, "other", &owner));
-        assert!(!owned_by(&pod, "name", "other"));
+        assert!(!owned_by(&pod, "name", &foreign));
     }
 }

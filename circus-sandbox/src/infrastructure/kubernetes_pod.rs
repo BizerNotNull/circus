@@ -533,11 +533,12 @@ mod tests {
             "python:3.12-slim",
             None,
         );
+        let foreign = uuid::Uuid::new_v4().to_string();
         assert!(
             verify(
                 &pod,
                 "circus-sandbox-test",
-                "other",
+                &foreign,
                 &spec,
                 "python:3.12-slim"
             )
