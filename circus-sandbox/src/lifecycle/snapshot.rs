@@ -191,9 +191,13 @@ pub(super) async fn capture<B: Backend>(
     if !matches!(state.phase, SandboxPhase::Running | SandboxPhase::Paused) {
         return Err(phase_err(state, "capture_workspace_snapshot"));
     }
-    let resume_after = state.phase == SandboxPhase::Running;
-    if resume_after {
-        match deadline.network(pause(state)).await {
+    // Enumeration runs through `docker exec`, which Docker rejects while a
+    // container is paused. A running source is therefore read live (the
+    // manifest and per-file size checks still fail closed on concurrent
+    // change); a user-paused source is briefly resumed and paused again.
+    let restore_pause = state.phase == SandboxPhase::Paused;
+    if restore_pause {
+        match deadline.network(resume(state)).await {
             Ok(result) => result?,
             Err(cancelled) => {
                 return interrupted(
@@ -224,7 +228,7 @@ pub(super) async fn capture<B: Backend>(
         Ok(Err(err)) => {
             return match manifest_rejection(&err, budget) {
                 Some(snapshot) => {
-                    settle_capture(state, resume_after, &deadline, Err(snapshot)).await
+                    settle_capture(state, restore_pause, &deadline, Err(snapshot)).await
                 }
                 None => cleanup_engine_error(state, err).await,
             };
@@ -242,7 +246,7 @@ pub(super) async fn capture<B: Backend>(
     // Declared metadata is checked before any payload byte is transferred, in
     // this order: entry count, per-file cap, aggregate bytes.
     if let Err(snapshot) = check_budgets(&entries, max_file, budget) {
-        return settle_capture(state, resume_after, &deadline, Err(snapshot)).await;
+        return settle_capture(state, restore_pause, &deadline, Err(snapshot)).await;
     }
     let mut captured = Vec::new();
     for entry in entries {
@@ -262,7 +266,7 @@ pub(super) async fn capture<B: Backend>(
                     Ok(Err(err)) => {
                         return match payload_rejection(&err, max_file) {
                             Some(snapshot) => {
-                                settle_capture(state, resume_after, &deadline, Err(snapshot)).await
+                                settle_capture(state, restore_pause, &deadline, Err(snapshot)).await
                             }
                             None => cleanup_engine_error(state, err).await,
                         };
@@ -284,7 +288,7 @@ pub(super) async fn capture<B: Backend>(
                             entry.path()
                         ),
                     };
-                    return settle_capture(state, resume_after, &deadline, Err(snapshot)).await;
+                    return settle_capture(state, restore_pause, &deadline, Err(snapshot)).await;
                 }
                 SnapshotBody::File(bytes)
             }
@@ -295,24 +299,24 @@ pub(super) async fn capture<B: Backend>(
         });
     }
     let snapshot = CodeSnapshot::from_entries(max_file, captured);
-    settle_capture(state, resume_after, &deadline, snapshot)
+    settle_capture(state, restore_pause, &deadline, snapshot)
         .await
         .map(Arc::new)
 }
 
-/// Resumes a source we paused, then reports `result`.
+/// Restores a user-paused source to paused, then reports `result`.
 ///
 /// A domain failure never destroys the instance: the workspace is readable but
-/// not snapshottable. A resume failure keeps both the failure and the cause
+/// not snapshottable. A re-pause failure keeps both the failure and the cause
 /// visible, as the previous capture path did.
 async fn settle_capture<B: Backend, T>(
     state: &mut State<B>,
-    resume_after: bool,
+    restore_pause: bool,
     deadline: &Deadline,
     result: Result<T, SnapshotError>,
 ) -> Result<T, SandboxError> {
-    if resume_after {
-        match deadline.network(resume(state)).await {
+    if restore_pause {
+        match deadline.network(pause(state)).await {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
                 return match result {

@@ -292,7 +292,7 @@ npm --prefix circus-sandbox/qa run architecture
 ### 未发布：Docker 工作区文件快照
 
 - 新增 `capture_workspace_snapshot` 和 `restore_workspace_snapshot`：通过受限 guest helper 枚举运行中 tmpfs 的普通文件/目录（每项逐文件读取），并替换新建 sandbox 的启动暂存区；复用 `Arc<CodeSnapshot>`，不复制队列中的快照载荷。Docker archive API 对 `--tmpfs` 只返回挂载点本身，因此不能用于捕获。
-- 运行态捕获临时暂停后恢复，已暂停的 sandbox 保持暂停；独立限制清单传输、文件载荷与条目数量，预算按条目数、单文件上限、总字节的顺序在读取任何文件前检查；不安全节点与非可移植名以类型化快照错误失败并保留可用 sandbox。恢复使用目标配置限制。清理失败保留所有权，完整语义见[后端文档](docs/docker-linux-runc.md)。
+- 运行态容器保持运行：`docker exec` 在暂停容器上会被拒绝，因此捕获是活动工作区的尽力一致读取，不是冻结检查点；清单与逐个文件长度校验在并发修改时失败关闭。已暂停的 sandbox 会短暂恢复枚举后重新暂停。独立限制清单传输、文件载荷与条目数量，预算按条目数、单文件上限、总字节的顺序在读取任何文件前检查；不安全节点与非可移植名以类型化快照错误失败并保留可用 sandbox。恢复使用目标配置限制。清理失败保留所有权，完整语义见[后端文档](docs/docker-linux-runc.md)。
 - 不代表进程、内存、VM checkpoint 或 Docker commit，不声明本次改动已经通过真实 Docker 验证。
 
 ### 未发布：显式授权的代码副本与固定提交 Git 检出
