@@ -35,6 +35,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             docker.image(),
             docker.runtime()
         ),
+        BackendConfig::Containerd(containerd) => println!(
+            "backend socket={} namespace={} snapshotter={} image={} runtime={}",
+            containerd.socket(),
+            containerd.namespace(),
+            containerd.snapshotter(),
+            containerd.image(),
+            containerd.runtime()
+        ),
     }
 
     let error = match Sandbox::create(

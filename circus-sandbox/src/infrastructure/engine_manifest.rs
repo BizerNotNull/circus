@@ -42,7 +42,7 @@ impl WorkspaceEntry {
 }
 
 /// Decodes one complete helper response into strictly ordered entries.
-pub(super) fn decode(bytes: &[u8]) -> Result<Vec<WorkspaceEntry>, EngineError> {
+pub(crate) fn decode(bytes: &[u8]) -> Result<Vec<WorkspaceEntry>, EngineError> {
     let mut entries: Vec<WorkspaceEntry> = Vec::new();
     let mut rest = bytes;
     while !rest.is_empty() {
