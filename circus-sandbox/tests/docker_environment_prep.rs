@@ -70,16 +70,14 @@ fn docker() -> TestResult<bollard::Docker> {
 
 async fn owned_ids(docker: &bollard::Docker) -> TestResult<HashSet<String>> {
     let containers = docker
-        .list_containers(Some(
-            bollard::query_parameters::ListContainersOptions {
-                all: true,
-                filters: Some(HashMap::from([(
-                    "label".to_string(),
-                    vec![OWNER_LABEL_KEY.to_string()],
-                )])),
-                ..Default::default()
-            },
-        ))
+        .list_containers(Some(bollard::query_parameters::ListContainersOptions {
+            all: true,
+            filters: Some(HashMap::from([(
+                "label".to_string(),
+                vec![OWNER_LABEL_KEY.to_string()],
+            )])),
+            ..Default::default()
+        }))
         .await?;
     Ok(containers
         .into_iter()
@@ -100,14 +98,20 @@ async fn wait_new_owned(docker: &bollard::Docker, before: &HashSet<String>) -> T
 async fn wait_running(docker: &bollard::Docker, id: &str) -> TestResult {
     loop {
         match docker.inspect_container(id, None).await {
-            Ok(info) if info.state.and_then(|state| state.running) == Some(true) => return Ok(()),
-            Ok(_) => {}
+            Ok(info) => {
+                let running = info
+                    .state
+                    .as_ref()
+                    .and_then(|state| state.running)
+                    .unwrap_or(false);
+                if running {
+                    return Ok(());
+                }
+            }
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
             }) => {
-                return Err("container disappeared before it started"
-                    .to_string()
-                    .into());
+                return Err("container disappeared before it started".to_string().into());
             }
             Err(error) => return Err(error.into()),
         }
@@ -162,24 +166,32 @@ async fn pinned_preparation_records_exact_output_and_releases() -> TestResult {
     assert!(!prepared.image().id().is_empty());
     assert_eq!(prepared.platform().clone(), platform()?);
     assert_eq!(prepared.observations()[0].index(), 0);
-    assert_eq!(prepared.observations()[0].stdout(), b"prepared\n".as_slice());
+    assert_eq!(
+        prepared.observations()[0].stdout(),
+        b"prepared\n".as_slice()
+    );
     assert_eq!(prepared.observations()[0].stderr(), b"".as_slice());
-    assert!(prepared.observations()[1].stdout().starts_with(b"Python 3."));
+    assert!(
+        prepared.observations()[1]
+            .stdout()
+            .starts_with(b"Python 3.")
+    );
     assert_eq!(
         prepared.observations()[0]
             .argv()
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        vec!["python3", "-c", "import sys; sys.stdout.write('prepared\\n')"]
+        vec![
+            "python3",
+            "-c",
+            "import sys; sys.stdout.write('prepared\\n')"
+        ]
     );
 
     let identity = prepared.identity(TenantDomain::new("tenant-a")?)?;
     assert_eq!(identity.to_string().len(), 64);
-    assert_ne!(
-        identity,
-        prepared.identity(TenantDomain::new("tenant-b")?)?
-    );
+    assert_ne!(identity, prepared.identity(TenantDomain::new("tenant-b")?)?);
 
     let after = owned_ids(&docker).await?;
     assert!(
@@ -222,11 +234,7 @@ async fn failing_step_reports_index_exit_and_releases() -> TestResult {
             assert_eq!(index, 1);
             assert_eq!(
                 argv,
-                vec![
-                    "python3".to_string(),
-                    "-c".to_string(),
-                    failing.to_string()
-                ]
+                vec!["python3".to_string(), "-c".to_string(), failing.to_string()]
             );
             assert_eq!(exit_code, 7);
             assert_eq!(stdout, b"out");
@@ -289,10 +297,7 @@ async fn unpinned_step_is_rejected_before_allocation() -> TestResult {
         1024,
     )?;
     let result = EnvironmentPlan::new(request()?, vec![unpinned]);
-    assert!(matches!(
-        result,
-        Err(PlanError::UnpinnedInput { index: 0 })
-    ));
+    assert!(matches!(result, Err(PlanError::UnpinnedInput { index: 0 })));
 
     let after = owned_ids(&docker).await?;
     assert!(

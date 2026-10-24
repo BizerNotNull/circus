@@ -23,9 +23,9 @@
 
 use std::fmt;
 
+use super::ImagePlatform;
 use super::plan::PrepareStep;
 use super::sha256::Sha256;
-use super::ImagePlatform;
 
 const DOMAIN: &[u8] = b"circus-sandbox.environment-identity";
 const FORMAT_VERSION: u64 = 1;
@@ -300,7 +300,12 @@ mod tests {
         );
         assert_eq!(first, second);
         assert_eq!(first.to_string().len(), 64);
-        assert!(first.to_string().chars().all(|value| value.is_ascii_hexdigit()));
+        assert!(
+            first
+                .to_string()
+                .chars()
+                .all(|value| value.is_ascii_hexdigit())
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use circus_sandbox::environment::{
-    EnvironmentError, EnvironmentId, EnvironmentPlan, ImagePlatform, ImageRequest, PlanError,
-    PinnedVersion, PrepareStep, TenantDomain, prepare_docker_image,
+    EnvironmentError, EnvironmentId, EnvironmentPlan, ImagePlatform, ImageRequest, PinnedVersion,
+    PlanError, PrepareStep, TenantDomain, prepare_docker_image,
 };
 use circus_sandbox::{
     BackendConfig, CommandRequest, IoLimits, IsolationConfig, ResourceLimits, Sandbox,
@@ -158,10 +158,7 @@ fn plan_rejects_unpinned_step_before_docker() -> TestResult {
         1024,
     )?;
     let result = EnvironmentPlan::new(unconnected_request()?, vec![unpinned]);
-    assert!(matches!(
-        result,
-        Err(PlanError::UnpinnedInput { index: 0 })
-    ));
+    assert!(matches!(result, Err(PlanError::UnpinnedInput { index: 0 })));
     Ok(())
 }
 
@@ -205,8 +202,11 @@ async fn resolved_image_supports_plan_identity() -> TestResult {
     let second = plan.identity(&image, TenantDomain::new("tenant-b")?)?;
     assert_ne!(first, second);
     assert_eq!(first.to_string().len(), 64);
-    assert!(first.to_string().bytes().all(|byte| {
-        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
-    }));
+    assert!(
+        first
+            .to_string()
+            .bytes()
+            .all(|byte| { byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) })
+    );
     Ok(())
 }

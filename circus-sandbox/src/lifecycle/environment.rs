@@ -95,21 +95,21 @@ async fn create_sandbox(
 ) -> Result<Sandbox, PreparationError> {
     match Sandbox::create(backend, config).await {
         Ok(sandbox) => Ok(sandbox),
-        Err(SandboxError::CreationCleanupRequired { source, cleanup, .. }) => {
-            match tokio::time::timeout(CLEANUP_CONFIRM, cleanup.wait()).await {
-                Ok(Ok(_)) => Err(PreparationError::Sandbox {
-                    detail: source.to_string(),
-                }),
-                Ok(Err(error)) => Err(PreparationError::Cleanup {
-                    detail: format!("creation failed: {source}; cleanup: {error}"),
-                }),
-                Err(_) => Err(PreparationError::Cleanup {
-                    detail: format!(
-                        "creation failed: {source}; cleanup not confirmed within {CLEANUP_CONFIRM:?}"
-                    ),
-                }),
-            }
-        }
+        Err(SandboxError::CreationCleanupRequired {
+            source, cleanup, ..
+        }) => match tokio::time::timeout(CLEANUP_CONFIRM, cleanup.wait()).await {
+            Ok(Ok(_)) => Err(PreparationError::Sandbox {
+                detail: source.to_string(),
+            }),
+            Ok(Err(error)) => Err(PreparationError::Cleanup {
+                detail: format!("creation failed: {source}; cleanup: {error}"),
+            }),
+            Err(_) => Err(PreparationError::Cleanup {
+                detail: format!(
+                    "creation failed: {source}; cleanup not confirmed within {CLEANUP_CONFIRM:?}"
+                ),
+            }),
+        },
         Err(error) => Err(PreparationError::Sandbox {
             detail: error.to_string(),
         }),
@@ -271,8 +271,6 @@ async fn release(sandbox: &Sandbox) -> Result<(), String> {
             Ok(()) => error.to_string(),
             Err(destroy) => format!("destroy failed: {destroy}; receipt: {error}"),
         }),
-        Err(_) => Err(format!(
-            "cleanup not confirmed within {CLEANUP_CONFIRM:?}"
-        )),
+        Err(_) => Err(format!("cleanup not confirmed within {CLEANUP_CONFIRM:?}")),
     }
 }

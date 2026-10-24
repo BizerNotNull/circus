@@ -269,7 +269,9 @@ pub enum EnvironmentError {
         "unsupported image platform {os}/{architecture}; explicit Linux Docker architecture required"
     )]
     InvalidPlatform { os: String, architecture: String },
-    #[error("platform variant must be nonempty without whitespace or control characters: {variant}")]
+    #[error(
+        "platform variant must be nonempty without whitespace or control characters: {variant}"
+    )]
     InvalidPlatformVariant { variant: String },
     #[error("image {reference} is absent from the local daemon cache; this crate does not pull")]
     ImageNotFound { reference: String },

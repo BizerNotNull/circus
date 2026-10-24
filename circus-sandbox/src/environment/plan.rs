@@ -565,19 +565,14 @@ mod tests {
             ),
             Err(PlanError::InvalidOutputLimit)
         );
-        assert_eq!(
-            PinnedVersion::new(" 1"),
-            Err(PlanError::InvalidVersion)
-        );
+        assert_eq!(PinnedVersion::new(" 1"), Err(PlanError::InvalidVersion));
     }
 
     #[test]
     fn plan_identity_tracks_steps_and_tenant_without_host_paths() {
-        let plan = EnvironmentPlan::new(
-            request(),
-            vec![pinned(&["python3", "--version"], "3.12.1")],
-        )
-        .expect("valid plan");
+        let plan =
+            EnvironmentPlan::new(request(), vec![pinned(&["python3", "--version"], "3.12.1")])
+                .expect("valid plan");
         let image = PreparedImage {
             id: "sha256:1111".into(),
             repo_digests: vec!["python@sha256:2222".into()],
