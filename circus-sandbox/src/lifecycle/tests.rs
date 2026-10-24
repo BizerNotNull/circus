@@ -87,7 +87,7 @@ use crate::infrastructure::{
 };
 use crate::observability::SandboxMetrics;
 use crate::runtime::{IoLimits, IsolationConfig, ResourceLimits, SandboxConfig};
-use crate::workspace::{Workspace, WorkspaceError};
+use crate::workspace::{SnapshotBudget, Workspace, WorkspaceError};
 
 use super::staging::TransferFailure;
 
@@ -106,6 +106,7 @@ struct RecordedUpload {
 
 #[derive(Clone)]
 struct FakeBackend {
+    capabilities: Capabilities,
     recoveries: Arc<Mutex<VecDeque<Recovered>>>,
     recover_calls: Arc<AtomicUsize>,
     start_calls: Arc<AtomicUsize>,
@@ -123,6 +124,12 @@ struct FakeBackend {
 impl FakeBackend {
     fn new() -> Self {
         Self {
+            capabilities: Capabilities {
+                pause_resume: true,
+                file_transport: true,
+                workspace_snapshot: true,
+                spawn_process: true,
+            },
             recoveries: Arc::new(Mutex::new(VecDeque::new())),
             recover_calls: Arc::new(AtomicUsize::new(0)),
             start_calls: Arc::new(AtomicUsize::new(0)),
@@ -136,6 +143,11 @@ impl FakeBackend {
             live_upload_bytes: Arc::new(AtomicUsize::new(0)),
             max_live_upload_bytes: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    fn with_capabilities(mut self, capabilities: Capabilities) -> Self {
+        self.capabilities = capabilities;
+        self
     }
 
     fn uploads(&self) -> Vec<RecordedUpload> {
@@ -186,11 +198,7 @@ impl Backend for FakeBackend {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            pause_resume: true,
-            file_transport: true,
-            workspace_snapshot: true,
-        }
+        self.capabilities
     }
 
     fn prepare(&self) -> impl Future<Output = Result<(), PrepareError>> + Send {
@@ -979,4 +987,105 @@ async fn timed_out_start_transfer_never_reports_running_and_retains_cleanup() {
         sandbox.status().await.unwrap().phase,
         SandboxPhase::Destroyed
     );
+}
+
+#[tokio::test]
+async fn creation_succeeds_without_pause_snapshot_or_process_capabilities() {
+    let backend = FakeBackend::new().with_capabilities(Capabilities {
+        pause_resume: false,
+        file_transport: true,
+        workspace_snapshot: false,
+        spawn_process: false,
+    });
+    let sandbox = Sandbox::create_for_test(backend, config())
+        .await
+        .expect("a workload backend without optional capabilities still creates");
+    sandbox.start().await.expect("start is supported");
+
+    let error = sandbox.pause().await.expect_err("pause is unsupported");
+    assert!(matches!(
+        error,
+        SandboxError::UnsupportedCapability {
+            capability: "pause and resume"
+        }
+    ));
+    let error = sandbox.resume().await.expect_err("resume is unsupported");
+    assert!(matches!(
+        error,
+        SandboxError::UnsupportedCapability {
+            capability: "pause and resume"
+        }
+    ));
+    // The rejected transitions neither changed phase nor destroyed the sandbox.
+    assert_eq!(sandbox.status().await.unwrap().phase, SandboxPhase::Running);
+
+    let error = sandbox
+        .capture_workspace_snapshot(SnapshotBudget::new(1024, 4).unwrap(), 1024)
+        .await
+        .expect_err("capture is unsupported");
+    assert!(matches!(
+        error,
+        SandboxError::UnsupportedCapability {
+            capability: "capture a workspace snapshot"
+        }
+    ));
+    let snapshot = Workspace::new(1024)
+        .unwrap()
+        .capture_code_snapshot(SnapshotBudget::new(1024, 4).unwrap())
+        .unwrap();
+    let error = sandbox
+        .restore_workspace_snapshot(Arc::new(snapshot))
+        .await
+        .expect_err("restore is unsupported");
+    assert!(matches!(
+        error,
+        SandboxError::UnsupportedCapability {
+            capability: "restore a workspace snapshot"
+        }
+    ));
+
+    let error = match sandbox
+        .spawn_process(ProcessRequest {
+            argv: vec![
+                "python3".to_string(),
+                "-c".to_string(),
+                "print(1)".to_string(),
+            ],
+            working_dir: None,
+            env: std::collections::BTreeMap::new(),
+            timeout: Duration::from_secs(1),
+            output_limit_bytes: 1024,
+        })
+        .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("processes are unsupported"),
+    };
+    assert!(matches!(
+        error,
+        SandboxError::UnsupportedCapability {
+            capability: "attach an interactive process"
+        }
+    ));
+    assert_eq!(sandbox.status().await.unwrap().phase, SandboxPhase::Running);
+    sandbox.destroy().await.expect("destroy succeeds");
+}
+
+#[tokio::test]
+async fn backend_without_file_transport_is_rejected_before_allocation() {
+    let backend = FakeBackend::new().with_capabilities(Capabilities {
+        pause_resume: false,
+        file_transport: false,
+        workspace_snapshot: false,
+        spawn_process: false,
+    });
+    let error = Sandbox::create_for_test(backend, config())
+        .await
+        .expect_err("creation needs guest file transport");
+    assert!(matches!(
+        error,
+        SandboxError::UnsupportedCapability {
+            capability: "transfer guest files"
+        }
+    ));
 }

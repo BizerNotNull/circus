@@ -34,6 +34,9 @@ impl Fixture {
             BackendConfig::Containerd(_) => {
                 panic!("docker fixture received a containerd descriptor")
             }
+            BackendConfig::Kubernetes(_) => {
+                panic!("docker fixture received a Kubernetes descriptor")
+            }
         };
         let config = SandboxConfig::new(
             ResourceLimits::new(64 * 1024 * 1024, 1000, 32, 8 * 1024 * 1024, 1024 * 1024)?,

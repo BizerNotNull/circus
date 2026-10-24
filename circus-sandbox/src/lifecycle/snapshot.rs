@@ -14,7 +14,8 @@ use crate::workspace::{
 };
 
 use super::operations::{
-    cleanup_engine_error, destroy_report, need, pause, phase_err, required_id, resume, spawn_block,
+    cleanup_engine_error, destroy_report, need, pause, phase_err, require_capability, required_id,
+    resume, spawn_block,
 };
 use super::{Op, Sandbox, SandboxError, SandboxOperation, SandboxPhase, State};
 
@@ -166,6 +167,10 @@ pub(super) async fn capture<B: Backend>(
     max_manifest_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<Arc<CodeSnapshot>, SandboxError> {
+    require_capability(
+        state.backend.capabilities().workspace_snapshot,
+        "capture a workspace snapshot",
+    )?;
     let deadline = Deadline::new(state, cancel);
     if state.phase == SandboxPhase::Created {
         let workspace = Arc::clone(&state.workspace);
@@ -441,6 +446,10 @@ pub(super) async fn restore<B: Backend>(
     snapshot: Arc<CodeSnapshot>,
     cancel: &CancellationToken,
 ) -> Result<(), SandboxError> {
+    require_capability(
+        state.backend.capabilities().workspace_snapshot,
+        "restore a workspace snapshot",
+    )?;
     need(state, SandboxPhase::Created, "restore_workspace_snapshot")?;
     let deadline = Deadline::new(state, cancel);
     let max_file = state.config.limits().max_file_bytes();

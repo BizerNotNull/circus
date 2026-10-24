@@ -64,6 +64,7 @@ impl Backend for FakeBackend {
             pause_resume: true,
             file_transport: true,
             workspace_snapshot: true,
+            spawn_process: true,
         }
     }
 

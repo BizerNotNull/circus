@@ -112,9 +112,10 @@ mod workspace;
 pub use api::{
     BackendConfig, BackendConfigError, CleanupFailure, CleanupReceipt, CleanupReport, CommandError,
     CommandOutput, CommandRequest, ConfigError, ContainerdBackendConfig, DockerBackendConfig,
-    EnforcementReport, IoLimits, IsolationConfig, OutputPhase, Ownership, ProcessError,
-    ProcessExit, ProcessOutput, ProcessRequest, ProcessSession, ProcessTermination, Sandbox,
-    SandboxConfig, SandboxError, SandboxOperation, SandboxPhase, SandboxStatus, StagingError,
+    EnforcementReport, IoLimits, IsolationConfig, KubernetesBackendConfig, OutputPhase, Ownership,
+    ProcessError, ProcessExit, ProcessOutput, ProcessRequest, ProcessSession, ProcessTermination,
+    Sandbox, SandboxConfig, SandboxError, SandboxOperation, SandboxPhase, SandboxStatus,
+    StagingError,
 };
 #[doc(inline)]
 pub use workspace::{

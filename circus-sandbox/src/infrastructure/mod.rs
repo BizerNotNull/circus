@@ -19,6 +19,16 @@ mod docker;
 mod engine;
 pub(crate) mod git_process;
 mod guest_transport;
+#[cfg(feature = "kubernetes")]
+mod kubernetes;
+#[cfg(feature = "kubernetes")]
+mod kubernetes_config;
+#[cfg(feature = "kubernetes")]
+mod kubernetes_engine;
+#[cfg(feature = "kubernetes")]
+mod kubernetes_io;
+#[cfg(feature = "kubernetes")]
+mod kubernetes_pod;
 
 #[cfg(test)]
 pub(crate) use backend::Capabilities;
@@ -35,3 +45,7 @@ pub(crate) use engine::{
 };
 #[cfg(test)]
 pub(crate) use engine::{ExecDone, HostReport, OutputLimit, PolicyMismatch};
+#[cfg(feature = "kubernetes")]
+pub(crate) use kubernetes::KubernetesBackend;
+#[cfg(feature = "kubernetes")]
+pub(crate) use kubernetes_config::{KubernetesConfig, KubernetesConfigError};

@@ -9,7 +9,7 @@ pub use crate::lifecycle::{
 
 pub use crate::runtime::{
     BackendConfig, BackendConfigError, ConfigError, ContainerdBackendConfig, DockerBackendConfig,
-    IoLimits, IsolationConfig, SandboxConfig,
+    IoLimits, IsolationConfig, KubernetesBackendConfig, SandboxConfig,
 };
 
 pub use crate::workspace::{CodeSnapshot, SnapshotBudget, SnapshotError};

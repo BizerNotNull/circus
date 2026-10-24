@@ -1,9 +1,10 @@
 //! Confined guest file-helper protocol shared by every backend adapter.
 //!
 //! The Python helper (`guest_files.py`) is the single implementation of the
-//! workspace file protocol and its exit-status contract. Docker and containerd
-//! adapters only build its argv and map its exit status, so the two backends
-//! cannot drift apart on path confinement, limits, or error classification.
+//! workspace file protocol and its exit-status contract. Docker, containerd,
+//! and Kubernetes adapters only build its argv and map its exit status, so the
+//! backends cannot drift apart on path confinement, limits, or error
+//! classification.
 
 use super::engine::{EngineError, EngineErrorKind, file_error};
 
