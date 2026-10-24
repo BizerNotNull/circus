@@ -62,14 +62,15 @@ async fn run(
     command: GitCommand,
     cancellation: CancellationToken,
 ) -> Result<ProcessOutput, ProcessError> {
-    #[cfg(not(any(target_os = "linux", windows)))]
-    return Err(io_error(
-        "platform",
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            "process ownership requires Linux procfs or Windows jobs",
-        ),
-    ));
+    if !cfg!(any(target_os = "linux", windows)) {
+        return Err(io_error(
+            "platform",
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "process ownership requires Linux procfs or Windows jobs",
+            ),
+        ));
+    }
 
     if cancellation.is_cancelled() {
         return Err(ProcessError::Cancelled);
