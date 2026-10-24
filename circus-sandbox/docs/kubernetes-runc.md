@@ -1,9 +1,10 @@
 # Kubernetes workload (runc) backend
 
-This document records the B02 Kubernetes workload adapter: what it actually
-does, the versions and commands used for the recorded run, least-privilege RBAC,
-security settings, cleanup/ownership, and what remains unverified. It does not
-claim true pause/resume, workspace snapshots, or a VM runtime.
+This document records the B02 Kubernetes workload adapter and the S03-kr
+workspace snapshot slice: what it actually does, the versions and commands used
+for the recorded run, least-privilege RBAC, security settings,
+cleanup/ownership, and what remains unverified. It does not claim true
+pause/resume or a VM runtime.
 
 ## Scope
 
@@ -16,13 +17,21 @@ Implemented:
   server-side dry run, Pod create/start, argv exec, bounded guest file transport,
   inspected host reporting, ownership-verified deletion, and typed unsupported
   operations.
-- `tests/kubernetes_workload.rs`, ignored unless `CIRCUS_KUBERNETES=1`; a real
-  k3s job in `.github/workflows/sandbox-kubernetes.yml`.
+- Workspace file snapshot capture/restore over the same `pods/exec` guest file
+  protocol used by Docker and containerd. The capability report sets
+  `workspace_snapshot: true`.
+- Backend-neutral `SandboxPool` leases: warm capacity, single-use Pods, and
+  release/TTL/shutdown revocation through the shared lifecycle. The pool never
+  resets or reuses a Pod.
+- `tests/kubernetes_workload.rs`, `tests/kubernetes_snapshot.rs`, and
+  `tests/kubernetes_pool.rs`, ignored unless `CIRCUS_KUBERNETES=1`; a real k3s
+  job in `.github/workflows/sandbox-kubernetes.yml`.
 
 Not implemented:
 
-- Pause/resume (B03 provider).
-- Workspace snapshot capture/restore (`workspace_snapshot` capability is false).
+- Pause/resume (B03 provider). `pause_resume` stays false.
+- Process or guest-memory checkpointing. Snapshots copy regular workspace files
+  and directories only.
 - Interactive `spawn_process` sessions (`spawn_process` capability is false).
 - pids limits, RuntimeClass selection, image pull credentials, NetworkPolicy
   creation, or KVM/gVisor/Kata runtimes.
@@ -158,6 +167,39 @@ means the pod does not join the host network namespace.
   `seccomp:RuntimeDefault`), host-path bind count, and mount count. `runtime`,
   `network_mode`, `pids_limit`, and `tmpfs_workspace` stay `None`.
 
+## Workspace snapshots and pool leases
+
+`Sandbox::capture_workspace_snapshot(budget, max_archive_bytes)` works on a Pod
+in `Created` (host staging) or `Running`. A running Pod is read directly: it is
+not paused, because Kubernetes has no pause operation and `pods/exec` cannot be
+suspended. Capture calls `list_workspace` for one manifest, checks the entry
+count, the configured per-file cap, and the budget's aggregate payload bound
+before any file is read, then calls `download_file` per regular file and builds
+the shared `CodeSnapshot::from_entries`. Directories, including empty ones, are
+stored. A symlink, FIFO, device, socket, multiply-linked file, unportable name,
+or manifest malformed at the byte bound fails closed as
+`SandboxError::Snapshot(SnapshotError::InvalidArchive)`; an over-budget entry
+count is `SnapshotError::EntryLimit`, an over-budget total is
+`SnapshotError::ByteLimit`, and an over-cap file is
+`SnapshotError::Workspace(WorkspaceError::LimitExceeded)`. Domain failures leave
+the Pod running and owned; transport failures use the same whole-instance
+cleanup as Docker and containerd.
+
+`Sandbox::restore_workspace_snapshot(Arc<CodeSnapshot>)` is valid only in
+`Created`. It validates the snapshot against the **target's** per-file and
+workspace payload bounds, replaces host staging, and the next `start` uploads
+that staging into the new Pod. It never overwrites a running Pod's workspace.
+The unsafe-node, entry, byte, and target-bound behavior is exercised by
+`tests/kubernetes_snapshot.rs` against real Pods.
+
+`SandboxPool` treats a Pod like any other single-use instance: `PoolConfig`
+capacity is warmed by real `Sandbox::create`/`start` calls, every lease gets a
+fresh Pod, and `release`, lease TTL, or `shutdown` destroys it and confirms
+absence. `tests/kubernetes_pool.rs` checks warm capacity, marker isolation
+between leases, `kubectl`-confirmed Pod absence after release, acquire timeout,
+TTL revocation of an in-flight exec, shutdown revocation, and a typed
+preparation failure that leaves no Pod.
+
 ## Ownership and cleanup
 
 The instance id is the Pod name. Deletion always starts with a live `GET`:
@@ -203,7 +245,9 @@ Notes:
 
 - `list` is used by `prepare`; `get` by start/status/recovery; `create` by both
   the dry run and the real Pod; `delete` by cleanup.
-- `pods/exec` `create` is the exec subresource requirement.
+- `pods/exec` `create` is the exec subresource requirement. Snapshot capture,
+  restore, and pool leases need no additional verbs: they reuse Pod create/get/
+  delete and `pods/exec`.
 - No deployments, replicasets, secrets, configmaps, nodes, namespaces, or
   service accounts are read. The kubeconfig user must be allowed to resolve its
   context and authenticate.
@@ -213,15 +257,21 @@ Notes:
 
 ## Recorded commands and results
 
-In WSL (Rust 1.99.1, k3s already Ready):
+In WSL (Rust 1.99.1, k3s already Ready), with the admin kubeconfig readable by
+the test user:
 
 ```bash
 export CIRCUS_KUBERNETES=1
+export CIRCUS_KUBERNETES_KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 cargo test --locked --features kubernetes --test kubernetes_workload -- \
+  --ignored --test-threads=1
+cargo test --locked --features kubernetes --test kubernetes_snapshot -- \
+  --ignored --test-threads=1
+cargo test --locked --features kubernetes --test kubernetes_pool -- \
   --ignored --test-threads=1
 ```
 
-Result on 2026-10-25:
+Results on 2026-10-25:
 
 ```text
 running 7 tests
@@ -233,12 +283,37 @@ test kubernetes_linux_runc_lifecycle_exec_files_and_observables ... ok
 test kubernetes_unreachable_api_is_typed_and_allocates_nothing ... ok
 test kubernetes_unsupported_operations_are_typed ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.61s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.49s
 ```
 
-The suite creates real Pods in `default`, runs exec and file operations, reads
-`kubectl` state, replaces one owned Pod with a same-named foreign Pod to verify
-cleanup refusal, and checks absence with `kubectl get pod` after destroy.
+```text
+running 4 tests
+test kubernetes_captures_guest_workspace_and_restores_into_a_new_pod ... ok
+test kubernetes_entry_byte_and_file_limits_fail_typed_and_preserve_the_pod ... ok
+test kubernetes_restore_uses_target_bounds_and_preserves_existing_staging ... ok
+test kubernetes_unsafe_guest_nodes_fail_closed_without_destroying_the_pod ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.76s
+```
+
+```text
+running 6 tests
+test kubernetes_pool_capacity_one_times_out_then_succeeds_after_release ... ok
+test kubernetes_pool_failing_preparation_leaves_no_pod_and_a_typed_error ... ok
+test kubernetes_pool_lease_ttl_revokes_in_flight_exec_and_refills ... ok
+test kubernetes_pool_markers_do_not_cross_leases_and_release_destroys_the_pod ... ok
+test kubernetes_pool_shutdown_revokes_leases_and_is_idempotent ... ok
+test kubernetes_pool_warm_capacity_and_release_confirm_pod_absence ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 53.22s
+```
+
+The suites create real Pods in `default`, run exec and file operations, capture
+guest-written files into one Pod and restore them into another, check budget and
+unsafe-node rejections, acquire and release pool leases, read `kubectl` state,
+replace one owned Pod with a same-named foreign Pod to verify cleanup refusal,
+and check absence with `kubectl get pod` after every destroy. The TTL test
+interrupts an in-flight 60-second exec and then confirms the old Pod is absent.
 
 Environment overrides:
 
@@ -255,9 +330,13 @@ Environment overrides:
 - True pause/resume: no node-runtime or workload-provider pause exists. Pod
   recreation is not pause. `pause`/`resume` return
   `SandboxError::UnsupportedCapability { capability: "pause and resume" }`.
-- Workspace snapshot capture/restore: `list_workspace` exists, but API capture
-  and restore are unsupported for Kubernetes, so the same-manifest-format claim
-  is only exercised at the trait level, not through snapshot round trips.
+- Workspace snapshot scope: only regular files and directories are copied.
+  There is no process, memory, or guest-filesystem checkpoint, no archive
+  serialization, and no capture while a Pod is being deleted. Capture reads a
+  running Pod live and fails closed if the manifest and payload disagree.
+- Pool claims are per-Pod leases, not warm process/memory images: every lease
+  still pulls nothing (kubelet uses `IfNotPresent`) but does start a fresh Pod,
+  and no Pod is reused after `release`, TTL expiry, or `shutdown`.
 - Interactive process sessions, pids limits, RuntimeClass selection, gVisor,
   Kata, Firecracker/KVM, registry authentication, image pull policy changes,
   multi-node scheduling behavior, and CNI/NetworkPolicy isolation.

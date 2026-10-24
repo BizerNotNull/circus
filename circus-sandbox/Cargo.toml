@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
 license = "Apache-2.0"
-description = "Backend-neutral sandbox API with local Linux Docker + runc, containerd + runc, and Kubernetes workload backends, capability-scoped workspace, image resolution, and an optional authenticated HTTP service. Not a snapshot or pause/resume provider."
+description = "Backend-neutral sandbox API with local Linux Docker + runc, containerd + runc, and Kubernetes workload backends, capability-scoped workspace, workspace file snapshots, prestarted pool leases, image resolution, and an optional authenticated HTTP service. Not a process/memory checkpoint or pause/resume provider."
 
 [features]
 default = ["http"]
