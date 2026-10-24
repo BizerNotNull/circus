@@ -268,3 +268,61 @@ async fn docker_linux_runc_exec_abort_destroys_only_owner() -> Result<(), Box<dy
     destroy(&mut survivor).await?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires an explicit real Linux Docker Engine"]
+async fn docker_linux_runc_exec_aggregate_output_budget() -> Result<(), Box<dyn std::error::Error>>
+{
+    enabled();
+    let mut victim = Fixture::new().await?;
+    let mut survivor = Fixture::new().await?;
+    victim.sandbox().start().await?;
+    survivor.sandbox().start().await?;
+    let mut boundary = py(&[
+        "-c",
+        "import os; os.write(1, b'x'*32); os.write(2, b'y'*32)",
+    ]);
+    boundary.output_limit_bytes = 64;
+    let output = victim.sandbox().exec(boundary).await?;
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout, b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+    assert_eq!(output.stderr, b"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy");
+    assert_eq!(output.stdout.len() + output.stderr.len(), 64);
+    assert_eq!(
+        victim.sandbox().status().await?.phase,
+        SandboxPhase::Running
+    );
+
+    let mut overflow = py(&[
+        "-c",
+        "import os; os.write(1, b'x'*33); os.write(2, b'y'*32)",
+    ]);
+    overflow.output_limit_bytes = 64;
+    let overflow_result = victim.sandbox().exec(overflow).await;
+    assert!(
+        matches!(
+            &overflow_result,
+            Err(SandboxError::OutputLimit {
+                limit: 64,
+                ownership: circus_sandbox::Ownership::ConfirmedAbsent,
+                ..
+            })
+        ),
+        "expected aggregate output overflow with confirmed owner removal, got {overflow_result:?}"
+    );
+    let status = victim.sandbox().status().await?;
+    assert_eq!(status.phase, SandboxPhase::Destroyed);
+    assert!(status.container_id.is_none());
+    assert_eq!(
+        survivor.sandbox().status().await?.phase,
+        SandboxPhase::Running
+    );
+    let output = survivor
+        .sandbox()
+        .exec(py(&["-c", "print('alive')"]))
+        .await?;
+    assert_eq!(output.stdout, b"alive\n");
+    destroy(&mut victim).await?;
+    destroy(&mut survivor).await?;
+    Ok(())
+}

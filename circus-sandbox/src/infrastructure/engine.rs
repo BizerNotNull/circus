@@ -138,6 +138,16 @@ struct FileRequest<'a> {
     max_entries: Option<usize>,
 }
 
+struct ExecIo<'a> {
+    stdin: Option<&'a [u8]>,
+    output_limits: OutputLimits,
+}
+
+enum OutputLimits {
+    Aggregate(usize),
+    Separate { stdout: usize, stderr: usize },
+}
+
 impl Engine {
     pub(crate) async fn connect(kind: SocketKind, path: &str) -> Result<Self, EngineError> {
         let socket = match kind {
@@ -559,10 +569,8 @@ impl Engine {
             workdir,
             argv,
             ExecIo {
-                stdin: GuestStdin::None,
-                stdout_limit: output_limit,
-                stderr_limit: output_limit,
-                combined_limit: output_limit,
+                stdin: None,
+                output_limits: OutputLimits::Aggregate(output_limit),
             },
         )
         .await
@@ -709,10 +717,18 @@ impl Engine {
                 match item.map_err(map_err)? {
                     bollard::container::LogOutput::StdOut { message }
                     | bollard::container::LogOutput::Console { message } => {
-                        collector.push(OutputPhase::Stdout, &message)?;
+                        let (other_len, limit) = match output_limits {
+                            OutputLimits::Aggregate(limit) => (stderr.len(), limit),
+                            OutputLimits::Separate { stdout, .. } => (0, stdout),
+                        };
+                        push_bounded(&mut stdout, &message, other_len, limit)?;
                     }
                     bollard::container::LogOutput::StdErr { message } => {
-                        collector.push(OutputPhase::Stderr, &message)?;
+                        let (other_len, limit) = match output_limits {
+                            OutputLimits::Aggregate(limit) => (stdout.len(), limit),
+                            OutputLimits::Separate { stderr, .. } => (0, stderr),
+                        };
+                        push_bounded(&mut stderr, &message, other_len, limit)?;
                     }
                     bollard::container::LogOutput::StdIn { .. } => {}
                 }
@@ -873,6 +889,26 @@ pub(crate) fn file_error(kind: EngineErrorKind, message: impl Into<String>) -> E
     }
 }
 
+fn push_bounded(
+    buf: &mut Vec<u8>,
+    chunk: &[u8],
+    other_len: usize,
+    limit: usize,
+) -> Result<(), EngineError> {
+    if buf
+        .len()
+        .checked_add(other_len)
+        .and_then(|used| used.checked_add(chunk.len()))
+        .is_none_or(|total| total > limit)
+    {
+        return Err(file_error(
+            EngineErrorKind::Limit,
+            "command output exceeded the byte limit",
+        ));
+    }
+    buf.extend_from_slice(chunk);
+    Ok(())
+}
 fn connect_socket(kind: SocketKind, path: &str) -> Result<bollard::Docker, EngineError> {
     match kind {
         SocketKind::Unix => {

@@ -44,6 +44,110 @@ use recovery::{ConnectedBackend, connect_backend};
 
 const QUEUE: usize = 8;
 
+/// Lifecycle phase. Only the worker mutates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxPhase {
+    Created,
+    Running,
+    Paused,
+    Destroyed,
+    CleanupRequired,
+}
+
+/// Where the owned container is after a cleanup attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ownership {
+    ConfirmedAbsent,
+    StillPresent,
+    Unknown,
+}
+
+/// Cleanup outcome. Success is never implied when ownership is not confirmed absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupReport {
+    pub container_id: Option<String>,
+    pub ownership: Ownership,
+    pub detail: String,
+}
+
+/// Engine-reported enforcement, not the request that was sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxStatus {
+    pub phase: SandboxPhase,
+    pub container_id: Option<String>,
+    pub runtime: String,
+    pub memory_bytes: i64,
+    pub nano_cpus: i64,
+    pub pids_limit: i64,
+    pub readonly_root: bool,
+    pub network_mode: String,
+    pub cap_drop: Vec<String>,
+    pub security_opt: Vec<String>,
+    pub bind_count: usize,
+    pub tmpfs_workspace: Option<String>,
+}
+
+/// One exec. `argv` is passed as separate arguments, not a shell string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandRequest {
+    pub argv: Vec<String>,
+    pub timeout: Duration,
+    /// Maximum combined stdout and stderr bytes; exactly this many bytes is accepted.
+    pub output_limit_bytes: usize,
+}
+
+/// Finished exec. A non-zero exit code is still `Ok`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandOutput {
+    pub exit_code: i64,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// Matchable failure. Backend SDK types are not part of this enum.
+#[derive(Debug, thiserror::Error)]
+pub enum SandboxError {
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error(transparent)]
+    Workspace(#[from] WorkspaceError),
+    #[error("phase {current:?} cannot {operation}")]
+    InvalidPhase {
+        current: SandboxPhase,
+        operation: &'static str,
+    },
+    #[error("local image was not found; this crate does not pull: {image}")]
+    ImageNotFound { image: String },
+    #[error("{message}")]
+    Engine { message: String },
+    #[error("command timed out; container ownership is {ownership:?}: {detail}")]
+    TimedOut {
+        container_id: Option<String>,
+        ownership: Ownership,
+        detail: String,
+    },
+    #[error("command cancelled; container ownership is {ownership:?}: {detail}")]
+    Cancelled {
+        container_id: Option<String>,
+        ownership: Ownership,
+        detail: String,
+    },
+    #[error("output exceeded {limit} bytes; container ownership is {ownership:?}")]
+    OutputLimit {
+        limit: usize,
+        ownership: Ownership,
+        detail: String,
+    },
+    #[error("cleanup failed; container {container_id} is still owned: {detail}")]
+    CleanupRequired {
+        container_id: String,
+        detail: String,
+    },
+    #[error("sandbox worker is gone: {detail}")]
+    WorkerGone { detail: String },
+    #[error("relative path rejected: {reason}")]
+    RelativePath { reason: &'static str },
+}
 struct CommandGuard {
     token: CancellationToken,
     armed: bool,
