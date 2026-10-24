@@ -5,9 +5,15 @@
 //! commands in a Linux container through an explicit local Docker endpoint.
 //! Public types do not expose the Docker SDK.
 //!
-//! This is not a Kubernetes, gVisor, Kata, or Firecracker backend. Workspace
-//! snapshots contain payload files, not process memory. The bounded Docker
-//! pool prestarts fresh single-use containers; it never resets dirty leases.
+//! Docker workspace snapshots capture regular files and directories, including
+//! running tmpfs writes, into an in-process [`CodeSnapshot`]. Restore replaces
+//! a newly created sandbox's staging for its next start. This is not process,
+//! memory, VM, or Docker-commit checkpointing.
+//!
+//! This is not a Kubernetes, gVisor, Kata, or Firecracker backend. Snapshots
+//! contain payload files, not process memory. The bounded Docker pool prestarts
+//! fresh single-use containers; it never resets dirty leases. Git, environment
+//! resolution and HTTP remain unimplemented.
 //!
 //! # Blocking
 //!

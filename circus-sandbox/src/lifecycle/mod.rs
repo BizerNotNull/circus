@@ -2,6 +2,7 @@
 
 mod config;
 mod input;
+mod snapshot;
 
 pub use input::{CommandError, StagingError};
 
@@ -20,7 +21,9 @@ use tokio_util::sync::CancellationToken;
 use crate::infrastructure::{
     CreateSpec, Engine, EngineError, EngineErrorKind, Recovered, SocketKind, StagedBytes,
 };
-use crate::workspace::{StagedNode, Workspace, WorkspaceError};
+use crate::workspace::{
+    CodeSnapshot, SnapshotBudget, SnapshotError, StagedNode, Workspace, WorkspaceError,
+};
 
 const QUEUE: usize = 8;
 
@@ -93,6 +96,16 @@ pub enum SandboxError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
+    /// Workspace snapshot failure, including retained temporary cleanup ownership.
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotError),
+    /// An interrupted snapshot also failed explicit temporary workspace cleanup.
+    #[error("{interruption}; snapshot cleanup: {snapshot}")]
+    SnapshotInterrupted {
+        interruption: Box<SandboxError>,
+        #[source]
+        snapshot: Box<SnapshotError>,
+    },
     /// Invalid command input. No command is queued and ownership is unchanged.
     #[error("invalid command request: {0}")]
     Command(#[from] CommandError),
@@ -177,6 +190,15 @@ enum Op {
         reply: oneshot::Sender<Result<CommandOutput, SandboxError>>,
     },
     Status(oneshot::Sender<Result<SandboxStatus, SandboxError>>),
+    CaptureSnapshot {
+        budget: SnapshotBudget,
+        max_archive_bytes: u64,
+        reply: oneshot::Sender<Result<Arc<CodeSnapshot>, SandboxError>>,
+    },
+    RestoreSnapshot {
+        snapshot: Arc<CodeSnapshot>,
+        reply: oneshot::Sender<Result<(), SandboxError>>,
+    },
 }
 
 struct Message {
@@ -548,6 +570,18 @@ async fn dispatch(state: &mut State, message: Message) {
         }
         Op::Status(reply) => {
             let result = run!(status(state), file_timeout);
+            let _ = reply.send(result);
+        }
+        Op::CaptureSnapshot {
+            budget,
+            max_archive_bytes,
+            reply,
+        } => {
+            let result = snapshot::capture(state, budget, max_archive_bytes, &cancel).await;
+            let _ = reply.send(result);
+        }
+        Op::RestoreSnapshot { snapshot, reply } => {
+            let result = snapshot::restore(state, snapshot, &cancel).await;
             let _ = reply.send(result);
         }
     }
