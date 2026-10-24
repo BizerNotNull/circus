@@ -11,16 +11,12 @@
 use std::future::Future;
 use std::pin::Pin;
 
-<<<<<<< HEAD
 use futures_util::Stream;
 use tokio::io::AsyncWrite;
 
 use super::engine::{
-    EngineError, ExecDone, HostReport, ProcessChunk, ProcessSpec, Recovered, StagedBytes,
+    EngineError, ExecDone, HostReport, ProcessChunk, ProcessSpec, Recovered, UploadEntry,
 };
-=======
-use super::engine::{EngineError, ExecDone, HostReport, Recovered, UploadEntry};
->>>>>>> feat/staging-transfer
 
 /// Backend-owned instance identity. Opaque outside the lifecycle owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
