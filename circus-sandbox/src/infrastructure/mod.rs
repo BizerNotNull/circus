@@ -11,7 +11,7 @@ pub(crate) use backend::{Backend, BackendProcess, CommonSpec, InstanceId, Prepar
 pub(crate) use docker::{DockerBackend, DockerConfig, DockerConfigError, DockerEndpoint};
 pub(crate) use engine::{
     Engine, EngineError, EngineErrorKind, ImageInfo, OutputPhase, ProcessChunk, ProcessSpec,
-    Recovered, StagedBytes,
+    Recovered, UploadEntry, UploadSource,
 };
 #[cfg(test)]
 pub(crate) use engine::{ExecDone, HostReport, OutputLimit, PolicyMismatch};

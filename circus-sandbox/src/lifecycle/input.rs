@@ -18,10 +18,11 @@ pub enum CommandError {
     InvalidOutputLimit { output_limit_bytes: usize },
 }
 
-/// Staged file payloads could not fit the configured workspace byte bound.
+/// Staged file payload sizes could not fit the configured workspace byte bound.
 ///
-/// This is a pre-start check of file contents, not a host disk quota or an
-/// estimate of tmpfs metadata and allocation overhead. Staging is retained.
+/// This is a pre-transfer check of metadata lengths, not a host disk quota or an
+/// estimate of tmpfs metadata and allocation overhead. Staging is retained and
+/// no guest payload has been sent when it fails.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StagingError {
     /// The first observed sum above `limit`; `actual` is a lower bound on all

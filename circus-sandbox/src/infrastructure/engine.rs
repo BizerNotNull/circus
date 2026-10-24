@@ -23,15 +23,41 @@ use std::future::Future;
 
 use futures_util::StreamExt;
 
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 const GUEST_FILES: &str = include_str!("guest_files.py");
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StagedBytes {
+/// One bounded host-to-guest copy buffer. The guest helper reads stdin in the
+/// same 64 KiB units, so neither side needs a whole-file buffer.
+const TRANSFER_CHUNK_BYTES: usize = 64 * 1024;
+
+/// One staging entry presented to a backend.
+///
+/// Payloads are never accumulated for the whole tree. A directory carries no
+/// payload, an in-memory value is used for a single API write, and a staged
+/// file is transferred from an already-opened host handle in bounded chunks.
+pub(crate) struct UploadEntry {
     pub path: String,
-    pub is_dir: bool,
-    pub bytes: Vec<u8>,
+    pub source: UploadSource,
+}
+
+pub(crate) enum UploadSource {
+    Directory,
+    Bytes(Vec<u8>),
+    File { file: std::fs::File, len: u64 },
+}
+
+/// Stdin framing for one guest exec.
+enum Stdin<'a> {
+    None,
+    Bytes(&'a [u8]),
+    File { file: std::fs::File, len: u64 },
+}
+
+impl Stdin<'_> {
+    fn attached(&self) -> bool {
+        !matches!(self, Self::None)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,12 +135,12 @@ pub(crate) struct ExecDone {
 struct FileRequest<'a> {
     relative: &'a str,
     mode: &'static str,
-    input: &'a [u8],
+    stdin: Stdin<'a>,
     max_bytes: usize,
 }
 
 struct ExecIo<'a> {
-    stdin: Option<&'a [u8]>,
+    stdin: Stdin<'a>,
     /// Per-stream allowance for stdout.
     stdout_limit: usize,
     /// Per-stream allowance for stderr.
@@ -342,37 +368,74 @@ impl Engine {
         Ok(file.into_std().await)
     }
 
+    /// Transfers one entry. A file source is streamed from its host handle in
+    /// [`TRANSFER_CHUNK_BYTES`] chunks; the payload is never rebuilt as one
+    /// buffer. The lifecycle owner calls this once per planned entry, so live
+    /// payload memory is bounded by one chunk.
     pub(crate) async fn upload(
         &self,
         id: &str,
         user: &str,
         workspace: &str,
-        entries: &[StagedBytes],
+        entry: UploadEntry,
         max_bytes: u64,
     ) -> Result<(), EngineError> {
-        let total = entries
-            .iter()
-            .filter(|entry| !entry.is_dir)
-            .try_fold(0u64, |n, entry| n.checked_add(entry.bytes.len() as u64));
-        if total.is_none_or(|total| total > max_bytes) {
-            return Err(file_error(
-                EngineErrorKind::Limit,
-                "staged bytes exceed workspace limit",
-            ));
-        }
-        for entry in entries {
-            self.file_helper(
-                id,
-                user,
-                workspace,
-                FileRequest {
-                    relative: &entry.path,
-                    mode: if entry.is_dir { "mkdir" } else { "write" },
-                    input: if entry.is_dir { &[] } else { &entry.bytes },
-                    max_bytes: 0,
-                },
-            )
-            .await?;
+        let UploadEntry { path, source } = entry;
+        match source {
+            UploadSource::Directory => {
+                self.file_helper(
+                    id,
+                    user,
+                    workspace,
+                    FileRequest {
+                        relative: &path,
+                        mode: "mkdir",
+                        stdin: Stdin::None,
+                        max_bytes: 0,
+                    },
+                )
+                .await?;
+            }
+            UploadSource::Bytes(bytes) => {
+                if bytes.len() as u64 > max_bytes {
+                    return Err(file_error(
+                        EngineErrorKind::Limit,
+                        "staged bytes exceed workspace limit",
+                    ));
+                }
+                self.file_helper(
+                    id,
+                    user,
+                    workspace,
+                    FileRequest {
+                        relative: &path,
+                        mode: "write",
+                        stdin: Stdin::Bytes(&bytes),
+                        max_bytes: 0,
+                    },
+                )
+                .await?;
+            }
+            UploadSource::File { file, len } => {
+                if len > max_bytes {
+                    return Err(file_error(
+                        EngineErrorKind::Limit,
+                        "staged bytes exceed workspace limit",
+                    ));
+                }
+                self.file_helper(
+                    id,
+                    user,
+                    workspace,
+                    FileRequest {
+                        relative: &path,
+                        mode: "write",
+                        stdin: Stdin::File { file, len },
+                        max_bytes: 0,
+                    },
+                )
+                .await?;
+            }
         }
         Ok(())
     }
@@ -393,7 +456,7 @@ impl Engine {
                 FileRequest {
                     relative,
                     mode: "read",
-                    input: &[],
+                    stdin: Stdin::None,
                     max_bytes,
                 },
             )
@@ -421,7 +484,7 @@ impl Engine {
             FileRequest {
                 relative,
                 mode: "unlink",
-                input: &[],
+                stdin: Stdin::None,
                 max_bytes: 0,
             },
         )
@@ -439,9 +502,14 @@ impl Engine {
         let FileRequest {
             relative,
             mode,
-            input,
+            stdin,
             max_bytes,
         } = request;
+        let bound = match &stdin {
+            Stdin::None => 0,
+            Stdin::Bytes(bytes) => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            Stdin::File { len, .. } => *len,
+        };
         let argv = vec![
             "python3".to_string(),
             "-I".to_string(),
@@ -452,9 +520,9 @@ impl Engine {
             workspace.to_string(),
             relative.to_string(),
             if mode == "write" {
-                input.len()
+                bound
             } else {
-                max_bytes
+                u64::try_from(max_bytes).unwrap_or(u64::MAX)
             }
             .to_string(),
         ];
@@ -470,7 +538,7 @@ impl Engine {
                 "/",
                 &argv,
                 ExecIo {
-                    stdin: Some(input),
+                    stdin,
                     stdout_limit,
                     stderr_limit,
                     combined_limit: stdout_limit.saturating_add(stderr_limit),
@@ -511,7 +579,7 @@ impl Engine {
             workdir,
             argv,
             ExecIo {
-                stdin: None,
+                stdin: Stdin::None,
                 stdout_limit: output_limit,
                 stderr_limit: output_limit,
                 combined_limit: output_limit,
@@ -539,7 +607,7 @@ impl Engine {
             .create_exec(
                 id,
                 bollard::models::ExecConfig {
-                    attach_stdin: Some(stdin.is_some()),
+                    attach_stdin: Some(stdin.attached()),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
                     cmd: Some(argv.to_vec()),
@@ -564,13 +632,48 @@ impl Engine {
         else {
             return Err(EngineError::new("exec did not attach stdout"));
         };
+        let stdin_attached = stdin.attached();
         let send = async {
             let result = async {
-                if let Some(bytes) = stdin {
-                    input
-                        .write_all(bytes)
-                        .await
-                        .map_err(|err| EngineError::new(err.to_string()))?;
+                match stdin {
+                    Stdin::None => {}
+                    Stdin::Bytes(bytes) => {
+                        input
+                            .write_all(bytes)
+                            .await
+                            .map_err(|err| EngineError::new(err.to_string()))?;
+                    }
+                    Stdin::File { file, len } => {
+                        let mut source = tokio::fs::File::from_std(file);
+                        let mut chunk = vec![0u8; TRANSFER_CHUNK_BYTES];
+                        let mut remaining = len;
+                        while remaining > 0 {
+                            let want = usize::try_from(remaining)
+                                .unwrap_or(TRANSFER_CHUNK_BYTES)
+                                .min(chunk.len());
+                            let read = source.read(&mut chunk[..want]).await.map_err(|err| {
+                                file_error(
+                                    EngineErrorKind::FileIo,
+                                    format!("staged file read: {err}"),
+                                )
+                            })?;
+                            if read == 0 {
+                                return Err(file_error(
+                                    EngineErrorKind::FileIo,
+                                    format!(
+                                        "staged file ended before its declared {len} byte bound"
+                                    ),
+                                ));
+                            }
+                            input
+                                .write_all(&chunk[..read])
+                                .await
+                                .map_err(|err| EngineError::new(err.to_string()))?;
+                            remaining -= u64::try_from(read).unwrap_or(0);
+                        }
+                    }
+                }
+                if stdin_attached {
                     input
                         .shutdown()
                         .await

@@ -11,12 +11,16 @@
 use std::future::Future;
 use std::pin::Pin;
 
+<<<<<<< HEAD
 use futures_util::Stream;
 use tokio::io::AsyncWrite;
 
 use super::engine::{
     EngineError, ExecDone, HostReport, ProcessChunk, ProcessSpec, Recovered, StagedBytes,
 };
+=======
+use super::engine::{EngineError, ExecDone, HostReport, Recovered, UploadEntry};
+>>>>>>> feat/staging-transfer
 
 /// Backend-owned instance identity. Opaque outside the lifecycle owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,12 +122,16 @@ pub(crate) trait Backend: Send + Sync + 'static {
 
     fn resume(&self, id: &InstanceId) -> impl Future<Output = Result<(), EngineError>> + Send;
 
+    /// Transfers one staging entry. A file source owns an already-opened host
+    /// handle and a declared length; the backend must stream it in bounded
+    /// chunks instead of materializing the payload. Callers invoke this once
+    /// per planned entry so no aggregate payload exists in memory.
     fn upload(
         &self,
         id: &InstanceId,
         user: &str,
         workspace: &str,
-        entries: &[StagedBytes],
+        entry: UploadEntry,
         max_bytes: u64,
     ) -> impl Future<Output = Result<(), EngineError>> + Send;
 
