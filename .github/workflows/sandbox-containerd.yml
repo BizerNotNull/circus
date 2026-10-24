@@ -112,4 +112,4 @@ jobs:
           set -euo pipefail
           sudo --preserve-env=CIRCUS_CONTAINERD,CIRCUS_CONTAINERD_SOCKET,CIRCUS_CONTAINERD_IMAGE,CIRCUS_CONTAINERD_NAMESPACE,CARGO_TERM_COLOR \
             env "PATH=$HOME/.cargo/bin:$PATH" \
-            cargo test --locked --test "${{ matrix.suite }}" -- --ignored
+            cargo test --locked --features containerd --test "${{ matrix.suite }}" -- --ignored
