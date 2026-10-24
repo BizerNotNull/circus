@@ -255,6 +255,19 @@ impl Workspace {
         Ok(())
     }
 
+    /// Lists regular files and directories for container staging.
+    ///
+    /// Uses this value's capability handle. Symlinks and other non-regular
+    /// nodes are errors. Does not return the host root path.
+    pub(crate) fn staged_nodes(&self) -> Result<Vec<StagedNode>, WorkspaceError> {
+        self.ensure_open()?;
+        let _guard = self.file_lock.read().map_err(lock_poisoned)?;
+        let dir = self.dir.as_ref().ok_or_else(missing_handle)?;
+        let mut out = Vec::new();
+        walk_staged(dir, "", &mut out)?;
+        Ok(out)
+    }
+
     /// Deletes the owned temporary directory and releases its capability.
     ///
     /// Idempotent. A root that is already gone is success. On failure the same
@@ -331,6 +344,51 @@ impl Workspace {
             Err(err) if err.kind() == io::ErrorKind::NotFound
         )
     }
+}
+
+/// One relative node discovered through the workspace capability handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StagedNode {
+    pub relative: String,
+    pub is_dir: bool,
+}
+
+fn walk_staged(dir: &Dir, prefix: &str, out: &mut Vec<StagedNode>) -> Result<(), WorkspaceError> {
+    for entry in dir.entries()? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(io::Error::other("workspace entry name is not utf-8").into());
+        };
+        if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', ':']) {
+            return Err(io::Error::other("workspace entry name is not stageable").into());
+        }
+        let relative = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Err(io::Error::other("workspace symlink is not staged").into());
+        }
+        if file_type.is_dir() {
+            out.push(StagedNode {
+                relative: relative.clone(),
+                is_dir: true,
+            });
+            let child = dir.open_dir(name)?;
+            walk_staged(&child, &relative, out)?;
+        } else if file_type.is_file() {
+            out.push(StagedNode {
+                relative,
+                is_dir: false,
+            });
+        } else {
+            return Err(io::Error::other("workspace entry is not a regular file").into());
+        }
+    }
+    Ok(())
 }
 
 fn lock_poisoned<T>(err: PoisonError<T>) -> WorkspaceError {

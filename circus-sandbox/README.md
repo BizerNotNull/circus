@@ -1,10 +1,12 @@
 # circus-sandbox
 
-Rust 库，包名 `circus-sandbox`。当前提供 workspace 文件能力，以及 `runtime::ResourceLimits` 后端中立的资源请求校验。文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；资源值模型尚未接入文件操作或执行后端。
+Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace 文件能力、`runtime::ResourceLimits` 请求校验，以及一个明确限定为本地 Linux Docker Engine + `runc` 的异步容器后端。workspace 文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；容器后端通过私有 lifecycle/infrastructure 模块运行显式配置的 Linux 容器。
 
-这不是进程沙箱，也不是容器。它不隔离 CPU、网络、系统调用或进程，不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Git、命令执行、生命周期、HTTP/RPC 和容器后端都还没有实现。资源请求校验不等于资源预留、聚合准入或内核强制；也没有工作区总字节配额、文件数配额或宿主磁盘配额的执行机制。
+容器后端不是通用进程沙箱：它只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在的 Linux 镜像和 Python 3，拒绝拉取镜像；当前不提供 Kubernetes、containerd、HTTP/RPC、Git、快照或沙箱池。Docker Engine 的资源和隔离设置由显式配置验证，真实隔离仍必须在 Linux Docker Engine 上运行并验证。
+资源请求校验不等于资源预留、聚合准入或宿主磁盘配额。
+workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。容器后端是独立的 Docker + runc slice，不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；workspace 仍没有宿主磁盘配额执行机制。
 
-工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖是 cap-std **4.0.3**、cap-fs-ext **4.0.3**（仅 Unix `OpenOptionsSyncExt::nonblock`，不开 default features）、tempfile **3.27.0**、thiserror **2.0.21**（非预发布）。`Cargo.lock` 固定解析版本；检查和运行都加 `--locked`。
+工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖还包括 bollard **0.21.1**、tokio **1.x**、tokio-util **0.7.x**、uuid **1.x**、futures-util **0.3.x** 和 thiserror **2.0.21**；`Cargo.lock` 固定解析版本，检查和运行都加 `--locked`。workspace 仍使用 cap-std **4.0.3**、cap-fs-ext **4.0.3**、tempfile **3.27.0**。
 
 这里描述当前检出的真实实现，不以文件或工作流存在代替发布、合并和运行证据。完整目标及交付记录入口见 [交付计划](docs/delivery-plan.md)，QA、安全、Rust 与架构域门禁的实际范围见 [工程说明](docs/engineering.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。
 
@@ -71,6 +73,19 @@ cargo run --locked --example workspace
 cargo run --locked --example resource_policy
 ```
 
+## Linux Docker + runc
+
+容器后端的配置、生命周期、文件传输和已知限制见 [Linux Docker + runc 文档](docs/docker-linux-runc.md)，设计取舍见 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。最小前置条件：Linux Docker Engine（本地 Unix socket；Windows 开发机可使用 Linux Docker Desktop named pipe）、已存在的 Linux 镜像、镜像内 Python 3，以及 cgroup v2 用于运行集成测试。镜像不会自动拉取；声明 `VOLUME` 的镜像不支持。
+
+集成测试默认被忽略且不会连接 Docker。显式运行真实后端：
+
+```bash
+CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
+  cargo test --locked --test docker_sandbox -- --ignored
+```
+
+测试使用 `python:3.12-slim`，可用 `CIRCUS_DOCKER_IMAGE` 指定另一个包含 Python 3 的本地 Linux 镜像。当前检出没有记录真实 Docker Engine 运行结果；不要把编译、忽略测试或 CI 通过写成隔离验证。
+
 ## 命令
 
 同样在 `circus-sandbox/` 下执行：
@@ -89,7 +104,7 @@ cargo run --locked --example resource_policy
 
 `cargo test --locked` 覆盖库测试和 `tests/`。要连示例一起编译，使用 `cargo test --locked --all-targets`。不要手改 `Cargo.lock` 来绕过解析失败。
 
-Windows 本机目标是 `x86_64-pc-windows-msvc`。这里的编译成功不表示进程隔离或 Linux 容器后端可用；那些后端还没有实现。符号链接测试需要创建符号链接的权限（开发者模式，或进程持有 `SeCreateSymbolicLinkPrivilege`）。没有该权限时，相关测试应失败，不能静默跳过；不要修改宿主安全设置来让它们通过。
+Windows 本机目标是 `x86_64-pc-windows-msvc`。这里的编译成功不表示 Linux 容器隔离已经验证；真实 Docker 后端必须在 Linux Docker Engine 上按上面的显式命令运行。符号链接测试需要创建符号链接的权限（开发者模式，或进程持有 `SeCreateSymbolicLinkPrivilege`）。没有该权限时，相关测试应失败，不能静默跳过；不要修改宿主安全设置来让它们通过。
 
 ### 架构域检查
 
@@ -165,9 +180,8 @@ npm --prefix circus-sandbox/qa run architecture
 - 读和写使用同一个 `max_file_bytes`，含义是单个文件的上限，不是工作区总字节、文件数或宿主磁盘配额。超限写入在创建或截断之前失败。读取不按不可信 metadata 分配；超限时 `actual` 是探测到的长度，不是未知总长。当前没有总配额 API。
 - `cleanup` 成功后文件操作返回 `Closed`，并可重复调用。清理失败保留工作区，可以再试。`Drop` 只尽力删除，不返回错误。
 
-限制：
+限制：workspace 本身不提供命令执行、Git、快照或沙箱池；Docker + runc 容器后端提供独立的异步命令执行和生命周期 API，具体范围见 [Linux Docker + runc](docs/docker-linux-runc.md)。
 
-- 没有命令执行、Git、生命周期状态机、容器后端或沙箱池。
 - `write_file` 不是原子替换，也没有单独的原子写入 API。只有关闭、非法路径、超限、缺失父目录和非普通文件这类前置失败保证不改文件。打开普通文件之后的 I/O 失败可能截断已有文件，或留下部分内容。
 - `remove_file` 按 cap-std unlink 删除非目录项，包括符号链接、FIFO 和 socket。不跟随符号链接目标，不删除目录，删除前也不做类型预检。
 - 同一 `Workspace` 的并发读写由内部 `RwLock` 保护。这不是外部进程隔离，也不是崩溃安全的原子写。

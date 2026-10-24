@@ -1,19 +1,20 @@
-//! Capability-scoped temporary workspace files and validated resource requests.
+//! Capability-scoped workspace files, resource requests, and a Linux Docker sandbox.
 //!
-//! [`Workspace`] confines file access to a directory it creates and opens as a
-//! [`cap_std::fs::Dir`]. Callers pass relative paths only. The root path is not
-//! exposed. This crate is **not** a process sandbox and does not provide
-//! containers, OCI runtimes, mounts, or host isolation.
+//! [`Workspace`] confines file access to a directory it creates. [`DockerSandbox`]
+//! is a separate async API: it stages those files into a bounded tmpfs and runs
+//! commands in a Linux container through an explicit local Docker endpoint.
+//! Public types do not expose the Docker SDK.
 //!
-//! [`runtime::ResourceLimits`] validates backend-neutral CPU, memory, process,
-//! workspace, and per-file requests. Validation does not enforce limits, provide
-//! isolation, reserve resources, or perform aggregate admission control.
+//! This is not a Kubernetes, gVisor, Kata, or Firecracker backend. Snapshot,
+//! pool, Git, and HTTP are not implemented. A readonly root plus tmpfs workspace
+//! means a Docker commit would not preserve workspace writes; a later snapshot
+//! must restore an archive.
 //!
 //! # Blocking
 //!
-//! Every filesystem method blocks the calling thread. Async callers must run
-//! them with `spawn_blocking` (or the equivalent) on their own runtime. This
-//! crate does not start a runtime and does not depend on one.
+//! Workspace methods block the calling thread. [`DockerSandbox`] methods are
+//! async and must be called from a Tokio runtime. They run workspace I/O with
+//! `spawn_blocking`.
 //!
 //! # Limits
 //!
@@ -45,8 +46,20 @@
 
 #![forbid(unsafe_code)]
 
+pub mod api;
+mod infrastructure;
+mod lifecycle;
 pub mod runtime;
 mod workspace;
 
 #[doc(inline)]
+pub use api::{
+    CleanupReport, CommandOutput, CommandRequest, ConfigError, DockerEndpoint, DockerSandbox,
+    IoLimits, IsolationConfig, OWNER_LABEL_KEY, Ownership, RuntimeName, SandboxConfig,
+    SandboxError, SandboxPhase, SandboxStatus,
+};
+#[doc(inline)]
 pub use workspace::{PathRejectReason, Workspace, WorkspaceError};
+
+#[doc(inline)]
+pub use runtime::{ResourceLimits, ResourceLimitsError};

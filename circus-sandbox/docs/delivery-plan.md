@@ -9,12 +9,11 @@
 - 安全基线 [PR #3](https://github.com/BizerNotNull/circus/pull/3) 与质量基线 [PR #4](https://github.com/BizerNotNull/circus/pull/4) 已合并并集成；具体提交和检查证据见对应 PR，不在计划中预填通过。
 - Workspace 实现与 Rust 门禁的交付记录见 [PR #5](https://github.com/BizerNotNull/circus/pull/5)。当前检出已有真实 Rust 1.99.1、edition 2024 crate、同步文件 API、example、测试、Apache-2.0 许可证和 cargo-deny 策略；该 PR 是合并状态与 CI 结果的权威入口，不在本文预填结果。
 - 安全文档与最小权限跟进见 [PR #7](https://github.com/BizerNotNull/circus/pull/7)，以该 PR 的实际合并状态和证据为准。安全扫描约定统一见 [安全说明](../../.github/sandbox-security.md)。
-- 其余进程内统一 API、生命周期、命令执行、真实进程/容器隔离、environment、Git、HTTP、认证、部署、指标、池和快照仍未实现。下列完整目标保留，不因文件库已存在而缩小验收。
+  其余进程内统一 API、Kubernetes/containerd、environment、Git、HTTP、认证、部署、指标、池和快照仍未实现；当前已交付的 Docker + runc slice 以 [Docker + runc 文档](docker-linux-runc.md) 为准。下列完整目标保留，不因文件库或单一容器后端已存在而缩小验收。
 
 ## 非目标
 
-- 不把 Docker、Kubernetes、containerd、runc、gVisor、Kata、Firecracker 全部实现。候选不是全量支持。
-- 不创建空适配器来声称支持。
+- 不把 Kubernetes、containerd、runc、gVisor、Kata、Firecracker 全部实现。当前只支持明确限定的 Docker + runc slice，其余候选不是全量支持。
 - 不修改 `circus-paseo/`，也不把 Paseo CI 当作沙箱验证。
 - 不把 OpenSandbox 的架构、端点或测试通过状态复制为本仓库能力。下文上游引用不是全库审计。
 - 配置持久化仍未选定，这些 PR 不引入数据库或 ORM。
@@ -133,9 +132,9 @@ Dependabot 目前没有 QA npm 或 Cargo 配置；后续需要时在已有文件
 
 ### 5. 首个真实适配：Docker Linux + runc
 
-依赖：先合并并消费 workspace 文件契约，再开始后续运行时开发；使用进程内生命周期与显式配置，保留已合并质量/安全门禁。
+依赖：先合并并消费 workspace 文件契约；使用进程内生命周期与显式配置，保留已合并质量/安全门禁。
 
-范围：只实现这一组合。Kubernetes、containerd、gVisor、Kata、Firecracker 不在本 PR。
+当前代码已提供这一单一真实适配；它不代表其他后端、快照或 HTTP 已实现。配置、镜像前置条件、集成测试命令和未验证的真实 Engine 证据缺口见 [Docker + runc 文档](docker-linux-runc.md)。
 
 验收：
 
@@ -146,7 +145,7 @@ Dependabot 目前没有 QA npm 或 Cargo 配置；后续需要时在已有文件
 - 请求其他运行时时明确拒绝，不静默降级。
 - 创建失败会跟踪已出现的容器标识并强制回收；回收失败必须返回给生命周期，不能只写日志。
 - 删除或 TTL 回收失败时保留尚未删除的依赖并允许重试；并发删除不产生第二次成功清理的假成功；停止调用的传输失败后仍要强制删除，并报告最终归属。
-- 取消向整个进程组发送终止并等待结束，然后再汇合输出。
+- 取消或超时销毁整个已拥有的容器，等待删除结果，再返回归属；容器内的后代不会因命令本身取消而存活。
 
 ### 部署边界
 

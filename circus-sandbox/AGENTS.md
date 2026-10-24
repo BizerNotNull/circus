@@ -2,7 +2,7 @@
 
 ## 状态与边界
 
-`circus-sandbox` 是 Rust library crate（包名 `circus-sandbox`，edition 2024）。当前提供 workspace 文件能力和 `runtime::ResourceLimits` 资源请求校验：文件操作在 tempfile 新建的临时目录上，用 cap-std 目录句柄做相对路径读写；资源值模型只校验数值与关联约束，尚未接入文件 API 或执行后端。这不是进程沙箱，不提供容器、运行时隔离或 Paseo 接入。
+`circus-sandbox` 是 Rust library crate（包名 `circus-sandbox`，edition 2024）。当前提供 workspace 文件能力、`runtime::ResourceLimits` 资源请求校验，以及一个明确限定为本地 Linux Docker Engine + `runc` 的异步容器后端。workspace 文件操作在 tempfile 新建的临时目录上，用 cap-std 目录句柄做相对路径读写；资源模型只校验请求值，Docker 后端负责显式配置和生命周期，不代表通用进程隔离或 Paseo 接入。
 
 已实现：
 
@@ -17,28 +17,28 @@
 - 同一 `Workspace` 的并发读写由内部 `RwLock` 保护。这只序列化本进程内对这一个值的调用，不是外部进程隔离，也不是 crash-safe 原子写。不要把这把锁写成原子替换或磁盘配额，也不要为此增加原子写入 API。
 - `runtime::ResourceLimits` / `ResourceLimitsError` 是后端中立的资源值模型，无 `Default`。内存/工作区为正字节数且不超过 `i64::MAX`，CPU 为正 milli-CPU（`1000` 等于一个 CPU），进程数为正；工作区不超过内存，单文件上限不超过工作区。单文件上限为 `1..usize::MAX`，拒绝 `0` 和 `usize::MAX`，与 `Workspace::new` 一致。标量错误先于关联错误。校验不提供聚合准入/预留、内核强制或隔离，不附加宿主容量或 Docker 专用约束。
 
-未实现，不得写成现有能力：命令执行、生命周期状态机、Docker/Kubernetes/containerd、runc/gVisor/Kata/Firecracker、OCI 镜像、Git clone/worktree、沙箱池、HTTP/RPC、工作区总配额执行、宿主磁盘配额、进程隔离。`src/api`、`lifecycle`、`infrastructure`、`environment`、`pool` 仍只是占位目录；`runtime` 已有资源值模型，但没有运行时实现。不修改 `../circus-paseo/`。
+未实现，不得写成现有能力：Kubernetes、containerd、HTTP/RPC、Git clone/worktree、沙箱池、快照、工作区总配额执行、宿主磁盘配额、Paseo 接入。当前 Docker slice 的范围和限制见 [Linux Docker + runc](docs/docker-linux-runc.md) 及 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。不修改 `../circus-paseo/`。
 
 用户说明见 [README.md](README.md)，工程命令与门禁边界见 [docs/engineering.md](docs/engineering.md)，完整目标及交付记录入口见 [docs/delivery-plan.md](docs/delivery-plan.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。当前检出已有 Workspace crate、许可证策略、元数据/质量/安全/Rust 工作流，但开发约定和工作流存在仍然不是“全部领域已交付”或检查已通过。
 
 ## Architecture & Data Flow
 
-当前可调用路径包括库内 `Workspace`：调用方 → `circus_sandbox::Workspace` → cap-std `Dir`（根为 tempfile 新建的目录），以及独立的 `circus_sandbox::runtime::ResourceLimits` 请求校验。两者尚未自动接线，没有 `api` / `lifecycle` 门面。
+当前调用路径包括：workspace 调用方 → `circus_sandbox::Workspace` → cap-std `Dir`，资源请求调用方 → `runtime::ResourceLimits`，以及 Docker 调用方 → `api` → `lifecycle` → `infrastructure::Engine` → Docker Engine。Docker 后端不泄露 bollard 类型，所有状态修改由 lifecycle worker 串行拥有。
 
-规划中的调用链仍是：调用方 → `api` → `lifecycle` → `infrastructure` → `runtime`。在对应模块真实实现之前，下表是职责边界，不是已交付后端。
+尚未实现的目标链路（Kubernetes、containerd、池、快照、HTTP/RPC 等）仍然只是规划，不得按目录存在推断能力。
 
-| 目录                  | 职责与边界                                                                                                                                     |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/api/`            | 统一创建、执行命令、文件操作、销毁入口；不泄露后端类型，不预设 HTTP、RPC 或进程内传输。                                                        |
-| `src/lifecycle/`      | 创建、启动、运行、暂停、恢复、销毁的状态转换与资源回收；状态只能由此修改。                                                                     |
-| `src/infrastructure/` | Docker、Kubernetes、containerd 等部署与调度适配；负责资源分配，不承担隔离机制实现。                                                            |
-| `src/runtime/`        | 已实现后端中立的资源请求值校验，不执行资源限制。runc、gVisor、Kata Containers、Firecracker 等运行时能力与隔离策略尚未实现。                    |
-| `src/environment/`    | OCI 镜像、基础环境、依赖准备与可复现环境标识。                                                                                                 |
-| `src/workspace/`      | 已实现：能力目录内的相对文件读写、建目录、删除与回收。尚未实现 Git clone、worktree 或代码副本管理。                                            |
-| `src/pool/`           | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。                                                                       |
-| `tests/`              | `tests/workspace.rs` 用真实临时目录验证公开文件 API。符号链接逃逸放在 crate 私有测试，避免为测试暴露工作区根。需要容器或虚拟化的测试尚未存在。 |
+| 目录                  | 职责与边界                                                                                                                                                                                           |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/api/`            | 统一创建、执行命令、文件操作、销毁入口；不泄露后端类型，不预设 HTTP、RPC 或进程内传输。                                                                                                              |
+| `src/lifecycle/`      | 创建、启动、运行、暂停、恢复、销毁的状态转换与资源回收；状态只能由此修改。                                                                                                                           |
+| `src/infrastructure/` | Docker、Kubernetes、containerd 等部署与调度适配；负责资源分配，不承担隔离机制实现。                                                                                                                  |
+| `src/runtime/`        | 已实现后端中立的资源请求值校验，不执行资源限制。当前 Docker + runc 隔离策略由 `infrastructure`/`lifecycle` 显式配置并验证；Kubernetes、containerd、gVisor、Kata Containers、Firecracker 等仍未实现。 |
+| `src/environment/`    | OCI 镜像、基础环境、依赖准备与可复现环境标识。                                                                                                                                                       |
+| `src/workspace/`      | 已实现：能力目录内的相对文件读写、建目录、删除与回收。尚未实现 Git clone、worktree 或代码副本管理。                                                                                                  |
+| `src/pool/`           | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。                                                                                                                             |
+| `tests/`              | `tests/workspace.rs` 验证公开 workspace API；`tests/docker_sandbox.rs` 是默认忽略、仅连接显式真实 Docker Engine 的 Linux + runc 集成测试。                                                           |
 
-这些后端是候选目标，不代表全部同时支持；实现时按需求选择，禁止用空适配器声称支持。运行时必须先消费 workspace 文件契约再开发。池与快照仍保留，支持策略只写在交付计划。
+Kubernetes、containerd、池与快照仍保留为规划目标；当前只有 Docker + runc 适配器支持真实容器路径，禁止用空适配器声称支持。运行时必须先消费 workspace 文件契约再开发。
 
 ## Code Conventions & Common Patterns
 
