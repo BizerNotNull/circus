@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心，`circus-paseo` 作为前端调用方。沙箱目前提供 workspace 文件库和后端中立的资源请求校验，没有 Paseo—沙箱集成，也没有进程或容器隔离；不要把规划写成现有能力。
+Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心，`circus-paseo` 作为前端调用方。沙箱目前提供 workspace 文件库、进程内代码快照和后端中立的资源请求校验，没有 Paseo—沙箱集成，也没有进程或容器隔离；不要把规划写成现有能力。
 
-- **当前开发阶段**：本轮只收尾工程基础设施，在基础架构与核心功能开发前停止；后续开发须有用户新的明确授权。工作聚焦 `circus-sandbox`，除非用户明确要求，不主动修改 `circus-paseo`。
+- **当前开发阶段**：工作聚焦 `circus-sandbox` 的功能开发；现有工程门禁继续适用，不为新增功能重复建设工程基础设施。除非用户明确要求，不主动修改 `circus-paseo`。
 - **Paseo 暂不开发**：说明与开发规则见 [circus-paseo/CLAUDE.md](circus-paseo/CLAUDE.md)。除非任务明确要求，不修改其源码、依赖或配置。
-- **沙箱开发入口**：[circus-sandbox/AGENTS.md](circus-sandbox/AGENTS.md)，用户说明见 [circus-sandbox/README.md](circus-sandbox/README.md)。七个领域的职责边界仍由沙箱指南维护；目前实现 workspace 文件 API 和 `runtime::ResourceLimits` 请求校验，不含资源强制或聚合准入。完整交付目标见 [交付计划](circus-sandbox/docs/delivery-plan.md)，当前门禁与命令见 [工程说明](circus-sandbox/docs/engineering.md)，安全扫描约定见 [安全说明](.github/sandbox-security.md)。按当前检出描述实现，不以规划或工作流存在代替交付与运行证据。
+- **沙箱开发入口**：[circus-sandbox/AGENTS.md](circus-sandbox/AGENTS.md)，用户说明见 [circus-sandbox/README.md](circus-sandbox/README.md)。七个领域的职责边界仍由沙箱指南维护；目前实现 workspace 文件 API、进程内代码快照和 `runtime::ResourceLimits` 请求校验，不含资源强制或聚合准入。完整交付目标见 [交付计划](circus-sandbox/docs/delivery-plan.md)，当前门禁与命令见 [工程说明](circus-sandbox/docs/engineering.md)，安全扫描约定见 [安全说明](.github/sandbox-security.md)。按当前检出描述实现，不以规划或工作流存在代替交付与运行证据。
 
 ## Architecture & Data Flow
 
@@ -19,9 +19,9 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 
 | 路径                    | 用途                                                                                                                                                                                                    |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `circus-sandbox/`       | Rust library crate。已实现 workspace 文件 API、资源请求校验及对应 examples/tests、Apache-2.0 `LICENSE` 与 `deny.toml`。                                                                                 |
+| `circus-sandbox/`       | Rust library crate。已实现 workspace 文件 API、进程内代码快照、资源请求校验及对应 examples/tests、Apache-2.0 `LICENSE` 与 `deny.toml`。                                                                 |
 | `circus-sandbox/src/`   | 已实现 `workspace` 和公开 `runtime` 资源值模型。`api`、`lifecycle`、`infrastructure`、`environment`、`pool` 仍是占位目录，不是已实现模块。                                                              |
-| `circus-sandbox/tests/` | `workspace.rs` 用真实临时目录验证公开文件 API。                                                                                                                                                         |
+| `circus-sandbox/tests/` | `workspace.rs` 与 `code_snapshot.rs` 用真实临时目录验证公开文件及代码快照 API。                                                                                                                         |
 | `circus-sandbox/docs/`  | 交付计划与工程事实。架构细节不在根指南复制。                                                                                                                                                            |
 | `circus-paseo/`         | 已有 npm workspace 应用；内部结构与开发流程交由其 `CLAUDE.md` 说明。                                                                                                                                    |
 | `.github/workflows/`    | Paseo CI 仍按路径触发。沙箱包含 `sandbox-metadata.yml`、`sandbox-quality.yml`、`sandbox-security.yml`、`sandbox-rust.yml` 和 `sandbox-architecture.yml`。各自范围见工程说明；它们不证明进程或容器隔离。 |
@@ -92,7 +92,7 @@ QA 固定 Node.js 24.18.0 与 npm，不继承 Paseo 的 Node 版本。`ci` 和 `
 
 ## Testing & QA
 
-- 沙箱用 `cargo test --locked` 验证已实现行为，没有覆盖率百分比门槛。`tests/workspace.rs` 覆盖写上限、恰好等于上限的读取、非法路径、嵌套目录与删除、重复 `cleanup` 和 `Closed`。大于上限的已有文件读取与符号链接逃逸在 crate 私有测试中，因为公开 API 不暴露工作区根。未实现的生命周期、隔离和后端路径不能用 mock 声称通过。
+- 沙箱用 `cargo test --locked` 验证已实现行为，没有覆盖率百分比门槛。`tests/workspace.rs` 覆盖写上限、恰好等于上限的读取、非法路径、嵌套目录与删除、重复 `cleanup` 和 `Closed`。大于上限的已有文件读取、符号链接逃逸，以及 Unix 工作区根没有组或其他权限，在 crate 私有测试中，因为公开 API 不暴露工作区根。该权限测试不证明同账户或特权进程被隔离。未实现的生命周期、隔离和后端路径不能用 mock 声称通过。
 - 手写 `.rs` 单文件不超过 1200 行（含 1200）。文档、链接、格式、行数与 QA 回归测试由质量门禁覆盖；这些检查不代替 Cargo 行为测试或真实后端证据。检查结果记在对应 PR。
 - Paseo 使用 Vitest、浏览器测试与 Playwright E2E；完整规则见 [测试指南](circus-paseo/docs/testing.md) 和 [QA 指南](circus-paseo/docs/qa.md)。
 - 本地仅运行受影响测试文件；禁止默认执行 `npm test` 或整个工作区测试，全量验证交给 CI。Paseo 改动按其指南执行类型、lint 与格式检查。
