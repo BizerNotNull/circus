@@ -37,7 +37,16 @@
 //! container cleanup; a normal exit preserves container and workspace. A
 //! session is not a TTY, process-group signal API, or detached recovery
 //! mechanism. Not implemented: Kubernetes, containerd, gVisor, Kata,
-//! Firecracker, registry pulls/authentication, and HTTP.
+//! Firecracker, and registry pulls/authentication.
+//!
+//! The optional `http` feature (enabled by default) adds an authenticated JSON
+//! transport over the same [`Sandbox`] API (`http::HttpServer`). It requires an
+//! explicit bearer token and tenant allow-list,
+//! scopes every lookup by tenant, and keeps a separate in-process registry per
+//! service instance. It is not a second domain implementation, a readiness
+//! probe for Docker, or a durable multi-process service; `GET /healthz` reports
+//! only process liveness. Transport DTOs are documented in
+//! `docs/http-api.md` and `docs/openapi.json`.
 //!
 //! # Blocking
 //!
@@ -77,6 +86,8 @@
 
 pub mod api;
 pub mod environment;
+#[cfg(feature = "http")]
+pub mod http;
 mod infrastructure;
 mod lifecycle;
 pub mod pool;

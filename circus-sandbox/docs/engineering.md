@@ -117,6 +117,6 @@ secret scanning 与 push protection 是 GitHub 平台设置，不是工作流的
 
 `Workspace` 提供临时目录内的受限相对读写、建目录、unlink 和显式可重试幂等清理。`max_file_bytes` 是单文件上限，不是工作区总配额。内部 `RwLock` 保护同一值的并发读写，不是外部进程隔离或 crash-safe 原子替换。当前检出有真实 example、公开 API 集成测试和 crate 私有测试；某次运行的环境、命令与结果只记在对应 PR，不以旧提交的绿灯为新提交背书。
 
-尚未实现 Kubernetes、containerd、OCI 环境准备、Git clone/worktree、HTTP/RPC、池、预启动和快照，以及工作区总配额；Docker + runc 适配器之外的隔离后端仍是规划。占位目录不是可调用模块。
+尚未实现 Kubernetes、containerd、OCI 环境准备、Git clone/worktree、RPC、池、预启动和快照，以及工作区总配额；HTTP 传输已由 `src/http` 实现（见 [HTTP API](http-api.md)）。Docker + runc 适配器之外的隔离后端仍是规划。占位目录不是可调用模块。
 
 当前已有一个明确限定为 Linux Docker + runc 的适配器；必须在 Linux 上按 [Docker + runc 文档](docker-linux-runc.md) 运行真实证据。主机引擎可达或 Windows 编译成功不能提前声明隔离通过。完整目标、依赖及池/快照验收仍见 [交付计划](delivery-plan.md)。

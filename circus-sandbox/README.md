@@ -2,11 +2,11 @@
 
 Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace 文件能力、受预算约束的进程内代码快照、`runtime::ResourceLimits` 请求校验、本地 OCI 镜像解析，以及后端中立的 `Sandbox::create(BackendConfig, SandboxConfig)` API。该 API 目前只有一个已实现后端：显式本地 Linux Docker Engine + `runc`。workspace 文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；容器后端通过私有 lifecycle/infrastructure 模块运行 Linux 容器，`BackendConfig::Docker` 只是公开的后端选择描述，不暴露 bollard 或 Engine 类型。
 
-容器后端不是通用进程沙箱：`BackendConfig::Docker` 只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。`environment::prepare_docker_image` 只做本地镜像 inspect，把显式 reference 解析成不可变 image ID 并检查平台；它不会访问 registry，也不会读取凭据。`environment::EnvironmentPlan` 执行显式有序、逐步固定且不经过 shell 的准备工作，并在返回前确认容器与 staging 清理；`environment::EnvironmentId` 从解析后的镜像、平台、固定步骤和显式 tenant 域派生不透明 SHA-256 标识，不提供缓存或持久化。Kubernetes、containerd、gVisor、Kata、Firecracker、registry pull/认证、HTTP/RPC 仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker + runc slice 当作全部七领域交付。
+容器后端不是通用进程沙箱：`BackendConfig::Docker` 只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。`environment::prepare_docker_image` 只做本地镜像 inspect，把显式 reference 解析成不可变 image ID 并检查平台；它不会访问 registry，也不会读取凭据。`environment::EnvironmentPlan` 执行显式有序、逐步固定且不经过 shell 的准备工作，并在返回前确认容器与 staging 清理；`environment::EnvironmentId` 从解析后的镜像、平台、固定步骤和显式 tenant 域派生不透明 SHA-256 标识，不提供缓存或持久化。`http` feature（默认启用）提供认证 JSON HTTP 传输，见 [HTTP API](docs/http-api.md)。Kubernetes、containerd、gVisor、Kata、Firecracker、registry pull/认证仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker + runc slice 当作全部七领域交付。
 
 workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Docker 后端不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；Docker 设置的实际效果需要真实 Linux Engine 验证，独立 workspace 仍没有总字节或宿主磁盘配额执行机制。`CodeSource::open` 仅供可信库调用方显式授予源目录读取能力，再复制到新建的 `Workspace`，不是挂载或直接接管源目录。`GitCheckout` 用受控宿主 Git 进程准备固定提交并可创建独立 worktree，属于可信准备流程，不是对抗性进程沙箱。
 
-工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖还包括 bollard **0.21.1**、tokio **1.x**、tokio-util **0.7.x**、uuid **1.x**、futures-util **0.3.x** 和 thiserror **2.0.21**；`Cargo.lock` 固定解析版本，检查和运行都加 `--locked`。workspace 仍使用 cap-std **4.0.3**、cap-fs-ext **4.0.3**、tempfile **3.27.0**。
+工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖还包括 bollard **0.21.1**、tokio **1.x**、tokio-util **0.7.x**、uuid **1.x**、futures-util **0.3.x**、thiserror **2.0.21**，以及 `http` feature 使用的 axum **0.8**、serde **1.x**、serde_json **1.x**、base64 **0.22**；测试客户端使用 reqwest **0.12**（仅 JSON feature）。`Cargo.lock` 固定解析版本，检查和运行都加 `--locked`。workspace 仍使用 cap-std **4.0.3**、cap-fs-ext **4.0.3**、tempfile **3.27.0**。
 
 这里描述当前检出的真实实现，不以文件或工作流存在代替发布、合并和运行证据。完整目标及交付记录入口见 [交付计划](docs/delivery-plan.md)，QA、安全、Rust 与架构域门禁的实际范围见 [工程说明](docs/engineering.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。
 
@@ -198,6 +198,21 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
 ```
 
 示例分别观察 cold create + restore + start、完整预热和 warm acquire 的 Instant 耗时，并执行基线字节、显式 release/shutdown；不是承诺加速比。Windows 端点可设为 `npipe:////./pipe/dockerDesktopLinuxEngine`；环境变量由所用 shell 显式设置。
+
+## HTTP API
+
+`circus-sandbox` 的 `http` feature（默认启用）把同一领域 `Sandbox` API 暴露为认证 JSON HTTP 服务。`HttpConfig::new(bind, token, allowed_tenants)` 要求显式非空 bearer token 和非空租户 allow-list，没有环境默认值或匿名模式。每个路由（含 `GET /healthz`）都先验证 token；缺失/错误 token 是 `401`，租户缺失或不在 allow-list 是 `403`。sandbox 与 snapshot id 均为随机 UUID，注册表按租户隔离，跨租户 id 返回 `404`。
+
+主要端点：`POST /v1/sandboxes`、`GET /v1/sandboxes/{id}`、`POST .../{id}/{start,pause,resume}`、`DELETE /v1/sandboxes/{id}`、`POST .../{id}/exec`、`GET|PUT .../{id}/files/{path}`、`POST .../{id}/snapshots`、`POST .../{id}/snapshots/{snapshot_id}/restore`。`GET /healthz` 只表示进程存活，不探测 Docker 或任何 sandbox；后端相关失败通过 sandbox 响应的 `503 backend_unavailable` 等错误码表达。
+
+错误体固定为 `{"code","message"}`，不使用内部错误文本，也不泄露 SDK 类型。仅支持 `docker` + `runc`；其他后端或 runtime 返回 `501 unsupported_backend`。清理未确认时 `DELETE` 返回 `500 cleanup_required` 并保留句柄供重试；优雅关闭会销毁全部保留 sandbox，并分别报告失败。
+
+完整端点、请求/响应字段、限额、取消与清理归属及 curl 示例见 [HTTP API](docs/http-api.md)，机器可读契约见 [openapi.json](docs/openapi.json)。示例只启动传输，不虚构 Docker 可用性：
+
+```bash
+CIRCUS_HTTP_TOKEN=example-token CIRCUS_HTTP_TENANT=local \
+  cargo run --locked --example http_api
+```
 
 ## 命令
 
