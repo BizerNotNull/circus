@@ -241,7 +241,7 @@ HTTP handler 直接 `await` 领域 future。客户端断开或连接被关闭时
 
 ## 范围与未实现
 
-- HTTP 传输目前只接受 `docker` + `runc`；库 API 另有 `containerd` + `runc` 与 Kubernetes workload（`kubernetes` feature）。没有 gVisor、Kata、Firecracker；Kubernetes 工作区的暂停/恢复、快照与交互进程也未实现。
+- HTTP 传输目前只接受 `docker` + `runc`；库 API 另有 `containerd` + `runc` 与 Kubernetes workload（`kubernetes` feature，含工作区文件快照）。没有 gVisor、Kata、Firecracker；Kubernetes 工作区的暂停/恢复与交互进程仍未实现。
 - 没有持久化、多进程共享注册表、TLS 终止、速率限制、指标或审计日志；也没有每租户 sandbox 数量上限或聚合准入控制。
 - 没有空闲回收或 TTL：成功创建后未 `DELETE` 的 sandbox 会保留在进程内注册表，直到显式销毁或服务优雅关闭。
 - 没有 OpenAPI 运行时生成器；`docs/openapi.json` 是手工维护的契约，由漂移测试对照真实路由表验证。

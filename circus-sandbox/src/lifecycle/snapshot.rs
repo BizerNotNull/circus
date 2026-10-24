@@ -23,10 +23,11 @@ impl Sandbox {
     /// Captures regular workspace files and directories, not processes or memory.
     ///
     /// In `Created`, captures host staging. In `Running`, the lifecycle worker
-    /// pauses the guest, enumerates the configured workspace through the
-    /// confined guest helper, checks the budgets, reads each file, and resumes
-    /// before returning (also on an ordinary validation or budget failure). An
-    /// already `Paused` guest stays paused. Other phases return
+    /// enumerates the configured workspace through the confined guest helper,
+    /// checks the budgets, and reads each file. A user-`Paused` Docker or
+    /// containerd guest is briefly resumed and paused again (also on an
+    /// ordinary validation or budget failure); Kubernetes Pods have no pause
+    /// state and are read live. Other phases return
     /// [`SandboxError::InvalidPhase`].
     ///
     /// `budget` bounds retained file payload and entries. `max_archive_bytes`
@@ -196,10 +197,11 @@ pub(super) async fn capture<B: Backend>(
     if !matches!(state.phase, SandboxPhase::Running | SandboxPhase::Paused) {
         return Err(phase_err(state, "capture_workspace_snapshot"));
     }
-    // Enumeration runs through `docker exec`, which Docker rejects while a
-    // container is paused. A running source is therefore read live (the
+    // Enumeration uses the backend's guest exec transport. Docker rejects exec
+    // while a container is paused, so a running source is read live (the
     // manifest and per-file size checks still fail closed on concurrent
     // change); a user-paused source is briefly resumed and paused again.
+    // Kubernetes has no pause state, so a running Pod is read directly.
     let restore_pause = state.phase == SandboxPhase::Paused;
     if restore_pause {
         match deadline.network(resume(state)).await {

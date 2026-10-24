@@ -9,8 +9,7 @@ mod kubernetes_support;
 use std::time::Duration;
 
 use circus_sandbox::{
-    BackendConfig, ProcessRequest, Sandbox, SandboxError, SandboxPhase, SnapshotBudget, Workspace,
-    WorkspaceError,
+    BackendConfig, ProcessRequest, Sandbox, SandboxError, SandboxPhase, WorkspaceError,
 };
 use kubernetes_support as support;
 
@@ -141,30 +140,6 @@ async fn kubernetes_unsupported_operations_are_typed() -> support::Result {
             }
         ));
     }
-    let error = sandbox
-        .capture_workspace_snapshot(SnapshotBudget::new(1024, 8)?, 1024)
-        .await
-        .expect_err("capture is unsupported");
-    assert!(matches!(
-        error,
-        SandboxError::UnsupportedCapability {
-            capability: "capture a workspace snapshot"
-        }
-    ));
-
-    let workspace = Workspace::new(1024)?;
-    workspace.write_file("kept.txt", b"kept")?;
-    let snapshot = workspace.capture_code_snapshot(SnapshotBudget::new(1024, 8)?)?;
-    let error = sandbox
-        .restore_workspace_snapshot(std::sync::Arc::new(snapshot))
-        .await
-        .expect_err("restore is unsupported");
-    assert!(matches!(
-        error,
-        SandboxError::UnsupportedCapability {
-            capability: "restore a workspace snapshot"
-        }
-    ));
 
     let error = match sandbox
         .spawn_process(ProcessRequest {

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use circus_sandbox::{
     BackendConfig, BackendConfigError, CommandRequest, IoLimits, IsolationConfig, ResourceLimits,
-    Sandbox, SandboxConfig, SandboxError,
+    Sandbox, SandboxConfig, SandboxError, SnapshotBudget,
 };
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -54,11 +54,21 @@ pub fn backend_in(namespace: &str, image: &str) -> BackendConfig {
 }
 
 pub fn config() -> Result<SandboxConfig> {
+    config_with(1024 * 1024, 8 * 1024 * 1024)
+}
+
+/// Neutral configuration with explicit per-file and workspace bounds.
+pub fn config_with(max_file_bytes: usize, workspace_bytes: u64) -> Result<SandboxConfig> {
     Ok(SandboxConfig::new(
-        ResourceLimits::new(128 * 1024 * 1024, 1000, 64, 8 * 1024 * 1024, 1024 * 1024)?,
+        ResourceLimits::new(128 * 1024 * 1024, 1000, 64, workspace_bytes, max_file_bytes)?,
         IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 1000, 1000)?,
         IoLimits::new(4 * 1024 * 1024, Duration::from_secs(20))?,
     )?)
+}
+
+/// Generous capture budget for the small fixtures used by these suites.
+pub fn budget() -> Result<SnapshotBudget> {
+    Ok(SnapshotBudget::new(64 * 1024, 16)?)
 }
 
 pub async fn create() -> Result<Sandbox> {
@@ -104,6 +114,30 @@ pub fn assert_absent(name: &str) -> Result {
         return Err(format!("Pod {name} is still listed by kubectl").into());
     }
     Ok(())
+}
+
+/// Polls the API through `kubectl` until the Pod is confirmed absent.
+///
+/// Deletion is asynchronous even with a zero grace period, so this waits for
+/// the real API instead of assuming the delete response is completion.
+pub async fn eventually_absent(name: &str) -> Result {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            if assert_absent(name).is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .map_err(|_| format!("Pod {name} did not disappear"))?;
+    assert_absent(name)
+}
+
+/// Destroys a sandbox and confirms the Pod is gone with `kubectl`.
+pub async fn destroy_and_assert(sandbox: &Sandbox, name: &str) -> Result {
+    sandbox.destroy().await?;
+    assert_absent(name)
 }
 
 /// Number of Pods owned by this crate in the configured namespace.

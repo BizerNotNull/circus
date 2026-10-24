@@ -2,10 +2,11 @@ name: Sandbox Kubernetes
 
 # Real Kubernetes workload evidence for the opt-in Kubernetes integration
 # suites. k3s is installed on the runner and the test image is pre-pulled with
-# `k3s ctr`, so the suites perform no registry authentication. This workflow
+# `k3s ctr`, so the suites perform no registry authentication. The suites cover
+# Pod lifecycle/exec/files, workspace snapshots, and pool leases. This workflow
 # complements (does not replace) the Docker and containerd jobs. Absence,
 # cancellation, or failure of this workflow is never a green claim about Pod
-# isolation, pause/resume, or snapshots.
+# isolation or pause/resume.
 #
 # No path filters: circus-sandbox is the whole crate, and a skipped workflow
 # stays pending when a ruleset requires the check.
@@ -115,4 +116,18 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --features kubernetes --test kubernetes_workload -- \
+            --ignored --test-threads=1
+
+      - name: Run ignored Kubernetes workspace snapshot suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --features kubernetes --test kubernetes_snapshot -- \
+            --ignored --test-threads=1
+
+      - name: Run ignored Kubernetes pool suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --features kubernetes --test kubernetes_pool -- \
             --ignored --test-threads=1

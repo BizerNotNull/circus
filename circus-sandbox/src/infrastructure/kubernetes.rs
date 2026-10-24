@@ -12,9 +12,10 @@ use super::engine::{
 use super::kubernetes_config::KubernetesConfig;
 use super::kubernetes_engine::KubernetesEngine;
 
-/// Real Kubernetes workload adapter. Pause/resume, snapshots, and interactive
-/// processes are not implemented by this workload provider; the capability
-/// report makes the lifecycle reject those operations before allocation.
+/// Real Kubernetes workload adapter. Workspace snapshots reuse the shared
+/// guest file transport; pause/resume and interactive processes are not
+/// implemented by this workload provider, and the capability report makes the
+/// lifecycle reject those operations before allocation.
 pub(crate) struct KubernetesBackend {
     engine: KubernetesEngine,
     config: KubernetesConfig,
@@ -51,7 +52,7 @@ impl Backend for KubernetesBackend {
         Capabilities {
             pause_resume: false,
             file_transport: true,
-            workspace_snapshot: false,
+            workspace_snapshot: true,
             spawn_process: false,
         }
     }
