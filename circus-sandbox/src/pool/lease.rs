@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::DockerSandbox;
+use crate::Sandbox;
 use super::{PoolError, worker::Request};
 
 /// Exclusive, single-use access to one prestarted sandbox.
@@ -14,7 +14,7 @@ use super::{PoolError, worker::Request};
 /// not reset/reuse, and does not prove success.
 /// The pool worker retains independent ownership until absence is confirmed.
 pub struct PoolLease {
-    sandbox: Arc<DockerSandbox>,
+    sandbox: Arc<Sandbox>,
     slot: usize,
     generation: u64,
     tx: mpsc::UnboundedSender<Request>,
@@ -32,7 +32,7 @@ impl fmt::Debug for PoolLease {
 
 impl PoolLease {
     pub(super) fn new(
-        sandbox: Arc<DockerSandbox>,
+        sandbox: Arc<Sandbox>,
         slot: usize,
         generation: u64,
         tx: mpsc::UnboundedSender<Request>,
@@ -44,7 +44,7 @@ impl PoolLease {
 
     /// Borrows this lease's sandbox; no cloneable/escaping ownership is exposed.
     /// Pool shutdown revokes the underlying container even during this borrow.
-    pub fn sandbox(&self) -> &DockerSandbox { &self.sandbox }
+    pub fn sandbox(&self) -> &Sandbox { &self.sandbox }
 
     /// Destroys this container. A successful result confirms absence, not a
     /// reusable clean container. Failed cleanup remains owned and is retried.

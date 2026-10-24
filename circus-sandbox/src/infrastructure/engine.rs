@@ -1,5 +1,9 @@
 //! Docker Engine calls. Bollard types stay in this module.
 
+#[path = "images.rs"]
+mod images;
+pub(crate) use images::ImageInfo;
+
 use std::collections::HashMap;
 
 use futures_util::StreamExt;
@@ -82,16 +86,18 @@ pub(crate) struct CreateSpec {
     pub owner_label: String,
 }
 
+/// Inspected effective configuration. A `None` field means the backend did not
+/// report it; it is never replaced with a default that could look enforced.
 pub(crate) struct HostReport {
-    pub runtime: String,
-    pub memory_bytes: i64,
-    pub nano_cpus: i64,
-    pub pids_limit: i64,
-    pub readonly_root: bool,
-    pub network_mode: String,
-    pub cap_drop: Vec<String>,
-    pub security_opt: Vec<String>,
-    pub bind_count: usize,
+    pub runtime: Option<String>,
+    pub memory_bytes: Option<i64>,
+    pub nano_cpus: Option<i64>,
+    pub pids_limit: Option<i64>,
+    pub readonly_root: Option<bool>,
+    pub network_mode: Option<String>,
+    pub cap_drop: Option<Vec<String>>,
+    pub security_opt: Option<Vec<String>>,
+    pub bind_count: Option<usize>,
     pub tmpfs_workspace: Option<String>,
 }
 
@@ -617,15 +623,15 @@ impl Engine {
             .map_err(map_err)?;
         let host = inspected.host_config.unwrap_or_default();
         Ok(HostReport {
-            runtime: host.runtime.unwrap_or_default(),
-            memory_bytes: host.memory.unwrap_or(0),
-            nano_cpus: host.nano_cpus.unwrap_or(0),
-            pids_limit: host.pids_limit.unwrap_or(0),
-            readonly_root: host.readonly_rootfs.unwrap_or(false),
-            network_mode: host.network_mode.unwrap_or_default(),
-            cap_drop: host.cap_drop.unwrap_or_default(),
-            security_opt: host.security_opt.unwrap_or_default(),
-            bind_count: host.binds.unwrap_or_default().len(),
+            runtime: host.runtime,
+            memory_bytes: host.memory,
+            nano_cpus: host.nano_cpus,
+            pids_limit: host.pids_limit,
+            readonly_root: host.readonly_rootfs,
+            network_mode: host.network_mode,
+            cap_drop: host.cap_drop,
+            security_opt: host.security_opt,
+            bind_count: host.binds.map(|binds| binds.len()),
             tmpfs_workspace: host.tmpfs.and_then(|map| map.into_values().next()),
         })
     }

@@ -2,13 +2,33 @@
 use std::{process::Command, sync::Arc, time::Duration};
 
 use circus_sandbox::{
-    CommandRequest, DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig, ResourceLimits,
-    RuntimeName, SandboxConfig, SandboxError, SandboxPhase, SnapshotBudget, SnapshotError,
-    WorkspaceError,
+    BackendConfig, CommandRequest, IoLimits, IsolationConfig, ResourceLimits, Sandbox,
+    SandboxConfig, SandboxError, SandboxPhase, SnapshotBudget, SnapshotError, WorkspaceError,
 };
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 const ARCHIVE_CAP: u64 = 1024 * 1024;
+
+fn backend() -> Result<BackendConfig> {
+    Ok(BackendConfig::docker(
+        std::env::var("CIRCUS_DOCKER_ENDPOINT")?,
+        std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
+        "runc",
+    ))
+}
+
+fn host(backend: &BackendConfig) -> String {
+    match backend {
+        BackendConfig::Docker(docker) => {
+            let endpoint = docker.endpoint();
+            if endpoint.starts_with('/') {
+                format!("unix://{endpoint}")
+            } else {
+                endpoint.to_string()
+            }
+        }
+    }
+}
 
 fn config(file_bytes: usize, workspace_bytes: u64) -> Result<SandboxConfig> {
     assert_eq!(
@@ -17,9 +37,6 @@ fn config(file_bytes: usize, workspace_bytes: u64) -> Result<SandboxConfig> {
         "set CIRCUS_DOCKER_SANDBOX=1 to opt into the real Engine tests"
     );
     Ok(SandboxConfig::new(
-        DockerEndpoint::parse(&std::env::var("CIRCUS_DOCKER_ENDPOINT")?)?,
-        std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
-        RuntimeName::runc(),
         ResourceLimits::new(64 * 1024 * 1024, 100, 32, workspace_bytes, file_bytes)?,
         IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
         IoLimits::new(64 * 1024, Duration::from_secs(15))?,
@@ -29,24 +46,20 @@ fn config(file_bytes: usize, workspace_bytes: u64) -> Result<SandboxConfig> {
 // The emergency fallback removes only the exact unique container we created.
 // It neither prunes other users' containers nor deletes any images.
 struct Fixture {
-    sandbox: DockerSandbox,
+    sandbox: Sandbox,
     host: String,
     id: String,
 }
 impl Fixture {
     async fn new(file_bytes: usize, workspace_bytes: u64) -> Result<Self> {
-        let config = config(file_bytes, workspace_bytes)?;
-        let host = match config.endpoint() {
-            DockerEndpoint::UnixSocket { path } | DockerEndpoint::NamedPipe { path } => {
-                path.clone()
-            }
-        };
-        let sandbox = DockerSandbox::create(config).await?;
+        let backend = backend()?;
+        let host = host(&backend);
+        let sandbox = Sandbox::create(backend, config(file_bytes, workspace_bytes)?).await?;
         let id = sandbox
             .status()
             .await?
-            .container_id
-            .expect("created container ID");
+            .instance_id
+            .expect("created instance ID");
         Ok(Self { sandbox, host, id })
     }
     async fn guest(&self, code: &str) -> Result<Vec<u8>> {
@@ -396,7 +409,7 @@ async fn archive_transport_failure_cleans_only_owned_container() -> Result {
         .await?;
     assert!(matches!(
         source.sandbox.capture_workspace_snapshot(budget(), 1).await,
-        Err(SandboxError::Engine { .. })
+        Err(SandboxError::Backend { .. })
     ));
     assert_eq!(
         source.sandbox.status().await?.phase,

@@ -2,8 +2,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use circus_sandbox::{
-    CommandError, CommandRequest, DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig,
-    ResourceLimits, RuntimeName, SandboxConfig, SandboxError, SandboxPhase, StagingError,
+    BackendConfig, CommandError, CommandRequest, IoLimits, IsolationConfig, ResourceLimits,
+    Sandbox, SandboxConfig, SandboxError, SandboxPhase, StagingError,
 };
 
 const PY: &str = "python3";
@@ -18,18 +18,30 @@ fn enabled() {
     );
 }
 
-fn endpoint() -> Result<DockerEndpoint, Box<dyn std::error::Error>> {
-    Ok(DockerEndpoint::parse(&std::env::var(
-        "CIRCUS_DOCKER_ENDPOINT",
-    )?)?)
+fn backend() -> Result<BackendConfig, Box<dyn std::error::Error>> {
+    Ok(BackendConfig::docker(
+        std::env::var("CIRCUS_DOCKER_ENDPOINT")?,
+        std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
+        "runc",
+    ))
+}
+
+fn host(backend: &BackendConfig) -> String {
+    match backend {
+        BackendConfig::Docker(docker) => {
+            let endpoint = docker.endpoint();
+            if endpoint.starts_with('/') {
+                format!("unix://{endpoint}")
+            } else {
+                endpoint.to_string()
+            }
+        }
+    }
 }
 
 fn config() -> Result<SandboxConfig, Box<dyn std::error::Error>> {
     let limits = ResourceLimits::new(64 * 1024 * 1024, 100, TEST_PIDS, 8 * 1024 * 1024, 1024)?;
     Ok(SandboxConfig::new(
-        endpoint()?,
-        std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
-        RuntimeName::runc(),
         limits,
         IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
         IoLimits::new(64 * 1024, Duration::from_secs(3))?,
@@ -37,28 +49,31 @@ fn config() -> Result<SandboxConfig, Box<dyn std::error::Error>> {
 }
 
 struct Fixture {
-    sandbox: Option<DockerSandbox>,
-    endpoint: DockerEndpoint,
+    sandbox: Option<Sandbox>,
+    host: String,
     id: Option<String>,
 }
 
 impl Fixture {
     async fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        Self::with_config(config()?).await
+        Self::with_config(backend()?, config()?).await
     }
 
-    async fn with_config(config: SandboxConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        let ep = config.endpoint().clone();
-        let sandbox = DockerSandbox::create(config).await?;
-        let id = sandbox.status().await?.container_id;
+    async fn with_config(
+        backend: BackendConfig,
+        config: SandboxConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let host = host(&backend);
+        let sandbox = Sandbox::create(backend, config).await?;
+        let id = sandbox.status().await?.instance_id;
         Ok(Self {
             sandbox: Some(sandbox),
-            endpoint: ep,
+            host,
             id,
         })
     }
 
-    fn sandbox(&self) -> &DockerSandbox {
+    fn sandbox(&self) -> &Sandbox {
         self.sandbox.as_ref().expect("fixture is alive")
     }
 }
@@ -66,11 +81,8 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         if let Some(id) = &self.id {
-            let host = match &self.endpoint {
-                DockerEndpoint::UnixSocket { path } | DockerEndpoint::NamedPipe { path } => path,
-            };
             let _ = Command::new("docker")
-                .args(["--host", host, "rm", "-f", id])
+                .args(["--host", &self.host, "rm", "-f", id])
                 .output();
         }
     }
@@ -103,12 +115,23 @@ async fn docker_linux_runc_lifecycle() -> Result<(), Box<dyn std::error::Error>>
     f.sandbox().start().await?;
     let status = f.sandbox().status().await?;
     assert_eq!(status.phase, SandboxPhase::Running);
-    assert_eq!(status.runtime, "runc");
-    assert_eq!(status.memory_bytes, 64 * 1024 * 1024);
-    assert_eq!(status.nano_cpus, 100_000_000);
-    assert_eq!(status.pids_limit, i64::from(TEST_PIDS));
-    assert!(status.readonly_root && status.network_mode == "none");
-    assert!(status.bind_count == 0 && status.cap_drop.iter().any(|c| c == "ALL"));
+    let observed = status
+        .enforcement
+        .as_ref()
+        .expect("running sandbox exposes inspected evidence");
+    assert_eq!(observed.runtime.as_deref(), Some("runc"));
+    assert_eq!(observed.memory_bytes, Some(64 * 1024 * 1024));
+    assert_eq!(observed.nano_cpus, Some(100_000_000));
+    assert_eq!(observed.pids_limit, Some(i64::from(TEST_PIDS)));
+    assert_eq!(observed.readonly_root, Some(true));
+    assert_eq!(observed.network_mode.as_deref(), Some("none"));
+    assert_eq!(observed.bind_count, Some(0));
+    assert!(
+        observed
+            .cap_drop
+            .as_ref()
+            .is_some_and(|caps| caps.iter().any(|cap| cap == "ALL"))
+    );
     let security = f.sandbox().exec(py(&["-c", r###"from pathlib import Path; s=Path('/proc/self/status').read_text(); print(next(x for x in s.splitlines() if x.startswith('NoNewPrivs:'))); print(next(x for x in s.splitlines() if x.startswith('CapEff:')))"###])).await?;
     let security_text = String::from_utf8(security.stdout)?;
     assert!(
@@ -303,7 +326,7 @@ async fn docker_linux_runc_invalid_commands_preserve_sandbox()
         );
         let status = f.sandbox().status().await?;
         assert_eq!(status.phase, SandboxPhase::Running);
-        assert_eq!(status.container_id, f.id);
+        assert_eq!(status.instance_id, f.id);
         let out = f.sandbox().exec(py(&["-c", "print('alive')"])).await?;
         assert_eq!(out.stdout, b"alive\n");
     }
@@ -317,14 +340,11 @@ async fn docker_linux_runc_staging_limit_is_not_a_path_error()
 -> Result<(), Box<dyn std::error::Error>> {
     enabled();
     let config = SandboxConfig::new(
-        endpoint()?,
-        std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
-        RuntimeName::runc(),
         ResourceLimits::new(64 * 1024 * 1024, 100, TEST_PIDS, 1024, 1024)?,
         IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
         IoLimits::new(64 * 1024, Duration::from_secs(3))?,
     )?;
-    let mut f = Fixture::with_config(config).await?;
+    let mut f = Fixture::with_config(backend()?, config).await?;
     let bytes = vec![b'x'; 700];
     f.sandbox().write_file("first", &bytes).await?;
     f.sandbox().write_file("second", &bytes).await?;
@@ -345,7 +365,7 @@ async fn docker_linux_runc_staging_limit_is_not_a_path_error()
     );
     let status = f.sandbox().status().await?;
     assert_eq!(status.phase, SandboxPhase::Created);
-    assert_eq!(status.container_id, f.id);
+    assert_eq!(status.instance_id, f.id);
     assert_eq!(f.sandbox().read_file("first").await?, bytes);
     assert_eq!(f.sandbox().read_file("second").await?, bytes);
     assert_eq!(f.sandbox().read_file("third").await?, bytes);

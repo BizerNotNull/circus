@@ -2,17 +2,22 @@
 use std::time::Duration;
 
 use circus_sandbox::{
-    CommandRequest, DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig, ResourceLimits,
-    RuntimeName, SandboxConfig, SnapshotBudget,
+    BackendConfig, CommandRequest, IoLimits, IsolationConfig, ResourceLimits, Sandbox,
+    SandboxConfig, SnapshotBudget,
 };
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+fn backend() -> Result<BackendConfig> {
+    Ok(BackendConfig::docker(
+        std::env::var("CIRCUS_DOCKER_ENDPOINT")?,
+        std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
+        "runc",
+    ))
+}
+
 fn config() -> Result<SandboxConfig> {
     Ok(SandboxConfig::new(
-        DockerEndpoint::parse(&std::env::var("CIRCUS_DOCKER_ENDPOINT")?)?,
-        std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
-        RuntimeName::runc(),
         ResourceLimits::new(64 * 1024 * 1024, 100, 32, 8 * 1024 * 1024, 64 * 1024)?,
         IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
         IoLimits::new(64 * 1024, Duration::from_secs(15))?,
@@ -21,7 +26,8 @@ fn config() -> Result<SandboxConfig> {
 
 #[tokio::main]
 async fn main() -> Result {
-    let source = DockerSandbox::create(config()?).await?;
+    let backend = backend()?;
+    let source = Sandbox::create(backend.clone(), config()?).await?;
     let capture: Result<_> = async {
         source.start().await?;
         let write = source.exec(CommandRequest {
@@ -44,7 +50,7 @@ async fn main() -> Result {
     let snapshot = capture?;
     println!("Source destroyed; only workspace files/directories were copied, not processes.");
 
-    let destination = DockerSandbox::create(config()?).await?;
+    let destination = Sandbox::create(backend, config()?).await?;
     let restored: Result = async {
         destination.restore_workspace_snapshot(snapshot).await?;
         destination.start().await?;

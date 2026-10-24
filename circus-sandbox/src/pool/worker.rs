@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::{CleanupReceipt, DockerSandbox, SandboxError, SandboxPhase};
+use crate::{CleanupReceipt, Sandbox, SandboxError, SandboxPhase};
 use super::{PoolConfig, PoolError, PoolFailure, PoolLease, PoolStatus};
 
 type Reply = oneshot::Sender<Result<(), PoolError>>;
@@ -33,14 +33,14 @@ struct Waiter {
 
 enum State {
     Creating,
-    Ready(Arc<DockerSandbox>),
-    Leased { sandbox: Arc<DockerSandbox>, expires: Instant },
+    Ready(Arc<Sandbox>),
+    Leased { sandbox: Arc<Sandbox>, expires: Instant },
     Retiring {
-        sandbox: Arc<DockerSandbox>,
+        sandbox: Arc<Sandbox>,
         receipt: CleanupReceipt,
     },
     CleanupRequired {
-        sandbox: Option<Arc<DockerSandbox>>,
+        sandbox: Option<Arc<Sandbox>>,
         receipt: Option<CleanupReceipt>,
         waiting: bool,
         source: Failure,
@@ -56,7 +56,7 @@ struct Slot {
 }
 
 enum Completion {
-    Created { slot: usize, sandbox: Option<Arc<DockerSandbox>>, result: Result<(), Failure> },
+    Created { slot: usize, sandbox: Option<Arc<Sandbox>>, result: Result<(), Failure> },
     Destroyed { slot: usize, result: Result<(), Failure> },
     Receipt { slot: usize, result: Result<(), Failure> },
 }
@@ -137,8 +137,9 @@ impl Worker {
         // Owned by the worker's bounded future set. Never abort a create or
         // discard its eventual ownership receipt when closing/caller cancels.
         self.jobs.push(Box::pin(async move {
+            let PoolConfig { backend, sandbox: sandbox_config, baseline, .. } = config;
             if refill { tokio::time::sleep(Duration::from_secs(1)).await; }
-            let sandbox = match DockerSandbox::create(config.sandbox).await {
+            let sandbox = match Sandbox::create(backend, sandbox_config).await {
                 Ok(sandbox) => Arc::new(sandbox),
                 Err(source) => return Completion::Created {
                     slot, sandbox: None, result: Err(failure("create", source)),
@@ -146,7 +147,7 @@ impl Worker {
             };
             let result = async {
                 if close.is_cancelled() { return Ok(()); }
-                if let Some(baseline) = config.baseline {
+                if let Some(baseline) = baseline {
                     sandbox.restore_workspace_snapshot(baseline).await
                         .map_err(|source| failure("restore workspace", source))?;
                 }
@@ -163,7 +164,7 @@ impl Worker {
         }));
     }
 
-    fn retire(&mut self, slot: usize, sandbox: Arc<DockerSandbox>) {
+    fn retire(&mut self, slot: usize, sandbox: Arc<Sandbox>) {
         let receipt = sandbox.revoke();
         self.slots[slot].state = State::Retiring {
             sandbox,

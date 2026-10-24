@@ -1,25 +1,32 @@
-//! Capability-scoped workspace files, resource requests, and a Linux Docker sandbox.
+//! Backend-neutral workspace files, snapshots, image preparation, and one real
+//! Linux container backend.
 //!
-//! [`Workspace`] confines file access to a directory it creates. [`DockerSandbox`]
-//! is a separate async API: it stages those files into a bounded tmpfs and runs
-//! commands in a Linux container through an explicit local Docker endpoint.
-//! Public types do not expose the Docker SDK.
+//! [`Workspace`] confines file access to a directory it creates. [`Sandbox`] is
+//! a separate async API: it stages those files into a bounded tmpfs and runs
+//! commands in a Linux container through an explicitly selected local Docker
+//! Engine endpoint with `runc`. Creation takes a [`BackendConfig`] and a
+//! backend-neutral [`SandboxConfig`]; even though only the Docker backend is
+//! implemented, callers do not name backend SDK types.
 //!
 //! [`CodeSource`] copies an explicitly authorized source directory into a fresh
 //! owned workspace. [`CodeSnapshot`] captures workspace contents in memory;
-//! Docker snapshots capture and restore tmpfs workspace files, including running
-//! writes, but are not process, memory, VM, or Docker-commit checkpoints.
+//! sandbox snapshots capture and restore tmpfs workspace files, including
+//! running writes, but are not process, memory, VM, or Docker-commit
+//! checkpoints. [`environment::prepare_docker_image`] resolves an explicit
+//! reference to an immutable local image identity; it never pulls from or
+//! authenticates against a registry.
 //!
 //! The bounded Docker pool prestarts fresh single-use containers and never
 //! resets dirty leases. [`GitCheckout`] prepares a fixed commit with a controlled
 //! host Git process, and [`GitCheckout::create_worktree`] adds independent
-//! detached [`GitWorktree`] values at that commit. Not implemented: Kubernetes,
-//! gVisor, Kata, Firecracker, OCI environment resolution/pull, and HTTP.
+//! detached [`GitWorktree`] values at that commit. Local OCI image resolution
+//! inspects an existing image. Not implemented: Kubernetes, containerd, gVisor,
+//! Kata, Firecracker, registry pulls/authentication, and HTTP.
 //!
 //! # Blocking
 //!
-//! Workspace methods block the calling thread. [`DockerSandbox`] methods are
-//! async and must be called from a Tokio runtime. They run workspace I/O with
+//! Workspace methods block the calling thread. [`Sandbox`] methods are async and
+//! must be called from a Tokio runtime. They run workspace I/O with
 //! `spawn_blocking`.
 //!
 //! # Limits
@@ -53,6 +60,7 @@
 #![forbid(unsafe_code)]
 
 pub mod api;
+pub mod environment;
 mod infrastructure;
 mod lifecycle;
 pub mod pool;
@@ -61,9 +69,9 @@ mod workspace;
 
 #[doc(inline)]
 pub use api::{
-    CleanupReceipt, CleanupReport, CommandError, CommandOutput, CommandRequest, ConfigError,
-    DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig, OWNER_LABEL_KEY, Ownership,
-    RuntimeName, SandboxConfig, SandboxError, SandboxPhase, SandboxStatus, StagingError,
+    BackendConfig, BackendConfigError, CleanupReceipt, CleanupReport, CommandError, CommandOutput,
+    CommandRequest, ConfigError, DockerBackendConfig, EnforcementReport, IoLimits, IsolationConfig,
+    Ownership, Sandbox, SandboxConfig, SandboxError, SandboxPhase, SandboxStatus, StagingError,
 };
 #[doc(inline)]
 pub use workspace::{
