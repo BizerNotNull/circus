@@ -5,6 +5,7 @@ mod environment;
 mod input;
 mod model;
 mod operations;
+mod process;
 mod snapshot;
 
 pub use cleanup::CleanupReceipt;
@@ -12,6 +13,9 @@ pub use input::{CommandError, StagingError};
 pub use model::{
     CleanupFailure, CleanupReport, CommandOutput, CommandRequest, EnforcementReport, OutputPhase,
     Ownership, SandboxError, SandboxOperation, SandboxPhase, SandboxStatus,
+};
+pub use process::{
+    ProcessError, ProcessExit, ProcessOutput, ProcessRequest, ProcessSession, ProcessTermination,
 };
 
 use std::path::Path;
@@ -71,6 +75,10 @@ enum Op {
     Exec {
         request: CommandRequest,
         reply: oneshot::Sender<Result<CommandOutput, SandboxError>>,
+    },
+    Spawn {
+        request: ProcessRequest,
+        reply: oneshot::Sender<Result<ProcessSession, SandboxError>>,
     },
     Status(oneshot::Sender<Result<SandboxStatus, SandboxError>>),
     CaptureSnapshot {
@@ -184,6 +192,7 @@ impl Sandbox {
             phase: SandboxPhase::Created,
             shutdown: shutdown.clone(),
             create_unsettled: true,
+            process: None,
             cleanup: cleanup_tx,
         };
         tokio::spawn(worker(state, rx, ready_tx));
@@ -343,6 +352,32 @@ impl Sandbox {
         self.call(|reply| Op::Exec { request, reply }).await?
     }
 
+    /// Starts one interactive process without occupying the lifecycle queue.
+    ///
+    /// Files, status, pause/resume, and destroy remain usable while it runs.
+    /// Another interactive process or one-shot [`exec`](Self::exec) returns
+    /// [`SandboxError::ProcessActive`] until lifecycle records completion.
+    ///
+    /// `ProcessRequest::validate` rejects malformed requests before queueing:
+    /// no process is started, no deadline applies, and phase and ownership are
+    /// unchanged. A request whose per-stream output limit exceeds the configured
+    /// [`crate::runtime::IoLimits::output_limit_bytes`] is rejected the same way.
+    ///
+    /// Uses the configured file deadline for attachment. Dropping this future
+    /// after acceptance, a deadline, or cancellation destroys the owned
+    /// instance because the exec may already have been accepted; the error
+    /// reports observed ownership. A normal exit preserves container and
+    /// workspace; process timeout, output overflow, transport failure,
+    /// session drop, or [`ProcessSession::cancel`] request whole-container
+    /// cleanup and report it through [`ProcessExit::Terminated`].
+    pub async fn spawn_process(
+        &self,
+        request: ProcessRequest,
+    ) -> Result<ProcessSession, SandboxError> {
+        request.validate()?;
+        self.call(|reply| Op::Spawn { request, reply }).await?
+    }
+
     /// Returns the phase, retained instance identity, and inspected enforcement
     /// evidence. Requested limits are never reported as enforced.
     ///
@@ -431,6 +466,8 @@ pub(super) struct State<B: Backend> {
     phase: SandboxPhase,
     shutdown: CancellationToken,
     create_unsettled: bool,
+    /// At most one interactive process; lifecycle records its final outcome.
+    process: Option<process::ActiveProcess>,
     cleanup: tokio::sync::watch::Sender<cleanup::Progress>,
 }
 
@@ -475,6 +512,10 @@ async fn worker<B: Backend>(
         let message = tokio::select! {
             biased;
             () = state.shutdown.cancelled() => None,
+            result = process::completed(&mut state.process) => {
+                process::finish(&mut state, result).await;
+                continue;
+            },
             message = rx.recv() => message,
         };
         let Some(message) = message else {
@@ -664,6 +705,16 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
                 operations::exec(state, request),
                 timeout,
                 SandboxOperation::Exec
+            );
+            let _ = reply.send(result);
+        }
+        // Attachment allocates an exec, so a deadline or cancellation destroys
+        // the owned instance instead of leaving an unobserved guest process.
+        Op::Spawn { request, reply } => {
+            let result = run!(
+                process::spawn(state, request),
+                file_timeout,
+                SandboxOperation::SpawnProcess
             );
             let _ = reply.send(result);
         }

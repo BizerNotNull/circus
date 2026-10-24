@@ -2,12 +2,21 @@
 //!
 //! No SDK type crosses this module. Futures are RPITIT and dispatched
 //! statically through `State<B>`; there is no boxed future or trait object on
-//! the lifecycle path. A backend owns connection details and translates the
-//! shared [`CommonSpec`] into its own create request.
+//! the lifecycle operation path. The one boxed seam is the attached process
+//! transport ([`BackendProcess`]): its stdin writer, output stream, and exit
+//! confirmation outlive the backend borrow and are owned by the separate I/O
+//! task. A backend owns connection details and translates the shared
+//! [`CommonSpec`] into its own create request.
 
 use std::future::Future;
+use std::pin::Pin;
 
-use super::engine::{EngineError, ExecDone, HostReport, Recovered, StagedBytes};
+use futures_util::Stream;
+use tokio::io::AsyncWrite;
+
+use super::engine::{
+    EngineError, ExecDone, HostReport, ProcessChunk, ProcessSpec, Recovered, StagedBytes,
+};
 
 /// Backend-owned instance identity. Opaque outside the lifecycle owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +64,21 @@ pub(crate) struct CommonSpec {
 pub(crate) enum PrepareError {
     ImageUnavailable { image: String },
     Engine(EngineError),
+}
+
+/// One attached interactive process, backend-neutral.
+///
+/// The backend owns the transport; lifecycle owns cancellation and cleanup.
+/// `exit` confirms the guest exit status only after `output` has ended, so it is
+/// resolved inside the lifecycle I/O task instead of borrowing the backend. The
+/// lifecycle worker needs no clonable or shared backend to observe an exit.
+pub(crate) struct BackendProcess {
+    /// Attached stdin. A dropped writer closes the transport, never the guest.
+    pub input: Pin<Box<dyn AsyncWrite + Send>>,
+    /// Ordered stdout/stderr chunks until the process detaches.
+    pub output: Pin<Box<dyn Stream<Item = Result<ProcessChunk, EngineError>> + Send>>,
+    /// Confirmed exit status, awaited once `output` has ended.
+    pub exit: Pin<Box<dyn Future<Output = Result<i64, EngineError>> + Send>>,
 }
 
 /// Deployment adapter with static dispatch.
@@ -128,6 +152,18 @@ pub(crate) trait Backend: Send + Sync + 'static {
         argv: &[String],
         output_limit: usize,
     ) -> impl Future<Output = Result<ExecDone, EngineError>> + Send;
+
+    /// Attaches one interactive process to the owned instance.
+    ///
+    /// The request is backend-neutral; instance identity, guest user, and
+    /// workspace are supplied by the lifecycle owner. A started process is
+    /// owned until its transport ends; closing the transport never claims the
+    /// guest stopped, so only lifecycle removes the instance.
+    fn spawn_process(
+        &self,
+        id: &InstanceId,
+        spec: ProcessSpec<'_>,
+    ) -> impl Future<Output = Result<BackendProcess, EngineError>> + Send;
 
     /// Inspected effective configuration, with absent fields left absent.
     fn host_report(

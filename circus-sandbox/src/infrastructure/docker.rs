@@ -2,9 +2,10 @@
 
 use std::future::Future;
 
-use super::backend::{Backend, Capabilities, CommonSpec, InstanceId, PrepareError};
+use super::backend::{Backend, BackendProcess, Capabilities, CommonSpec, InstanceId, PrepareError};
 use super::engine::{
-    CreateSpec, Engine, EngineError, ExecDone, HostReport, Recovered, SocketKind, StagedBytes,
+    CreateSpec, Engine, EngineError, EngineProcess, ExecDone, HostReport, ProcessSpec, Recovered,
+    SocketKind, StagedBytes,
 };
 
 /// Local Docker Engine endpoint. TCP, HTTP, and SSH are rejected.
@@ -304,6 +305,28 @@ impl Backend for DockerBackend {
             self.engine
                 .exec(id.as_str(), user, workdir, argv, output_limit)
                 .await
+        }
+    }
+
+    fn spawn_process(
+        &self,
+        id: &InstanceId,
+        spec: ProcessSpec<'_>,
+    ) -> impl Future<Output = Result<BackendProcess, EngineError>> + Send {
+        async move {
+            // The attached exec identity stays engine-owned; the returned exit
+            // future confirms the guest status after the output stream ends.
+            let engine = self.engine.clone();
+            let EngineProcess {
+                id: exec,
+                input,
+                output,
+            } = self.engine.spawn_process(id.as_str(), spec).await?;
+            Ok(BackendProcess {
+                input,
+                output,
+                exit: Box::pin(async move { engine.process_exit(&exec).await }),
+            })
         }
     }
 

@@ -40,6 +40,7 @@ pub enum SandboxOperation {
     CreateDirAll,
     RemoveFile,
     Exec,
+    SpawnProcess,
     CaptureWorkspaceSnapshot,
     RestoreWorkspaceSnapshot,
 }
@@ -56,6 +57,7 @@ impl std::fmt::Display for SandboxOperation {
             Self::CreateDirAll => "create_dir_all",
             Self::RemoveFile => "remove_file",
             Self::Exec => "exec",
+            Self::SpawnProcess => "spawn_process",
             Self::CaptureWorkspaceSnapshot => "capture_workspace_snapshot",
             Self::RestoreWorkspaceSnapshot => "restore_workspace_snapshot",
         };
@@ -176,6 +178,12 @@ pub struct CommandOutput {
 /// Matchable failure. Backend SDK types are not part of this enum.
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
+    /// Interactive process input was rejected before any exec was created.
+    #[error("invalid process request: {reason}")]
+    InvalidProcessRequest { reason: &'static str },
+    /// One interactive process is already attached to this sandbox.
+    #[error("an interactive process is already active in this sandbox")]
+    ProcessActive,
     /// Backend-neutral configuration was rejected.
     #[error(transparent)]
     Config(#[from] ConfigError),

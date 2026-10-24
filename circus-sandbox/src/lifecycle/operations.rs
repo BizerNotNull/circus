@@ -131,6 +131,20 @@ pub(super) async fn destroy_state<B: Backend>(state: &mut State<B>) -> Result<()
     if state.phase == SandboxPhase::Destroyed {
         return Ok(());
     }
+    // Closing the transport never claims the guest or its descendants stopped,
+    // so stop the attached process first and keep its completion sender in
+    // `State` until this attempt has reported actual ownership.
+    super::process::stop(state).await;
+    let instance_id = state
+        .id
+        .as_ref()
+        .map_or_else(|| state.name.clone(), |id| id.as_str().to_string());
+    let result = destroy_resources(state).await;
+    super::process::destroyed(state.process.take(), Some(instance_id), &result);
+    result
+}
+
+async fn destroy_resources<B: Backend>(state: &mut State<B>) -> Result<(), SandboxError> {
     state.phase = SandboxPhase::CleanupRequired;
     let retained = state.id.clone();
     let instance_id = retained
@@ -359,6 +373,9 @@ pub(super) async fn exec<B: Backend>(
     request: CommandRequest,
 ) -> Result<CommandOutput, SandboxError> {
     need(state, SandboxPhase::Running, "exec")?;
+    if state.process.is_some() {
+        return Err(SandboxError::ProcessActive);
+    }
     if request.output_limit_bytes > state.config.output_limit_bytes() {
         return Err(SandboxError::OutputLimit {
             limit: state.config.output_limit_bytes(),

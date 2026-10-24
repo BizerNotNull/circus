@@ -16,6 +16,9 @@ pub(crate) use policy::{HostReport, OWNER_LABEL_KEY, PolicyMismatch, create_body
 mod recovery;
 pub(crate) use recovery::{OwnerCheck, Recovered, RemovalControl, recover_with};
 
+mod process;
+pub(crate) use process::{EngineProcess, ProcessChunk, ProcessSpec};
+
 use std::future::Future;
 
 use futures_util::StreamExt;

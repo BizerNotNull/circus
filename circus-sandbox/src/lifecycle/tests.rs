@@ -80,9 +80,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::infrastructure::{
-    Backend, Capabilities, CommonSpec, EngineError, EngineErrorKind, ExecDone, HostReport,
-    InstanceId, OutputLimit as EngineOutputLimit, OutputPhase as EngineOutputPhase, PolicyMismatch,
-    PrepareError, Recovered, StagedBytes,
+    Backend, BackendProcess, Capabilities, CommonSpec, EngineError, EngineErrorKind, ExecDone,
+    HostReport, InstanceId, OutputLimit as EngineOutputLimit, OutputPhase as EngineOutputPhase,
+    PolicyMismatch, PrepareError, ProcessSpec, Recovered, StagedBytes,
 };
 use crate::runtime::{IoLimits, IsolationConfig, ResourceLimits, SandboxConfig};
 use crate::workspace::Workspace;
@@ -237,6 +237,14 @@ impl Backend for FakeBackend {
         }
     }
 
+    fn spawn_process(
+        &self,
+        _id: &InstanceId,
+        _spec: ProcessSpec<'_>,
+    ) -> impl Future<Output = Result<BackendProcess, EngineError>> + Send {
+        async { unused_engine("spawn_process") }
+    }
+
     fn host_report(
         &self,
         _id: &InstanceId,
@@ -309,6 +317,7 @@ fn test_state(backend: FakeBackend) -> State<FakeBackend> {
         phase: SandboxPhase::Created,
         shutdown: CancellationToken::new(),
         create_unsettled: false,
+        process: None,
         cleanup,
     }
 }

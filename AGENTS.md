@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心，`circus-paseo` 是尚未接入的前端调用方。沙箱目前提供 workspace 文件库、受预算约束的进程内代码快照、资源请求校验，以及显式配置的本地 Linux Docker Engine + `runc` 异步后端；不要把完整交付规划写成现有能力。
+Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心，`circus-paseo` 是尚未接入的前端调用方。沙箱目前提供 workspace 文件库、受预算约束的进程内代码快照、资源请求校验、本地 OCI 镜像解析与有界预启动池、固定提交 Git clone/worktree、Docker 工作区文件快照，以及显式配置的本地 Linux Docker Engine + `runc` 异步后端（含每沙箱一个交互进程会话）；不要把完整交付规划写成现有能力。
 
 - **当前开发阶段**：工作聚焦 `circus-sandbox` 的功能开发；现有工程门禁继续适用，不为新增功能重复建设工程基础设施。除非用户明确要求，不主动修改 `circus-paseo`。
 - **Paseo 暂不开发**：说明与开发规则见 [circus-paseo/CLAUDE.md](circus-paseo/CLAUDE.md)。除非任务明确要求，不修改其源码、依赖或配置。
@@ -11,9 +11,9 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 ## Architecture & Data Flow
 
 - 现有 Paseo：移动端/Web/桌面/CLI → 客户端协议层 → Node.js daemon，负责 Agent 管理及实时输出；这不是已接入 Rust 沙箱的链路。
-- 当前沙箱：文件调用方 → `Workspace` → cap-std `Dir`；Docker 调用方 → `api` → 私有 `lifecycle` → `infrastructure::Engine` → 本地 Linux Docker Engine。`ResourceLimits` 校验请求值，Docker 后端将显式资源与隔离配置映射到容器；校验本身不构成强制、预留或聚合准入。
+- 当前沙箱：文件调用方 → `Workspace` → cap-std `Dir`；Docker 调用方 → `api` → 私有 `lifecycle` → `infrastructure::Engine` → 本地 Linux Docker Engine。交互进程调用方 → `Sandbox::spawn_process` → `lifecycle::process` → 后端 attach 传输（每沙箱一个进程，I/O 任务只报告结果，删除仍由 lifecycle 拥有）。`ResourceLimits` 校验请求值，Docker 后端将显式资源与隔离配置映射到容器；校验本身不构成强制、预留或聚合准入。
 - 目标沙箱：统一 API → 生命周期管理 → 基础设施调度 → 运行时隔离；镜像环境、代码工作区提供执行资源，预启动/快照/沙箱池优化启动。
-- 目标约束：对外 API 屏蔽后端差异；领域层与部署、隔离适配器分离。生命周期统一拥有状态与回收逻辑，调用方不得绕过它直接操作后端。Kubernetes、containerd、gVisor、Kata、Firecracker、环境准备、Git、容器/VM 快照与池仍待实现；没有 HTTP/RPC 或 Paseo 链路。
+- 目标约束：对外 API 屏蔽后端差异；领域层与部署、隔离适配器分离。生命周期统一拥有状态与回收逻辑，调用方不得绕过它直接操作后端。已实现：环境准备计划与稳定标识、固定提交 Git clone/worktree、工作区文件快照与预启动池、交互进程会话。Kubernetes、containerd、gVisor、Kata、Firecracker、容器/VM 运行时快照（进程或客户机内存检查点）仍待实现；没有 HTTP/RPC 或 Paseo 链路。
 
 ## Key Directories
 

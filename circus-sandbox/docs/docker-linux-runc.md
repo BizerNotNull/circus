@@ -123,3 +123,33 @@ CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock CIRCUS_DOCKER_ARCH=amd64 \
 ```
 
 The example accepts `CIRCUS_PYTHON_VERSION` (default `3`) for its first pin and `CIRCUS_TENANT` (default `example-tenant`) for the tenant domain. The opt-in tests verify exact bytes from a pinned step, a failing step's index/exit code/stream bounds and container inventory before/after, cancellation during a long-running step leaving no owned container, unpinned rejection before allocation, identity stability and sensitivity to image/step/version/tenant changes, and opaque `Debug`/`Display`. They are not evidence that this checkout has exercised Docker.
+
+## Interactive processes
+
+`Sandbox::spawn_process(ProcessRequest)` returns a `ProcessSession` after the backend attaches the process. Creation uses the neutral entry point, `Sandbox::create(BackendConfig::docker(endpoint, image, "runc"), SandboxConfig::new(limits, isolation, io))`; the process API names no backend SDK type. The request supplies argv, an optional workspace-relative working directory, explicit environment overrides, a lifetime timeout, and a total output limit for each of stdout and stderr. The output limit cannot exceed the configured `IoLimits::output_limit_bytes`. Environment names must be portable identifiers and values must be NUL-free. No host environment is copied; the image environment still applies. Environment overrides are not a secret store or an outbound network policy. A relative working directory uses container filesystem semantics, including container symlinks.
+
+`ProcessRequest::validate` rejects malformed requests before queueing: no exec is created, no deadline applies, and phase and ownership are unchanged. That covers empty argv, NUL bytes, zero or unrepresentable timeouts, zero or `usize::MAX` output limits, traversing or absolute or non-slash working directories, and non-portable environment names. A request above the configured output bound is rejected the same way. Both use `SandboxError::InvalidProcessRequest { reason }` (`check_relative` keeps returning its own `ConfigError` for a rejected working directory).
+
+Use `write_stdin` repeatedly to send protocol messages and `next_output` to receive raw `ProcessOutput::Stdout` / `Stderr` chunks. Chunks may split lines or UTF-8 characters. `close_stdin` sends EOF; it does not terminate the process. Drain output concurrently with input and `wait`: the output queue holds eight chunks of at most 16 KiB each, then applies backpressure. Input calls are serialized and copied in 16-KiB chunks through a bounded queue. The transport may also retain an in-flight Docker frame. Total output limits and the lifetime timeout remain active under backpressure and while the container is paused.
+
+One interactive process is admitted per sandbox. A second process and one-shot `exec` return `SandboxError::ProcessActive` until lifecycle records completion. File operations, status, pause/resume, and destroy remain available while the process runs. The I/O task reports completion to the lifecycle owner; it never deletes containers or changes sandbox state itself. Attachment uses the configured file deadline; a deadline or cancellation destroys the owned instance because the exec may already have been accepted.
+
+`wait` is repeatable and returns `ProcessExit::Exited` with the actual exit code, including nonzero codes. A normal exit preserves the container and workspace. Cancelling a `wait` or `next_output` future does not cancel the process. Dropping a session, calling `cancel`, or abandoning an accepted stdin operation requests whole-container cleanup. Timeout, output overflow, and transport failure also require cleanup. `ProcessExit::Terminated` reports the reason and observed `CleanupReport`; if ownership is unknown, retain the sandbox and retry `Sandbox::destroy`. `Drop` only requests cleanup while the Tokio runtime is alive; process crashes do not provide durable reconciliation.
+
+Agent turn cancellation belongs in the agent's stdin protocol. Session cancellation and sandbox destruction force-remove the container and lose its tmpfs writes, including writes by descendant processes. Export results before deliberate destruction. There is no detached process recovery, TTY, process-group signal API, model access, or Paseo integration in this slice.
+
+Run the two-message example with a local Python image and an explicit endpoint:
+
+```bash
+CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
+  cargo run --locked --example interactive_process
+```
+
+Run the existing backend checks and the interactive process tests against a real Linux engine:
+
+```bash
+CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
+  cargo test --locked --test docker_sandbox --test docker_process -- --ignored --test-threads=1
+```
+
+The interactive tests cover repeated input, separate output streams, exit codes, concurrent file and lifecycle operations, one-process admission, output backpressure, timeout, cancellation, and owned-container cleanup. They are ignored without explicit invocation; ordinary Cargo test success is not Docker runtime evidence.

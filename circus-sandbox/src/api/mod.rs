@@ -2,7 +2,8 @@
 
 pub use crate::lifecycle::{
     CleanupFailure, CleanupReceipt, CleanupReport, CommandError, CommandOutput, CommandRequest,
-    EnforcementReport, OutputPhase, Ownership, Sandbox, SandboxError, SandboxOperation,
+    EnforcementReport, OutputPhase, Ownership, ProcessError, ProcessExit, ProcessOutput,
+    ProcessRequest, ProcessSession, ProcessTermination, Sandbox, SandboxError, SandboxOperation,
     SandboxPhase, SandboxStatus, StagingError,
 };
 

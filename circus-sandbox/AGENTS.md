@@ -20,16 +20,17 @@
 - 同一 `Workspace` 的并发读写由内部 `RwLock` 保护。这只序列化本进程内对这一个值的调用，不是外部进程隔离，也不是 crash-safe 原子写。不要把这把锁写成原子替换或磁盘配额，也不要为此增加原子写入 API。
 - `runtime::ResourceLimits` / `ResourceLimitsError` 是后端中立的资源值模型，无 `Default`。内存/工作区为正字节数且不超过 `i64::MAX`，CPU 为正 milli-CPU（`1000` 等于一个 CPU），进程数为正；工作区不超过内存，单文件上限不超过工作区。单文件上限为 `1..usize::MAX`，拒绝 `0` 和 `usize::MAX`，与 `Workspace::new` 一致。标量错误先于关联错误。校验不提供聚合准入/预留、内核强制或隔离，不附加宿主容量或 Docker 专用约束。
 - `Workspace::capture_code_snapshot` 使用字节/条目预算捕获普通文件和目录，拒绝符号链接与特殊节点；`CodeSnapshot::restore` 创建独立工作区。这是进程内存中的有界代码快照，进程退出后不持久存在，不是容器/VM 文件系统、进程或客户机内存检查点。
+- `Sandbox::spawn_process(ProcessRequest)` 是每沙箱一个的交互进程会话：显式 argv、相对 workspace 工作目录、显式环境覆盖、生命周期超时和每流输出上限。`ProcessSession` 的 stdin、有序 stdout/stderr 块、退出通知和取消彼此独立；文件、status、pause/resume 和 destroy 在进程运行期间仍可用。请求在入队前校验（`SandboxError::InvalidProcessRequest`），已有进程时再次 spawn 或一次性 `exec` 返回 `SandboxError::ProcessActive`。正常退出保留容器与 workspace；超时、输出超限、传输失败、会话 Drop 或 `cancel` 请求整体容器清理并通过 `ProcessExit::Terminated` 报告观测到的 `CleanupReport`。I/O 任务不删除容器、不修改 lifecycle 状态；它不是 TTY、进程组信号 API、分离式恢复或持久化机制。
 
-仍未实现，不得写成现有能力：Kubernetes、containerd、gVisor、Kata Containers、Firecracker、HTTP/RPC、registry 拉取与认证、容器/VM 运行时快照（进程、客户机内存检查点）、工作区总配额执行、宿主磁盘配额、Paseo 接入。已实现且可写为现有能力：`Workspace`、`CodeSource` 独立代码副本、进程内 `CodeSnapshot`、Docker 工作区文件快照、固定提交 Git clone 与受控 worktree、本地 OCI 镜像解析、有界预启动租约池，以及后端中立统一 API。它们都不是隔离、持久化或聚合资源预留的证据。当前 Docker slice 的范围和限制见 [Linux Docker + runc](docs/docker-linux-runc.md) 及 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。不修改 `../circus-paseo/`。
+仍未实现，不得写成现有能力：Kubernetes、containerd、gVisor、Kata Containers、Firecracker、HTTP/RPC、registry 拉取与认证、容器/VM 运行时快照（进程、客户机内存检查点）、工作区总配额执行、宿主磁盘配额、Paseo 接入。已实现且可写为现有能力：`Workspace`、`CodeSource` 独立代码副本、进程内 `CodeSnapshot`、Docker 工作区文件快照、固定提交 Git clone 与受控 worktree、本地 OCI 镜像解析、有界预启动租约池、交互进程会话，以及后端中立统一 API。它们都不是隔离、持久化或聚合资源预留的证据。当前 Docker slice 的范围和限制见 [Linux Docker + runc](docs/docker-linux-runc.md) 及 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。不修改 `../circus-paseo/`。
 
 用户说明见 [README.md](README.md)，工程命令与门禁边界见 [docs/engineering.md](docs/engineering.md)，完整目标及交付记录入口见 [docs/delivery-plan.md](docs/delivery-plan.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。当前检出已有 Workspace crate、许可证策略、元数据/质量/安全/Rust 工作流，但开发约定和工作流存在仍然不是“全部领域已交付”或检查已通过。
 
 ## Architecture & Data Flow
 
-当前调用路径包括：workspace 调用方 → `circus_sandbox::Workspace` → cap-std `Dir`，资源请求调用方 → `runtime::ResourceLimits`，以及 Docker 调用方 → `api` → `lifecycle` → `infrastructure::Engine` → Docker Engine。Docker 后端不泄露 bollard 类型，所有状态修改由 lifecycle worker 串行拥有。
+当前调用路径包括：workspace 调用方 → `circus_sandbox::Workspace` → cap-std `Dir`，资源请求调用方 → `runtime::ResourceLimits`，以及 Docker 调用方 → `api` → `lifecycle` → 私有 `infrastructure::Backend` 边界 → Docker Engine。交互进程调用方 → `Sandbox::spawn_process` → `lifecycle::process` → 后端 attach 传输；I/O 任务只搬运 stdin/stdout/stderr 和退出状态。Docker 后端不泄露 bollard 类型，所有状态修改与容器删除由 lifecycle worker 串行拥有。
 
-尚未实现的目标链路（Kubernetes、containerd、池、容器/VM 运行时快照、HTTP/RPC 等）仍然只是规划，不得按目录存在推断能力。
+尚未实现的目标链路（Kubernetes、containerd、容器/VM 运行时快照、HTTP/RPC 等）仍然只是规划，不得按目录存在推断能力；预启动池、工作区文件快照、Git 准备与交互进程会话已实现。
 
 | 目录                  | 职责与边界                                                                                                                                                                                                             |
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -40,7 +41,7 @@
 | `src/environment/`    | OCI 镜像、基础环境、依赖准备与可复现环境标识。                                                                                                                                                                         |
 | `src/workspace/`      | 已实现：能力目录内的相对文件读写、建目录、删除与回收，进程内 `CodeSnapshot`，显式授权源的 `CodeSource` 独立代码副本，固定提交 `GitCheckout` 与自有 `GitWorktree`。Git 准备是受控可信宿主进程，不是进程或文件系统隔离。 |
 | `src/pool/`           | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。                                                                                                                                               |
-| `tests/`              | `tests/workspace.rs` 验证公开 workspace API；`tests/docker_sandbox.rs` 是默认忽略、仅连接显式真实 Docker Engine 的 Linux + runc 集成测试。                                                                             |
+| `tests/`              | `tests/workspace.rs` 验证公开 workspace API；`tests/docker_sandbox.rs`、`docker_process.rs`、`docker_hardening.rs`、`docker_snapshot.rs`、`docker_pool.rs`、`docker_environment*.rs`、`git_*` 与 `agent_image.rs` 都是默认忽略、仅连接显式真实 Docker Engine（或真实宿主 Git）的集成测试。                                                                             |
 
 Kubernetes、containerd、池与容器/VM 运行时快照仍保留为规划目标；已有内存代码快照不等于这些目标已完成。当前只有 Docker + runc 适配器支持真实容器路径，禁止用空适配器声称支持。运行时必须先消费 workspace 文件契约再开发。
 

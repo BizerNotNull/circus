@@ -25,8 +25,19 @@
 //! resets dirty leases. [`GitCheckout`] prepares a fixed commit with a controlled
 //! host Git process, and [`GitCheckout::create_worktree`] adds independent
 //! detached [`GitWorktree`] values at that commit. Local OCI image resolution
-//! inspects an existing image. Not implemented: Kubernetes, containerd, gVisor,
-//! Kata, Firecracker, registry pulls/authentication, and HTTP.
+//! inspects an existing image.
+//!
+//! [`Sandbox::spawn_process`] attaches one interactive process per sandbox with
+//! explicit argv, environment overrides, a workspace-relative working directory,
+//! a lifetime deadline, and a bounded output budget per stream. The returned
+//! [`ProcessSession`] keeps stdin, ordered stdout/stderr chunks, exit
+//! notification, and cancellation independent, while files, status,
+//! pause/resume, and destroy remain usable. Cancellation, timeout, output
+//! overflow, transport failure, or dropping the session requests owned
+//! container cleanup; a normal exit preserves container and workspace. A
+//! session is not a TTY, process-group signal API, or detached recovery
+//! mechanism. Not implemented: Kubernetes, containerd, gVisor, Kata,
+//! Firecracker, registry pulls/authentication, and HTTP.
 //!
 //! # Blocking
 //!
@@ -76,7 +87,8 @@ mod workspace;
 pub use api::{
     BackendConfig, BackendConfigError, CleanupFailure, CleanupReceipt, CleanupReport, CommandError,
     CommandOutput, CommandRequest, ConfigError, DockerBackendConfig, EnforcementReport, IoLimits,
-    IsolationConfig, OutputPhase, Ownership, Sandbox, SandboxConfig, SandboxError,
+    IsolationConfig, OutputPhase, Ownership, ProcessError, ProcessExit, ProcessOutput,
+    ProcessRequest, ProcessSession, ProcessTermination, Sandbox, SandboxConfig, SandboxError,
     SandboxOperation, SandboxPhase, SandboxStatus, StagingError,
 };
 #[doc(inline)]
