@@ -92,7 +92,7 @@ QA 固定 Node.js 24.18.0 与 npm，不继承 Paseo 的 Node 版本。`ci` 和 `
 
 ## Testing & QA
 
-- 沙箱用 `cargo test --locked` 验证已实现行为，没有覆盖率百分比门槛。`tests/workspace.rs` 覆盖写上限、恰好等于上限的读取、非法路径、嵌套目录与删除、重复 `cleanup` 和 `Closed`。大于上限的已有文件读取与符号链接逃逸在 crate 私有测试中，因为公开 API 不暴露工作区根。未实现的生命周期、隔离和后端路径不能用 mock 声称通过。
+- 沙箱用 `cargo test --locked` 验证已实现行为，没有覆盖率百分比门槛。`tests/workspace.rs` 覆盖写上限、恰好等于上限的读取、非法路径、嵌套目录与删除、重复 `cleanup` 和 `Closed`。大于上限的已有文件读取、符号链接逃逸，以及 Unix 工作区根没有组或其他权限，在 crate 私有测试中，因为公开 API 不暴露工作区根。该权限测试不证明同账户或特权进程被隔离。未实现的生命周期、隔离和后端路径不能用 mock 声称通过。
 - 手写 `.rs` 单文件不超过 1200 行（含 1200）。文档、链接、格式、行数与 QA 回归测试由质量门禁覆盖；这些检查不代替 Cargo 行为测试或真实后端证据。检查结果记在对应 PR。
 - Paseo 使用 Vitest、浏览器测试与 Playwright E2E；完整规则见 [测试指南](circus-paseo/docs/testing.md) 和 [QA 指南](circus-paseo/docs/qa.md)。
 - 本地仅运行受影响测试文件；禁止默认执行 `npm test` 或整个工作区测试，全量验证交给 CI。Paseo 改动按其指南执行类型、lint 与格式检查。

@@ -118,8 +118,9 @@ pub enum WorkspaceError {
 ///
 /// That lock only orders calls on this value in this process. It is not
 /// process isolation, not a workspace or disk quota, and not a crash-safe
-/// atomic replace. `max_file_bytes` is a per-file cap. This crate has no
-/// total-quota API.
+/// atomic replace. On Unix the root is created mode `0o700`, which does
+/// not hide it from same-account or privileged processes. `max_file_bytes`
+/// is a per-file cap. This crate has no total-quota API.
 ///
 /// This type does not sandbox a process and does not claim container support.
 pub struct Workspace {
@@ -148,7 +149,16 @@ impl Drop for Workspace {
 }
 
 impl Workspace {
-    /// Creates a private temporary directory and opens it with ambient authority.
+    /// Creates a temporary directory and opens it with ambient authority.
+    ///
+    /// On Unix the directory is created with mode `0o700`. That mode is an
+    /// argument to `mkdir` via [`tempfile::Builder::permissions`]; it is not
+    /// applied by a later `chmod`, and this function does not change the
+    /// process umask. The kernel umask may clear more bits, but it cannot add
+    /// group or other permission, so other host users cannot traverse the
+    /// directory. Same-account processes and privileged processes are not
+    /// isolated. Windows does not set a Unix mode and keeps tempfile's
+    /// platform default.
     ///
     /// `max_file_bytes` must be in `1..=usize::MAX - 1`. It is a per-file cap,
     /// not a workspace total, file-count, or host disk quota. This crate has
@@ -160,9 +170,16 @@ impl Workspace {
         if max_file_bytes == 0 || max_file_bytes.checked_add(1).is_none() {
             return Err(WorkspaceError::InvalidLimit { max_file_bytes });
         }
-        let temp = tempfile::Builder::new()
-            .prefix("circus-sandbox-")
-            .tempdir()?;
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("circus-sandbox-");
+        // Mode is passed to mkdir. A later chmod, or a process-wide umask
+        // change, would race with other creators.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let temp = builder.tempdir()?;
         let dir = Dir::open_ambient_dir(temp.path(), ambient_authority())?;
         Ok(Self {
             dir: Some(dir),
