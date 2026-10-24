@@ -6,6 +6,7 @@ mod input;
 mod model;
 mod operations;
 mod snapshot;
+mod staging;
 
 pub use cleanup::CleanupReceipt;
 pub use input::{CommandError, StagingError};
@@ -204,16 +205,24 @@ impl Sandbox {
         })
     }
 
-    /// Starts the instance after validating all staged files.
+    /// Starts the instance after validating all staged metadata.
+    ///
+    /// Every staged path, per-file length, and aggregate payload bound is
+    /// checked from workspace metadata before the backend start call. Payloads
+    /// are then streamed one entry at a time through bounded copy buffers; this
+    /// crate never materializes the whole staged tree in memory. The configured
+    /// workspace byte bound is the enforced transfer payload bound, while the
+    /// guest workspace tmpfs remains the enforced storage bound.
     ///
     /// [`SandboxError::Staging`] leaves the instance in `Created`, with its
     /// files and ownership retained. Remove or shrink files and retry, or
     /// explicitly [`destroy`](Self::destroy) it.
     ///
     /// Uses the configured lifecycle deadline for the whole transition. A
-    /// timeout or cancellation destroys the owned instance because the engine
-    /// may already have accepted the start; the returned error reports observed
-    /// ownership.
+    /// timeout or cancellation during transfer destroys the owned instance
+    /// because the engine may already have accepted the start and guest files
+    /// may be partially written; the phase is never reported as `Running`.
+    /// The returned error reports observed ownership.
     pub async fn start(&self) -> Result<(), SandboxError> {
         self.call(Op::Start).await?
     }

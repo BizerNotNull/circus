@@ -82,19 +82,40 @@ use tokio_util::sync::CancellationToken;
 use crate::infrastructure::{
     Backend, Capabilities, CommonSpec, EngineError, EngineErrorKind, ExecDone, HostReport,
     InstanceId, OutputLimit as EngineOutputLimit, OutputPhase as EngineOutputPhase, PolicyMismatch,
-    PrepareError, Recovered, StagedBytes,
+    PrepareError, Recovered, UploadEntry, UploadSource,
 };
 use crate::runtime::{IoLimits, IsolationConfig, ResourceLimits, SandboxConfig};
-use crate::workspace::Workspace;
+use crate::workspace::{Workspace, WorkspaceError};
+
+use super::staging::TransferFailure;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecordedSource {
+    Directory,
+    Bytes(usize),
+    File(u64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedUpload {
+    path: String,
+    source: RecordedSource,
+}
 
 #[derive(Clone)]
 struct FakeBackend {
     recoveries: Arc<Mutex<VecDeque<Recovered>>>,
     recover_calls: Arc<AtomicUsize>,
+    start_calls: Arc<AtomicUsize>,
     create_error: Arc<Mutex<Option<EngineError>>>,
     exec_result: Arc<Mutex<Option<Result<ExecDone, EngineError>>>>,
     report: Arc<Mutex<HostReport>>,
     slow_reports: Arc<AtomicUsize>,
+    uploads: Arc<Mutex<Vec<RecordedUpload>>>,
+    upload_fail_after: Arc<AtomicUsize>,
+    slow_uploads: Arc<AtomicUsize>,
+    live_upload_bytes: Arc<AtomicUsize>,
+    max_live_upload_bytes: Arc<AtomicUsize>,
 }
 
 impl FakeBackend {
@@ -102,11 +123,37 @@ impl FakeBackend {
         Self {
             recoveries: Arc::new(Mutex::new(VecDeque::new())),
             recover_calls: Arc::new(AtomicUsize::new(0)),
+            start_calls: Arc::new(AtomicUsize::new(0)),
             create_error: Arc::new(Mutex::new(None)),
             exec_result: Arc::new(Mutex::new(None)),
             report: Arc::new(Mutex::new(HostReport::default())),
             slow_reports: Arc::new(AtomicUsize::new(0)),
+            uploads: Arc::new(Mutex::new(Vec::new())),
+            upload_fail_after: Arc::new(AtomicUsize::new(usize::MAX)),
+            slow_uploads: Arc::new(AtomicUsize::new(0)),
+            live_upload_bytes: Arc::new(AtomicUsize::new(0)),
+            max_live_upload_bytes: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    fn uploads(&self) -> Vec<RecordedUpload> {
+        self.uploads.lock().expect("uploads lock").clone()
+    }
+
+    fn max_live_upload_bytes(&self) -> usize {
+        self.max_live_upload_bytes.load(Ordering::SeqCst)
+    }
+
+    fn start_calls(&self) -> usize {
+        self.start_calls.load(Ordering::SeqCst)
+    }
+
+    fn fail_upload_after(&self, successes: usize) {
+        self.upload_fail_after.store(successes, Ordering::SeqCst);
+    }
+
+    fn slow_next_upload(&self) {
+        self.slow_uploads.store(1, Ordering::SeqCst);
     }
 
     fn push_recovery(&self, outcome: Recovered) {
@@ -176,6 +223,7 @@ impl Backend for FakeBackend {
     }
 
     fn start(&self, _id: &InstanceId) -> impl Future<Output = Result<(), EngineError>> + Send {
+        self.start_calls.fetch_add(1, Ordering::SeqCst);
         async { Ok(()) }
     }
 
@@ -192,10 +240,60 @@ impl Backend for FakeBackend {
         _id: &InstanceId,
         _user: &str,
         _workspace: &str,
-        _entries: &[StagedBytes],
+        entry: UploadEntry,
         _max_bytes: u64,
     ) -> impl Future<Output = Result<(), EngineError>> + Send {
-        async { Ok(()) }
+        let uploads = Arc::clone(&self.uploads);
+        let fail_after = Arc::clone(&self.upload_fail_after);
+        let slow = self.slow_uploads.swap(0, Ordering::SeqCst) > 0;
+        let live = Arc::clone(&self.live_upload_bytes);
+        let max_live = Arc::clone(&self.max_live_upload_bytes);
+        async move {
+            if slow {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+            let UploadEntry { path, source } = entry;
+            let recorded = match source {
+                UploadSource::Directory => RecordedSource::Directory,
+                UploadSource::Bytes(bytes) => RecordedSource::Bytes(bytes.len()),
+                UploadSource::File { file, len } => {
+                    let before = uploads.lock().expect("uploads lock").len();
+                    if before >= fail_after.load(Ordering::SeqCst) {
+                        return Err(engine_error("injected upload failure"));
+                    }
+                    let size = usize::try_from(len).unwrap_or(usize::MAX);
+                    let now = live.fetch_add(size, Ordering::SeqCst) + size;
+                    max_live.fetch_max(now, Ordering::SeqCst);
+                    // Read the owned handle with a bounded buffer. This proves
+                    // the transfer source is a real file handle rather than a
+                    // pre-materialized tree.
+                    let mut reader = file;
+                    let mut chunk = [0u8; 64 * 1024];
+                    let mut read_total = 0u64;
+                    loop {
+                        let read = std::io::Read::read(&mut reader, &mut chunk)
+                            .map_err(|err| engine_error(&format!("fake file read: {err}")))?;
+                        if read == 0 {
+                            break;
+                        }
+                        read_total += u64::try_from(read).unwrap_or(0);
+                    }
+                    live.fetch_sub(size, Ordering::SeqCst);
+                    if read_total != len {
+                        return Err(engine_error("fake upload observed a short file"));
+                    }
+                    RecordedSource::File(len)
+                }
+            };
+            uploads.lock().expect("uploads lock").push(RecordedUpload {
+                path,
+                source: recorded,
+            });
+            if uploads.lock().expect("uploads lock").len() > fail_after.load(Ordering::SeqCst) {
+                return Err(engine_error("injected upload failure"));
+            }
+            Ok(())
+        }
     }
 
     fn download_file(
@@ -645,4 +743,210 @@ async fn cancelled_cleanup_wait_does_not_stop_owned_retry() {
     );
     let report = cleanup.wait().await.expect("retained retry completes");
     assert_eq!(report.ownership, Ownership::ConfirmedAbsent);
+}
+
+fn state_with_staging(
+    backend: FakeBackend,
+    workspace_bytes: u64,
+    max_file_bytes: usize,
+    dirs: &[&str],
+    files: &[(&str, &[u8])],
+) -> State<FakeBackend> {
+    let limits =
+        ResourceLimits::new(64 * 1024 * 1024, 100, 8, workspace_bytes, max_file_bytes).unwrap();
+    let isolation =
+        IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 1000, 1000).unwrap();
+    let io = IoLimits::with_deadlines(
+        4096,
+        Duration::from_millis(200),
+        Duration::from_millis(200),
+        Duration::from_millis(50),
+    )
+    .unwrap();
+    let config = SandboxConfig::new(limits, isolation, io).unwrap();
+    let spec = operations::common_spec(&config);
+    let workspace = Workspace::new(max_file_bytes).unwrap();
+    for dir in dirs {
+        workspace.create_dir_all(dir).unwrap();
+    }
+    for (path, bytes) in files {
+        workspace.write_file(path, bytes).unwrap();
+    }
+    let (cleanup, _) = cleanup::channel("fake-name".to_string());
+    State {
+        backend,
+        spec,
+        workspace: Arc::new(Mutex::new(workspace)),
+        config,
+        name: "fake-name".to_string(),
+        nonce: "nonce".to_string(),
+        user: "1000:1000".to_string(),
+        id: Some(InstanceId::new("fake-instance".to_string())),
+        phase: SandboxPhase::Created,
+        shutdown: CancellationToken::new(),
+        create_unsettled: false,
+        cleanup,
+    }
+}
+
+#[tokio::test]
+async fn over_limit_staging_is_rejected_before_start_and_retry_succeeds() {
+    let backend = FakeBackend::new();
+    let mut state = state_with_staging(
+        backend.clone(),
+        1024,
+        1024,
+        &[],
+        &[
+            ("first", &[b'x'; 700]),
+            ("second", &[b'x'; 700]),
+            ("third", &[b'x'; 700]),
+        ],
+    );
+
+    let error = operations::start(&mut state)
+        .await
+        .expect_err("aggregate staging bound must reject start");
+    assert!(matches!(
+        error,
+        SandboxError::Staging(StagingError::LimitExceeded {
+            limit: 1024,
+            actual: 1400,
+        })
+    ));
+    assert_eq!(state.phase, SandboxPhase::Created);
+    assert_eq!(
+        state.id.as_ref().map(InstanceId::as_str),
+        Some("fake-instance")
+    );
+    assert_eq!(backend.start_calls(), 0, "no instance was started");
+    assert!(backend.uploads().is_empty(), "no payload was transferred");
+
+    {
+        let workspace = state.workspace.lock().expect("workspace lock");
+        workspace.remove_file("first").unwrap();
+        workspace.remove_file("third").unwrap();
+        workspace.write_file("second", &[b'x'; 1024]).unwrap();
+    }
+    operations::start(&mut state).await.expect("retry fits");
+    assert_eq!(state.phase, SandboxPhase::Running);
+    assert_eq!(backend.start_calls(), 1);
+    assert_eq!(
+        backend.uploads(),
+        vec![RecordedUpload {
+            path: "second".to_string(),
+            source: RecordedSource::File(1024),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn start_streams_one_file_at_a_time_in_plan_order() {
+    let backend = FakeBackend::new();
+    let payload = vec![b'z'; 10 * 1024];
+    let mut state = state_with_staging(
+        backend.clone(),
+        64 * 1024,
+        16 * 1024,
+        &["nested", "nested/empty"],
+        &[
+            ("nested/one.bin", &payload),
+            ("nested/two.bin", &payload),
+            ("three.bin", &payload),
+        ],
+    );
+    operations::start(&mut state).await.expect("tree fits");
+    assert_eq!(state.phase, SandboxPhase::Running);
+    let uploads = backend.uploads();
+    assert_eq!(uploads.len(), 5, "two dirs and three files");
+    let files = uploads
+        .iter()
+        .filter(|upload| matches!(&upload.source, RecordedSource::File(_)))
+        .count();
+    assert_eq!(files, 3);
+    assert!(
+        uploads
+            .iter()
+            .all(|upload| !matches!(&upload.source, RecordedSource::Bytes(_))),
+        "staged payloads must use file handles, not in-memory trees"
+    );
+    assert_eq!(
+        backend.max_live_upload_bytes(),
+        10 * 1024,
+        "only one file payload may be live at a time"
+    );
+}
+
+#[tokio::test]
+async fn transfer_reports_a_workspace_read_error_without_uploading() {
+    let backend = FakeBackend::new();
+    let state = state_with_staging(backend.clone(), 4096, 1024, &[], &[("gone", b"payload")]);
+    let plan = super::staging::plan(&state)
+        .await
+        .expect("plan walks staging");
+    state
+        .workspace
+        .lock()
+        .expect("workspace lock")
+        .remove_file("gone")
+        .unwrap();
+    let id = state.id.clone().expect("instance id");
+    let failure = super::staging::transfer(&state, &id, &plan)
+        .await
+        .expect_err("removed file cannot be streamed");
+    match failure {
+        TransferFailure::Workspace(WorkspaceError::Io(err)) => {
+            assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        }
+        other => panic!("unexpected transfer failure: {other:?}"),
+    }
+    assert!(backend.uploads().is_empty());
+}
+
+#[tokio::test]
+async fn partial_transfer_failure_destroys_the_started_instance() {
+    let backend = FakeBackend::new();
+    backend.fail_upload_after(1);
+    let mut state = state_with_staging(
+        backend.clone(),
+        4096,
+        1024,
+        &[],
+        &[("first", b"one"), ("second", b"two")],
+    );
+    let error = operations::start(&mut state)
+        .await
+        .expect_err("second upload fails");
+    assert!(matches!(error, SandboxError::Backend { .. }));
+    assert_eq!(state.phase, SandboxPhase::Destroyed);
+    assert_eq!(backend.uploads().len(), 1);
+}
+
+#[tokio::test]
+async fn timed_out_start_transfer_never_reports_running_and_retains_cleanup() {
+    let backend = FakeBackend::new();
+    backend.slow_next_upload();
+    let (config, spec) = sandbox_config_and_spec();
+    let sandbox = Sandbox::create_with_backend(backend.clone(), spec, config)
+        .await
+        .expect("fake creation succeeds");
+    sandbox
+        .write_file("slow", b"payload")
+        .await
+        .expect("staging write succeeds");
+    let error = sandbox
+        .start()
+        .await
+        .expect_err("transfer exceeds deadline");
+    assert!(matches!(
+        error,
+        SandboxError::TimedOut {
+            operation: SandboxOperation::Start,
+            ..
+        }
+    ));
+    assert_eq!(
+        sandbox.status().await.unwrap().phase,
+        SandboxPhase::Destroyed
+    );
 }

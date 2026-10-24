@@ -5,10 +5,12 @@ use std::sync::Arc;
 
 use crate::infrastructure::{
     Backend, CommonSpec, EngineError, EngineErrorKind, InstanceId,
-    OutputPhase as EngineOutputPhase, Recovered, StagedBytes,
+    OutputPhase as EngineOutputPhase, Recovered, UploadEntry, UploadSource,
 };
 use crate::runtime::{SandboxConfig, check_relative};
-use crate::workspace::{StagedNode, WorkspaceError};
+use crate::workspace::WorkspaceError;
+
+use super::staging::{self, TransferFailure};
 
 use super::{
     CleanupFailure, CleanupReport, CommandOutput, CommandRequest, EnforcementReport, OutputPhase,
@@ -52,27 +54,55 @@ pub(super) fn require_capabilities<B: Backend>(backend: &B) -> Result<(), Sandbo
 
 pub(super) async fn start<B: Backend>(state: &mut State<B>) -> Result<(), SandboxError> {
     need(state, SandboxPhase::Created, "start")?;
-    // Validate and read every staged node before an instance can run.
-    let entries = staged(state).await?;
+    // Validate and count every staged node from metadata before the instance
+    // can run. Payloads are not read here and no aggregate buffer is built.
+    let plan = staging::plan(state).await?;
     let id = required_id(state)?;
     if let Err(err) = state.backend.start(&id).await {
         return cleanup_engine_error(state, err).await;
     }
-    if let Err(err) = state
-        .backend
-        .upload(
-            &id,
-            &state.user,
-            state.config.isolation().workspace_path(),
-            &entries,
-            state.config.limits().workspace_bytes(),
-        )
-        .await
-    {
-        return cleanup_engine_error(state, err).await;
+    if let Err(failure) = staging::transfer(state, &id, &plan).await {
+        return cleanup_transfer_failure(state, failure).await;
     }
     state.phase = SandboxPhase::Running;
     Ok(())
+}
+
+/// Destroys an instance whose transfer failed after `start` was accepted, then
+/// reports the typed transfer failure. A failed cleanup keeps ownership and is
+/// never rewritten as success.
+async fn cleanup_transfer_failure<B: Backend, T>(
+    state: &mut State<B>,
+    failure: TransferFailure,
+) -> Result<T, SandboxError> {
+    match failure {
+        TransferFailure::Engine(err) => cleanup_engine_error(state, err).await,
+        TransferFailure::Workspace(err) => {
+            let report = destroy_report(state).await;
+            if state.phase == SandboxPhase::CleanupRequired {
+                return Err(SandboxError::CleanupRequired {
+                    instance_id: report.instance_id.unwrap_or_else(|| state.name.clone()),
+                    ownership: report.ownership,
+                    detail: format!("{err}; {}", report.detail),
+                    failure: CleanupFailure::Staging(err),
+                });
+            }
+            Err(err.into())
+        }
+        TransferFailure::Worker(err) => {
+            let message = err.to_string();
+            let report = destroy_report(state).await;
+            if state.phase == SandboxPhase::CleanupRequired {
+                return Err(SandboxError::CleanupRequired {
+                    instance_id: report.instance_id.unwrap_or_else(|| state.name.clone()),
+                    ownership: report.ownership,
+                    detail: format!("{message}; {}", report.detail),
+                    failure: CleanupFailure::Backend { message },
+                });
+            }
+            Err(err)
+        }
+    }
 }
 
 pub(super) async fn pause<B: Backend>(state: &mut State<B>) -> Result<(), SandboxError> {
@@ -247,11 +277,10 @@ pub(super) async fn write_file<B: Backend>(
             &id,
             &state.user,
             state.config.isolation().workspace_path(),
-            &[StagedBytes {
+            UploadEntry {
                 path: path.to_string(),
-                is_dir: false,
-                bytes,
-            }],
+                source: UploadSource::Bytes(bytes),
+            },
             state.config.limits().workspace_bytes(),
         )
         .await;
@@ -313,11 +342,10 @@ pub(super) async fn mkdir<B: Backend>(
             &id,
             &state.user,
             state.config.isolation().workspace_path(),
-            &[StagedBytes {
+            UploadEntry {
                 path: path.to_string(),
-                is_dir: true,
-                bytes: Vec::new(),
-            }],
+                source: UploadSource::Directory,
+            },
             state.config.limits().workspace_bytes(),
         )
         .await;
@@ -489,50 +517,6 @@ pub(super) async fn status<B: Backend>(state: &State<B>) -> Result<SandboxStatus
                 .and_then(|tmpfs| tmpfs.values().next().cloned()),
         }),
     })
-}
-
-pub(super) async fn staged<B: Backend>(state: &State<B>) -> Result<Vec<StagedBytes>, SandboxError> {
-    let workspace = Arc::clone(&state.workspace);
-    let nodes = spawn_block(move || {
-        workspace
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .staged_nodes()
-    })
-    .await??;
-    let mut entries = Vec::new();
-    let mut total = 0u64;
-    for StagedNode { relative, is_dir } in nodes {
-        check_relative(&relative)?;
-        if is_dir {
-            entries.push(StagedBytes {
-                path: relative,
-                is_dir: true,
-                bytes: Vec::new(),
-            });
-            continue;
-        }
-        let workspace = Arc::clone(&state.workspace);
-        let path = relative.clone();
-        let bytes = spawn_block(move || {
-            workspace
-                .lock()
-                .unwrap_or_else(|err| err.into_inner())
-                .read_file(path)
-        })
-        .await??;
-        total = super::input::staged_total(
-            total,
-            bytes.len() as u64,
-            state.config.limits().workspace_bytes(),
-        )?;
-        entries.push(StagedBytes {
-            path: relative,
-            is_dir: false,
-            bytes,
-        });
-    }
-    Ok(entries)
 }
 
 pub(super) fn need<B: Backend>(

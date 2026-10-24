@@ -4,7 +4,7 @@ use std::future::Future;
 
 use super::backend::{Backend, Capabilities, CommonSpec, InstanceId, PrepareError};
 use super::engine::{
-    CreateSpec, Engine, EngineError, ExecDone, HostReport, Recovered, SocketKind, StagedBytes,
+    CreateSpec, Engine, EngineError, ExecDone, HostReport, Recovered, SocketKind, UploadEntry,
 };
 
 /// Local Docker Engine endpoint. TCP, HTTP, and SSH are rejected.
@@ -253,12 +253,12 @@ impl Backend for DockerBackend {
         id: &InstanceId,
         user: &str,
         workspace: &str,
-        entries: &[StagedBytes],
+        entry: UploadEntry,
         max_bytes: u64,
     ) -> impl Future<Output = Result<(), EngineError>> + Send {
         async move {
             self.engine
-                .upload(id.as_str(), user, workspace, entries, max_bytes)
+                .upload(id.as_str(), user, workspace, entry, max_bytes)
                 .await
         }
     }
