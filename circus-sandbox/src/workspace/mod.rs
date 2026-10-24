@@ -1,3 +1,5 @@
+mod snapshot;
+
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{PoisonError, RwLock};
@@ -110,11 +112,12 @@ pub enum WorkspaceError {
 ///
 /// Calls on the same value share one [`RwLock`]: [`Self::read_file`] may run
 /// alongside other reads, while [`Self::write_file`], [`Self::create_dir_all`],
-/// and [`Self::remove_file`] are exclusive with each other and with reads. The
-/// guard is acquired only after the caller path has been borrowed and checked,
-/// and it is held from the final open through the end of that read or write.
-/// A poisoned lock becomes [`WorkspaceError::Io`]; it does not panic.
-/// [`Self::cleanup`] takes `&mut self` and does not lock.
+/// [`Self::remove_file`], and [`Self::capture_code_snapshot`] are exclusive
+/// with each other and with reads. The guard is acquired only after the caller
+/// path has been borrowed and checked, and it is held from the final open
+/// through the end of that read, write, or capture. A poisoned lock becomes
+/// [`WorkspaceError::Io`]; it does not panic. [`Self::cleanup`] takes `&mut self`
+/// and does not lock.
 ///
 /// That lock only orders calls on this value in this process. It is not
 /// process isolation, not a workspace or disk quota, and not a crash-safe
@@ -544,5 +547,10 @@ fn read_regular(mut file: File, path: &Path, limit: usize) -> Result<Vec<u8>, Wo
     Ok(buf)
 }
 
+#[cfg(test)]
+mod snapshot_tests;
+
+#[doc(inline)]
+pub use snapshot::{CodeSnapshot, SnapshotBudget, SnapshotError};
 #[cfg(test)]
 mod tests;

@@ -1,10 +1,11 @@
 # circus-sandbox
 
-Rust 库，包名 `circus-sandbox`。当前提供 workspace 文件能力，以及 `runtime::ResourceLimits` 后端中立的资源请求校验。文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；资源值模型尚未接入文件操作或执行后端。
+Rust 库，包名 `circus-sandbox`。当前提供 workspace 文件能力、进程内代码快照，以及 `runtime::ResourceLimits` 后端中立的资源请求校验。文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；资源值模型尚未接入文件操作或执行后端。
 
+代码快照是受显式操作预算约束的、仅进程内存中的文件与目录副本；它不是进程或内存检查点、Docker commit、容器能力或持久化格式。
 这不是进程沙箱，也不是容器。它不隔离 CPU、网络、系统调用或进程，不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Git、命令执行、生命周期、HTTP/RPC 和容器后端都还没有实现。资源请求校验不等于资源预留、聚合准入或内核强制；也没有工作区总字节配额、文件数配额或宿主磁盘配额的执行机制。
 
-工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖是 cap-std **4.0.3**、cap-fs-ext **4.0.3**（仅 Unix `OpenOptionsSyncExt::nonblock`，不开 default features）、tempfile **3.27.0**、thiserror **2.0.21**（非预发布）。`Cargo.lock` 固定解析版本；检查和运行都加 `--locked`。
+工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖是 cap-std **4.0.3**、cap-fs-ext **4.0.3**（使用 `OpenOptionsFollowExt::follow(No)` 拒绝快照遍历中的符号链接，并在 Unix 使用 `OpenOptionsSyncExt::nonblock`，不开 default features）、tempfile **3.27.0**、thiserror **2.0.21**（非预发布）。`Cargo.lock` 固定解析版本；检查和运行都加 `--locked`。
 
 这里描述当前检出的真实实现，不以文件或工作流存在代替发布、合并和运行证据。完整目标及交付记录入口见 [交付计划](docs/delivery-plan.md)，QA、安全、Rust 与架构域门禁的实际范围见 [工程说明](docs/engineering.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。
 
@@ -40,9 +41,31 @@ fn prepare() -> Result<(), circus_sandbox::WorkspaceError> {
 
 Unix 上，工作区根在创建时把 `0o700` 交给 tempfile `Builder::permissions`，作为 `mkdir` 的 mode，不是创建后再 `chmod`，也不修改进程 umask。内核 umask 只能再去掉权限位，不能给组或其他用户加权限，所以其他宿主用户不能遍历该目录。同账户进程和特权进程仍可打开它。Windows 不设置这个 Unix mode，目录创建行为不变。
 
+## 代码快照
+
+`Workspace::capture_code_snapshot` 在同一工作区锁住整个遍历，复制普通文件和空目录，并拒绝符号链接、FIFO、设备、socket、未知节点和不适合跨平台恢复的相对路径。`SnapshotBudget` 的总字节数只计算文件内容，entry 数计算文件和目录；两个值都是本次操作的内存边界，不是工作区总配额，也不改变 `max_file_bytes` 的单文件含义。
+
+`CodeSnapshot::restore` 总是创建新的 `Workspace`，不会覆盖原工作区。恢复失败会显式调用目标工作区的 `cleanup`；如果清理也失败，返回 `SnapshotError::RestoreCleanup`，其中保留目标工作区，可释放外部占用后从错误中取出并重试 `cleanup`。快照在当前进程内存中存活，进程退出后不保存，也不包含进程状态或 Docker 支持。
+
+```rust
+use circus_sandbox::{SnapshotBudget, Workspace};
+
+let mut source = Workspace::new(64)?;
+source.create_dir_all("src/empty")?;
+source.write_file("src/main.rs", b"bytes")?;
+let snapshot = source.capture_code_snapshot(SnapshotBudget::new(64, 8)?)?;
+let mut restored = snapshot.restore()?;
+assert_eq!(restored.read_file("src/main.rs")?, b"bytes");
+restored.cleanup()?;
+source.cleanup()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+可运行示例：`cargo run --locked --example code_snapshot`。
+
 ## 单文件上限、删除与并发
 
-`max_file_bytes` 只约束一次 `write_file` 的字节数，以及一次 `read_file` 最多探测的长度。读和写共用这一个单文件上限，不是把多个文件的用量加总，也不是文件个数上限。`new` 不按该值预分配，也不向操作系统申请磁盘配额。多次各自未超限的写入仍可能写满宿主临时目录；那是磁盘耗尽，本库不会把它报成 `LimitExceeded`。当前没有总配额 API，也不提供进程隔离。以后若实现真实的进程或容器后端，必须单独、显式地限制 CPU、内存、进程数和磁盘，不能把这个参数当成沙箱配额。本库不为此增加总配额 API。
+`max_file_bytes` 只约束一次 `write_file` 的字节数，以及一次 `read_file` 最多探测的长度。读和写共用这一个单文件上限，不是把多个文件的用量加总，也不是文件个数上限。快照捕获还会把每次文件探测限制为单文件上限与剩余捕获字节预算的较小值，避免一次读取超过操作预算。`new` 不按该值预分配，也不向操作系统申请磁盘配额。多次各自未超限的写入仍可能写满宿主临时目录；那是磁盘耗尽，本库不会把它报成 `LimitExceeded`。当前没有总配额 API，也不提供进程隔离。
 
 `remove_file` 就是 cap-std 的 unlink：去掉路径最终组件上的非目录项。普通文件、符号链接、FIFO、socket，以及该平台 unlink 会删除的其他非目录节点，都会被删掉。最终组件是符号链接时，删的是链接本身，不打开、不跟随目标，因此也不会删掉链接指向的目录或文件。目录删不掉，返回 `Io`，目录及其内容保留。这不是“只删除普通文件”。读写才用 `NotRegularFile` 拒绝非普通节点；删除前再做类型检查会和 unlink 竞态，本 API 不做。
 
@@ -85,7 +108,8 @@ cargo run --locked --example resource_policy
 | 测试                | `cargo test --locked`                                                                           |
 | 只跑本 API 集成测试 | `cargo test --locked --test workspace`                                                          |
 | 文档                | `RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`                                         |
-| 运行示例            | `cargo run --locked --example workspace`                                                        |
+| 运行 workspace 示例 | `cargo run --locked --example workspace`                                                        |
+| 运行代码快照示例    | `cargo run --locked --example code_snapshot`                                                    |
 | 资源请求示例        | `cargo run --locked --example resource_policy`                                                  |
 | 依赖策略            | 先 `cargo install --locked --version 0.20.2 cargo-deny`，再在本目录 `cargo deny --locked check` |
 
@@ -134,13 +158,20 @@ npm --prefix circus-sandbox/qa run architecture
 | `Closed`                          | `cleanup` 已经成功。优先于路径和长度检查。                                                                                                                                                                                                                                                                 |
 | `InvalidLimit { max_file_bytes }` | `new(0)` 或 `new(usize::MAX)`。                                                                                                                                                                                                                                                                            |
 | `PathRejected { path, reason }`   | 上一节的非法路径。`path` 是调用方原始路径。                                                                                                                                                                                                                                                                |
-| `LimitExceeded { limit, actual }` | 写入或读取超过 `max_file_bytes`。写入时 `actual` 是 `contents.len()`。读取时最多探测 `limit + 1` 字节，`actual` 是探测长度，不是未知的文件总长。                                                                                                                                                           |
+| `LimitExceeded { limit, actual }` | 写入或读取超过 `max_file_bytes`。写入时 `actual` 是 `contents.len()`。读取时最多探测 `limit + 1` 字节，`actual` 是本次实际探测到的长度，不是未知的文件总长。快照捕获若剩余总字节预算更紧，则返回 `ByteLimit`，其 `actual` 也是已探测到的累计长度。                                                         |
 | `NotRegularFile { path }`         | 把目录、FIFO 或其他非普通文件当作文件读写，包括工作区内指向它们的符号链接。不用于 `remove_file`。Unix 上不会为了等 FIFO 对端而卡住。拒绝发生在截断之前。                                                                                                                                                   |
 | `Io(std::io::Error)`              | 缺失文件、缺失父目录、`remove_file` 遇到目录、临时目录创建/删除失败，以及写入过程中的文件系统错误。缺失路径是 `ErrorKind::NotFound`，发生在截断之前。unlink 掉符号链接、FIFO 或 socket 是成功，不是这个变体，也不是 `NotRegularFile`。写入时若错误发生在打开普通文件之后，文件可能已被截断或只写入一部分。 |
 
-`cleanup` 的 I/O 失败也是 `Io`。此时工作区仍然打开，应保留同一个 `Workspace` 再调用 `cleanup`，不要丢弃错误后假设目录已消失。
+`cleanup` 的 I/O 失败也是 `Io`。此时工作区仍然打开，应保留同一个 `Workspace` 再调用 `cleanup`；恢复时若收到 `RestoreCleanup`，从错误中取出其 `destination` 后重试，不要丢弃错误后假设目录已消失。
 
 ## 变更
+
+### 未发布：进程内代码快照
+
+- 新增 `SnapshotBudget`、`CodeSnapshot` 和 `SnapshotError`，捕获普通文件与空目录，并拒绝符号链接和非普通节点。
+- 快照使用 cap-std 目录句柄和现有相对路径策略；总字节数与 entry 数是单次操作预算，不是 Workspace 总配额。
+- `CodeSnapshot::restore` 总是创建新工作区，失败时显式清理目标；该能力是进程内存副本，不是进程检查点、Docker 或持久化支持。
+- 新增真实示例：`cargo run --locked --example code_snapshot`。
 
 ### 未发布：按组件拒绝 Windows 盘符
 
@@ -157,13 +188,6 @@ npm --prefix circus-sandbox/qa run architecture
 - 新增 `npm --prefix circus-sandbox/qa run architecture` 与 Windows/Linux CI，验证真实工具报告的跨架构域 `uses` 边满足固定矩阵。
 - 固定 cargo-modules 0.28.0 与 dotparser 1.1.1；避免内建 `--acyclic` 把合法 getter 误判成环，保留失败关闭与未知命名空间拒绝。
 - 这是声明依赖的补充检查，不是完整函数调用图或运行时隔离证明；具体范围见[工程说明](docs/engineering.md#架构域门禁)。
-
-### 未发布：资源请求值模型
-
-- 新增 `runtime::ResourceLimits` 与类型化 `ResourceLimitsError`，校验单个请求，不声称执行后端或隔离已实现。
-- 内存/工作区为正字节数且不超过 `i64::MAX`；CPU 为正 milli-CPU（`1000` 等于一个 CPU），进程数为正。工作区不超过内存，单文件不超过工作区；单文件上限范围为 `1..usize::MAX`，拒绝 `0` 和 `usize::MAX`，与 `Workspace` 一致。
-- 错误区分零值、超出有符号数值范围、`InvalidMaxFileBytes`、`WorkspaceExceedsMemory` 和 `MaxFileExceedsWorkspace`，不施加 Docker 或宿主容量约束。不做聚合资源预留/准入，也没有内核强制或总磁盘配额。
-- 新增真实示例：`cargo run --locked --example resource_policy`；构造合法请求并观察冲突请求的类型化拒绝。
 
 ### 0.1.0
 

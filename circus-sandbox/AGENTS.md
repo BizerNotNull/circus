@@ -2,11 +2,11 @@
 
 ## 状态与边界
 
-`circus-sandbox` 是 Rust library crate（包名 `circus-sandbox`，edition 2024）。当前提供 workspace 文件能力和 `runtime::ResourceLimits` 资源请求校验：文件操作在 tempfile 新建的临时目录上，用 cap-std 目录句柄做相对路径读写；资源值模型只校验数值与关联约束，尚未接入文件 API 或执行后端。这不是进程沙箱，不提供容器、运行时隔离或 Paseo 接入。
+`circus-sandbox` 是 Rust library crate（包名 `circus-sandbox`，edition 2024）。当前提供 workspace 文件能力、进程内代码快照和 `runtime::ResourceLimits` 资源请求校验。文件操作与快照基于 cap-std 目录句柄；资源模型尚未接入文件 API 或执行后端。这不是进程沙箱，不提供容器、运行时隔离或 Paseo 接入。
 
 已实现：
 
-- `Workspace` 同步 API：`new`、`write_file`、`read_file`、`create_dir_all`、`remove_file`、`cleanup`。方法会阻塞调用线程。
+- `Workspace` 同步 API：`new`、`write_file`、`read_file`、`create_dir_all`、`remove_file`、`cleanup` 与 `capture_code_snapshot`。方法会阻塞调用线程。
 - 临时工作区由 tempfile 新建，不接受宿主目录，公开 API 不暴露工作区根路径。Unix 上根目录在创建时用 `Builder::permissions` 请求 `0o700`，mode 是 `mkdir` 参数，不是事后 `chmod`，也不修改进程 umask。umask 只能再去掉权限位。这只让其他宿主用户不能遍历；同账户进程和特权进程不隔离。不要改回 tempfile 的 `0o777` 默认，也不要靠创建后改权限。Windows 不设置 Unix mode，目录创建行为保持平台默认。
 - 跨平台拒绝空路径、绝对路径、`..`、反斜杠、以 `//` 开头的 UNC，以及任一组件上的 Windows 盘符前缀（ASCII 字母后紧跟 `:`，大小写不敏感，含 `./C:name` 与 `nested/C:name`）。非盘符冒号（`file:name`、`CC:name`）不是这条规则。`\`、绝对路径和 `..` 的既有错误类别优先于仅出现在后续组件上的盘符。通过后的访问走 cap-std，防止符号链接逃逸和基于路径字符串的 TOCTOU。
 - 读写使用同一个 `max_file_bytes`。它是单个文件的上限：`new` 拒绝 `0` 和 `usize::MAX`，以便读取 `limit + 1` 时不溢出，也不按该上限预分配。它不是工作区总字节配额、文件数配额或宿主磁盘配额，当前也没有总配额 API。写满临时目录是宿主磁盘耗尽，不是 `LimitExceeded`。不要把这个参数写成沙箱配额，也不要在本 crate 增加总配额 API。后续真实进程或容器后端必须显式限制资源。
@@ -15,6 +15,7 @@
 - `cleanup` 可重复调用；成功后文件操作返回 `Closed`。清理失败保留工作区归属，可重试，且不会标成已关闭。`Drop` 只做尽力清理，错误只有显式 `cleanup` 能观察到。
 - `remove_file` 是 cap-std `Dir::remove_file`：对最终组件 unlink，不跟随该符号链接。非目录项都会删，包括普通文件、符号链接、FIFO 和 socket。目录返回 `Io` 且保留。文档若写成“只删除普通文件”，纠正文档；不要加删除前的类型预检，那会和 unlink 竞态。`NotRegularFile` 只属于读写。
 - 同一 `Workspace` 的并发读写由内部 `RwLock` 保护。这只序列化本进程内对这一个值的调用，不是外部进程隔离，也不是 crash-safe 原子写。不要把这把锁写成原子替换或磁盘配额，也不要为此增加原子写入 API。
+- `CodeSnapshot` 只保存当前进程内的普通文件与空目录；捕获拒绝符号链接和非普通节点，文件与目录打开都不可等待 FIFO。`SnapshotBudget` 限制单次捕获的内容字节及条目数，不是工作区配额。恢复总是创建新 `Workspace`；恢复后的清理失败通过错误携带目标工作区，调用方可继续重试 `cleanup`。不复制进程、内存或容器状态。
 - `runtime::ResourceLimits` / `ResourceLimitsError` 是后端中立的资源值模型，无 `Default`。内存/工作区为正字节数且不超过 `i64::MAX`，CPU 为正 milli-CPU（`1000` 等于一个 CPU），进程数为正；工作区不超过内存，单文件上限不超过工作区。单文件上限为 `1..usize::MAX`，拒绝 `0` 和 `usize::MAX`，与 `Workspace::new` 一致。标量错误先于关联错误。校验不提供聚合准入/预留、内核强制或隔离，不附加宿主容量或 Docker 专用约束。
 
 未实现，不得写成现有能力：命令执行、生命周期状态机、Docker/Kubernetes/containerd、runc/gVisor/Kata/Firecracker、OCI 镜像、Git clone/worktree、沙箱池、HTTP/RPC、工作区总配额执行、宿主磁盘配额、进程隔离。`src/api`、`lifecycle`、`infrastructure`、`environment`、`pool` 仍只是占位目录；`runtime` 已有资源值模型，但没有运行时实现。不修改 `../circus-paseo/`。
@@ -34,11 +35,11 @@
 | `src/infrastructure/` | Docker、Kubernetes、containerd 等部署与调度适配；负责资源分配，不承担隔离机制实现。                                                            |
 | `src/runtime/`        | 已实现后端中立的资源请求值校验，不执行资源限制。runc、gVisor、Kata Containers、Firecracker 等运行时能力与隔离策略尚未实现。                    |
 | `src/environment/`    | OCI 镜像、基础环境、依赖准备与可复现环境标识。                                                                                                 |
-| `src/workspace/`      | 已实现：能力目录内的相对文件读写、建目录、删除与回收。尚未实现 Git clone、worktree 或代码副本管理。                                            |
+| `src/workspace/`      | 已实现：能力目录内的相对文件操作、回收及进程内代码快照/恢复。尚未实现 Git clone、worktree 或持久化快照。                                       |
 | `src/pool/`           | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。                                                                       |
 | `tests/`              | `tests/workspace.rs` 用真实临时目录验证公开文件 API。符号链接逃逸放在 crate 私有测试，避免为测试暴露工作区根。需要容器或虚拟化的测试尚未存在。 |
 
-这些后端是候选目标，不代表全部同时支持；实现时按需求选择，禁止用空适配器声称支持。运行时必须先消费 workspace 文件契约再开发。池与快照仍保留，支持策略只写在交付计划。
+这些后端是候选目标，不代表全部同时支持；实现时按需求选择，禁止用空适配器声称支持。运行时必须先消费 workspace 文件契约再开发。池与容器快照仍保留，支持策略只写在交付计划；进程内工作区代码快照不代表这些后端能力。
 
 ## Code Conventions & Common Patterns
 
@@ -68,7 +69,7 @@
 
 ## 第三方库选型与去重
 
-以下是按职责确定的默认选择。只有实现需要该能力时才加入 `Cargo.toml`。当前直接依赖只有 [`cap-std` 4.0.3](https://github.com/bytecodealliance/cap-std)、[`cap-fs-ext` 4.0.3](https://github.com/bytecodealliance/cap-std)（Unix 上 `OpenOptionsSyncExt::nonblock`，不开 default features）、[`tempfile` 3.x](https://docs.rs/tempfile/latest/tempfile/)、[`thiserror` 2.x](https://github.com/dtolnay/thiserror)（均为非预发布）。表中其余库仍未引入。优先标准库，其次选择有持续维护、公开源码和实际采用的库；不为降低流行度放弃成熟生态，也不以 stars 或下载量代替性能证据。crate 版本在首次引入时选择兼容上述工具链的较新非预发布版，核对 MSRV、许可证与安全公告，并由 `Cargo.lock` 固定实际解析版本。
+以下是按职责确定的默认选择。只有实现需要该能力时才加入 `Cargo.toml`。当前直接依赖只有 [`cap-std` 4.0.3](https://github.com/bytecodealliance/cap-std)、[`cap-fs-ext` 4.0.3](https://github.com/bytecodealliance/cap-std)（跨平台 no-follow / directory 打开选项，Unix 另用 nonblocking open，不开 default features）、[`tempfile` 3.x](https://docs.rs/tempfile/latest/tempfile/)、[`thiserror` 2.x](https://github.com/dtolnay/thiserror)（均为非预发布）。表中其余库仍未引入。优先标准库，其次选择有持续维护、公开源码和实际采用的库；不为降低流行度放弃成熟生态，也不以 stars 或下载量代替性能证据。crate 版本在首次引入时选择兼容上述工具链的较新非预发布版，核对 MSRV、许可证与安全公告，并由 `Cargo.lock` 固定实际解析版本。
 
 | 类别                    | 默认选择                                                                                                                 | 选择依据与使用边界                                                                                                                                                                                  |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -82,7 +83,7 @@
 | HTTP 服务（确认传输后） | [`axum`](https://github.com/tokio-rs/axum)                                                                               | 确需 HTTP API 时作为唯一默认框架，复用 Tokio/Hyper 生态；当前不引入，不据此改变传输未定的架构边界。                                                                                                 |
 | CLI（需要时）           | [`clap` 4.x](https://docs.rs/clap/latest/clap/)                                                                          | 有命令行入口时才引入，统一解析与帮助信息；纯库不依赖 CLI 框架。性能侧关注启动时间与二进制体积，而非请求吞吐。                                                                                       |
 | 临时目录                | [`tempfile` 3.x](https://docs.rs/tempfile/latest/tempfile/)                                                              | 管理临时工作区；检查权限与清理失败，不能只依靠 Drop 处理崩溃后的残留，也不能把随机路径当租户隔离。                                                                                                  |
-| 受限文件访问            | [`cap-std`](https://github.com/bytecodealliance/cap-std) 与 [`cap-fs-ext`](https://github.com/bytecodealliance/cap-std)  | 从已授权目录句柄做相对访问；避免“字符串检查后再打开”的路径竞态。`cap-fs-ext` 只提供 cap-std 未放进 `std` 形状的打开标志（当前是 Unix nonblocking open）。它不替代进程隔离、挂载策略或租户权限控制。 |
+| 受限文件访问            | [`cap-std`](https://github.com/bytecodealliance/cap-std) 与 [`cap-fs-ext`](https://github.com/bytecodealliance/cap-std)  | 从已授权目录句柄做相对访问；避免“字符串检查后再打开”的路径竞态。`cap-fs-ext` 提供 no-follow、directory 和 Unix nonblocking 打开标志。它不替代进程隔离、挂载策略或租户权限控制。                     |
 | 底层 Linux 系统接口     | [`rustix` 1.x](https://docs.rs/rustix/latest/rustix/)                                                                    | 仅当标准库/能力式文件 API 缺少所需 syscall 时使用；隔离在 runtime 适配器中，不再并用 nix 提供同一接口，检查内核能力且不静默降级。                                                                   |
 | Docker Engine 适配      | [`bollard`](https://github.com/fussybeaver/bollard)                                                                      | 仅实现 Docker 后端时引入异步 SDK，不重复手写 Docker REST 客户端；daemon socket 属高权限管理面，禁止暴露给沙箱。                                                                                     |
 | Kubernetes 适配         | [`kube`（kube-rs）](https://github.com/kube-rs/kube)                                                                     | 仅实现 Kubernetes 后端时引入；按需开启 client/runtime，限定凭据与 RBAC，不因 SDK 存在而引入控制器或第二套调度状态。                                                                                 |
@@ -104,13 +105,14 @@
 ## Runtime, Commands & QA
 
 - Rust 核心使用上述 Cargo 工具链，不继承 Paseo 的工具链版本。服务入口尚未配置。`.github/workflows/sandbox-rust.yml` 显示名为 `Sandbox Rust`，检查名为 `rust (ubuntu-latest)`、`rust (windows-latest)`、`dependencies` 和 `codeql`。没有路径过滤，不调用 Paseo CI；`main` push、PR 的 `opened`/`reopened`/`synchronize`、merge queue 和 `workflow_dispatch` 都会启动。结果只记在对应 PR，不在本文声称当前提交已通过。命令在 `circus-sandbox/` 执行，rustup 读取本目录 `rust-toolchain.toml`。工作流存在不是服务可运行、隔离通过或分支保护已配置。`.github/workflows/sandbox-architecture.yml` 使用同一组触发条件，检查名为 `architecture (ubuntu-latest)` 与 `architecture (windows-latest)`。
-- 本 crate 不允许 unsafe。库只导出已实现的 `Workspace` 文件 API 和 `runtime` 资源值模型，不预建其他空模块，也不创建空壳二进制来假装后端可用。
+- 本 crate 不允许 unsafe。库只导出已实现的 `Workspace` 文件/代码快照 API 和 `runtime` 资源值模型，不预建其他空模块，也不创建空壳二进制来假装后端可用。
 - 格式检查：`cargo fmt --check`（写回用 `cargo fmt`）。
 - Clippy：`cargo clippy --locked --all-targets -- -D warnings`。
 - 构建：`cargo build --locked`。
 - 测试：`cargo test --locked`。公开文件 API 集成测试是 `cargo test --locked --test workspace`。连示例一起编译用 `cargo test --locked --all-targets`。
 - 文档：`RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`。与 CI 的文档检查一致。
 - 文件示例：`cargo run --locked --example workspace`，必须实际写、读、删除并 `cleanup`，打印读到的字节，不能打印与 `Result` 无关的成功字样。资源示例：`cargo run --locked --example resource_policy`，构造合法请求、标明单位，再观察冲突请求的类型化拒绝；它不是后端 smoke。
+- 代码快照示例：`cargo run --locked --example code_snapshot`，实际捕获文件与空目录、恢复到新工作区并读取字节。公开回归在 `tests/code_snapshot.rs`，特殊节点与清理失败重试在 crate 私有测试。示例手动验证，不新增独立工作流。
 - 单元测试与模块共置，可覆盖符号链接逃逸、大于上限的已有文件读取，以及清理失败后的重试。读取超限时 `LimitExceeded.actual` 是探测到的 `limit + 1`，不是未知总长。公开 API 不能制造超限文件，所以 `tests/` 只验证写上限、恰好等于上限的读取、非法路径、嵌套目录/删除、重复 `cleanup` 与 `Closed`。Unix 私有测试 `unix_workspace_root_has_no_group_or_other_and_round_trips` 断言工作区根 mode 没有组或其他权限，并仍能写、读和 `cleanup`；它不证明同账户或特权进程被隔离。符号链接用例的必要前提是进程能创建符号链接。Windows 需要开发者模式，或持有 `SeCreateSymbolicLinkPrivilege`。缺少该权限时对应用例必须失败，不能把 `PermissionDenied` 当成跳过并静默返回成功。不要修改宿主安全设置、组策略或开发者模式来让测试通过。需要容器或虚拟化的测试应显式标注环境要求并隔离资源；当前没有这类测试。
 - 架构域门禁：先安装 `cargo-modules` 0.28.0，再在仓库根目录执行 `npm --prefix circus-sandbox/qa ci` 和 `npm --prefix circus-sandbox/qa run architecture`。脚本必须用真实的 `cargo modules dependencies --lib --all-features --no-externs --no-owns` DOT，验证工具精确为 0.28.0，按语义 ID 和声明 kind 投影到顶层域，接受同域 getter/impl 递归，拒绝固定矩阵之外的跨域 `uses` 边。不得用 `--acyclic`、`--no-fns`/`--no-types`、手写 Rust 源码解析或忽略 analyzer 失败来绕过。矩阵、根门面规则和限制只在[工程说明](docs/engineering.md#架构域门禁)维护，不在本文件复制第二份。
 - 架构门禁只证明当前 crate 的跨域 `uses` 边满足 allowlist DAG；它不证明外部 SDK 暴露面，也不检查域内循环。`cargo-modules` 是 MPL-2.0 开发期 CLI 工具，`dotparser` 1.1.1 是 MIT 的 QA 依赖，都不是 crate 的运行时依赖。

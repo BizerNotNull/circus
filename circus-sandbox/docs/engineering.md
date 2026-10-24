@@ -4,7 +4,7 @@
 
 ## 当前工程
 
-当前检出已有真实 Rust library crate：`Cargo.toml`、Cargo 生成的 `Cargo.lock`、`rust-toolchain.toml`、Apache-2.0 `LICENSE`、`deny.toml`、`src/lib.rs`、`src/workspace/` 与 `src/runtime/`、真实 example 和测试。Rust 1.99.1 / edition 2024；公开入口为同步 `Workspace` 文件 API 和后端中立的 `runtime::ResourceLimits` 值校验，不是进程沙箱、容器或服务。
+当前检出已有真实 Rust library crate：`Cargo.toml`、Cargo 生成的 `Cargo.lock`、`rust-toolchain.toml`、Apache-2.0 `LICENSE`、`deny.toml`、`src/lib.rs`、`src/workspace/` 与 `src/runtime/`、真实 example 和测试。Rust 1.99.1 / edition 2024；公开入口为同步 `Workspace` 文件 API、进程内代码快照/恢复和后端中立的 `runtime::ResourceLimits` 值校验，不是进程沙箱、容器或服务。
 
 本文按当前检出描述工程范围，不以文件存在代替合并、发布或最新提交的检查。交付记录入口见 [交付计划](delivery-plan.md)，安全扫描约定见 [安全说明](../../.github/sandbox-security.md)。
 
@@ -113,6 +113,6 @@ secret scanning 与 push protection 是 GitHub 平台设置，不是工作流的
 
 `Workspace` 提供临时目录内的受限相对读写、建目录、unlink 和显式可重试幂等清理。`max_file_bytes` 是单文件上限，不是工作区总配额。Unix 工作区根在创建时请求 `0o700`（`mkdir` 的 mode，不是事后 `chmod`，也不改进程 umask），其他宿主用户不能遍历；同账户进程和特权进程不因此被隔离。Windows 目录创建行为不变。内部 `RwLock` 保护同一值的并发读写，不是外部进程隔离或 crash-safe 原子替换。当前检出有真实 example、公开 API 集成测试和 crate 私有测试；某次运行的环境、命令与结果只记在对应 PR，不以旧提交的绿灯为新提交背书。
 
-尚未实现命令执行、统一领域 API、生命周期状态机、进程/网络/系统调用隔离、容器与虚拟化适配器、OCI 环境准备、Git clone/worktree、HTTP/RPC、池、预启动和快照，以及工作区总配额。占位目录不是可调用模块。
+进程内代码快照通过 `capture_code_snapshot` / `CodeSnapshot::restore` 提供，操作预算不代替磁盘配额，失败清理保留可重试目标。尚未实现命令执行、统一领域 API、生命周期状态机、进程/网络/系统调用隔离、容器与虚拟化适配器、OCI 环境准备、Git clone/worktree、HTTP/RPC、池、预启动、容器快照，以及工作区总配额。占位目录不是可调用模块。
 
 后续运行时必须先消费 workspace 文件契约。建议的首个适配仍是 Linux 上的 Docker + runc，必须有真实运行证据；主机引擎可达或 Windows 编译成功不能提前声明支持。完整目标、依赖及池/快照验收仍见 [交付计划](delivery-plan.md)。

@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心，`circus-paseo` 作为前端调用方。沙箱目前提供 workspace 文件库和后端中立的资源请求校验，没有 Paseo—沙箱集成，也没有进程或容器隔离；不要把规划写成现有能力。
+Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心，`circus-paseo` 作为前端调用方。沙箱目前提供 workspace 文件库、进程内代码快照和后端中立的资源请求校验，没有 Paseo—沙箱集成，也没有进程或容器隔离；不要把规划写成现有能力。
 
-- **当前开发阶段**：本轮只收尾工程基础设施，在基础架构与核心功能开发前停止；后续开发须有用户新的明确授权。工作聚焦 `circus-sandbox`，除非用户明确要求，不主动修改 `circus-paseo`。
+- **当前开发阶段**：工作聚焦 `circus-sandbox` 的功能开发；现有工程门禁继续适用，不为新增功能重复建设工程基础设施。除非用户明确要求，不主动修改 `circus-paseo`。
 - **Paseo 暂不开发**：说明与开发规则见 [circus-paseo/CLAUDE.md](circus-paseo/CLAUDE.md)。除非任务明确要求，不修改其源码、依赖或配置。
-- **沙箱开发入口**：[circus-sandbox/AGENTS.md](circus-sandbox/AGENTS.md)，用户说明见 [circus-sandbox/README.md](circus-sandbox/README.md)。七个领域的职责边界仍由沙箱指南维护；目前实现 workspace 文件 API 和 `runtime::ResourceLimits` 请求校验，不含资源强制或聚合准入。完整交付目标见 [交付计划](circus-sandbox/docs/delivery-plan.md)，当前门禁与命令见 [工程说明](circus-sandbox/docs/engineering.md)，安全扫描约定见 [安全说明](.github/sandbox-security.md)。按当前检出描述实现，不以规划或工作流存在代替交付与运行证据。
+- **沙箱开发入口**：[circus-sandbox/AGENTS.md](circus-sandbox/AGENTS.md)，用户说明见 [circus-sandbox/README.md](circus-sandbox/README.md)。七个领域的职责边界仍由沙箱指南维护；目前实现 workspace 文件 API、进程内代码快照和 `runtime::ResourceLimits` 请求校验，不含资源强制或聚合准入。完整交付目标见 [交付计划](circus-sandbox/docs/delivery-plan.md)，当前门禁与命令见 [工程说明](circus-sandbox/docs/engineering.md)，安全扫描约定见 [安全说明](.github/sandbox-security.md)。按当前检出描述实现，不以规划或工作流存在代替交付与运行证据。
 
 ## Architecture & Data Flow
 
@@ -19,9 +19,9 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 
 | 路径                    | 用途                                                                                                                                                                                                    |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `circus-sandbox/`       | Rust library crate。已实现 workspace 文件 API、资源请求校验及对应 examples/tests、Apache-2.0 `LICENSE` 与 `deny.toml`。                                                                                 |
+| `circus-sandbox/`       | Rust library crate。已实现 workspace 文件 API、进程内代码快照、资源请求校验及对应 examples/tests、Apache-2.0 `LICENSE` 与 `deny.toml`。                                                                 |
 | `circus-sandbox/src/`   | 已实现 `workspace` 和公开 `runtime` 资源值模型。`api`、`lifecycle`、`infrastructure`、`environment`、`pool` 仍是占位目录，不是已实现模块。                                                              |
-| `circus-sandbox/tests/` | `workspace.rs` 用真实临时目录验证公开文件 API。                                                                                                                                                         |
+| `circus-sandbox/tests/` | `workspace.rs` 与 `code_snapshot.rs` 用真实临时目录验证公开文件及代码快照 API。                                                                                                                         |
 | `circus-sandbox/docs/`  | 交付计划与工程事实。架构细节不在根指南复制。                                                                                                                                                            |
 | `circus-paseo/`         | 已有 npm workspace 应用；内部结构与开发流程交由其 `CLAUDE.md` 说明。                                                                                                                                    |
 | `.github/workflows/`    | Paseo CI 仍按路径触发。沙箱包含 `sandbox-metadata.yml`、`sandbox-quality.yml`、`sandbox-security.yml`、`sandbox-rust.yml` 和 `sandbox-architecture.yml`。各自范围见工程说明；它们不证明进程或容器隔离。 |
