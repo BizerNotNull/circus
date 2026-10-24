@@ -48,7 +48,14 @@ pub fn config() -> Result<SandboxConfig> {
     Ok(SandboxConfig::new(
         ResourceLimits::new(128 * 1024 * 1024, 1000, 64, 16 * 1024 * 1024, 1024 * 1024)?,
         IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
-        IoLimits::new(4 * 1024 * 1024, Duration::from_secs(20))?,
+        // Shared CI runners are slower than a local WSL daemon; keep a bounded
+        // but non-flaky lifecycle deadline for container/task startup.
+        IoLimits::with_deadlines(
+            4 * 1024 * 1024,
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Duration::from_secs(60),
+        )?,
     )?)
 }
 
