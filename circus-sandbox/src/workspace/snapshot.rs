@@ -12,7 +12,7 @@ use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
 use cap_std::fs::{Dir, File, OpenOptions};
 
 mod archive;
-use super::{Workspace, WorkspaceError, check_path, lock_poisoned, read_regular};
+use super::{Workspace, WorkspaceError, check_path, lock_poisoned};
 
 /// Why a code-snapshot capture or restore failed.
 ///

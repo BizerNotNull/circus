@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         IoLimits::new(64 * 1024, Duration::from_secs(10))?,
     )?;
     // Only explicitly authorized shared input belongs in the baseline, never tenant credentials.
-    let source = Workspace::new(1024 * 1024)?;
+    let mut source = Workspace::new(1024 * 1024)?;
     let program = b"print('executed baseline bytes')\n";
     source.write_file("hello.py", program)?;
     source.create_dir_all("empty")?;

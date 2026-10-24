@@ -89,7 +89,7 @@ async fn ready(pool: &DockerPool, count: usize) -> Result {
 }
 
 fn baseline(bytes: &[u8]) -> Result<Arc<CodeSnapshot>> {
-    let source = Workspace::new(4096)?;
+    let mut source = Workspace::new(4096)?;
     source.write_file("baseline.bin", bytes)?;
     source.create_dir_all("empty/nested")?;
     let snapshot = Arc::new(source.capture_code_snapshot(SnapshotBudget::new(4096, 16)?)?);
