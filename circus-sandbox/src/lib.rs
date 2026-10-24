@@ -29,8 +29,10 @@
 //! truncated or only partly written. This crate has no atomic-write API.
 //!
 //! Calls on one [`Workspace`] share an internal lock so a read does not observe
-//! another call on that value mid-truncate. That is not process isolation:
-//! other processes can still change the directory.
+//! another call on that value mid-truncate. That is not process isolation. On
+//! Unix the workspace root is created with mode `0o700`, so other host users
+//! cannot traverse it; same-account and privileged processes still can change
+//! the directory. Windows keeps tempfile's platform default.
 //!
 //! ```
 //! use circus_sandbox::Workspace;

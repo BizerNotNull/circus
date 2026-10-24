@@ -4,7 +4,7 @@
 //! text, copy private fields, or expose the workspace root.
 
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use circus_sandbox::{PathRejectReason, Workspace, WorkspaceError};
 
@@ -62,6 +62,81 @@ fn assert_host_untouched(path: &Path, existed_before: bool) {
         "host path was created: {}",
         path.display()
     );
+}
+
+fn is_drive_prefixed_component(component: &std::ffi::OsStr) -> bool {
+    let raw = component.as_encoded_bytes();
+    raw.len() >= 2 && raw[0].is_ascii_alphabetic() && raw[1] == b':'
+}
+
+fn push_if_contains_leaf(out: &mut Vec<PathBuf>, path: PathBuf, leaf: &str) {
+    if path.as_os_str().to_string_lossy().contains(leaf) {
+        out.push(path);
+    }
+}
+
+/// Host locations a component drive prefix can be reopened as.
+///
+/// Candidates must contain `leaf`, so cleanup cannot target a drive root or cwd.
+fn host_leak_candidates(raw: &str, leaf: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(abs) = std::path::absolute(raw) {
+        push_if_contains_leaf(&mut out, abs, leaf);
+    }
+    let Ok(cwd) = std::env::current_dir() else {
+        return out;
+    };
+    push_if_contains_leaf(&mut out, cwd.join(raw), leaf);
+    for component in Path::new(raw).components() {
+        let os = component.as_os_str();
+        if !is_drive_prefixed_component(os) {
+            continue;
+        }
+        if let Ok(abs) = std::path::absolute(os) {
+            push_if_contains_leaf(&mut out, abs, leaf);
+        }
+        let bytes = os.as_encoded_bytes();
+        let rest = &bytes[2..];
+        if rest.is_empty() || rest.contains(&b'/') || rest.contains(&b'\\') {
+            continue;
+        }
+        let rest = String::from_utf8_lossy(rest);
+        push_if_contains_leaf(&mut out, cwd.join(rest.as_ref()), leaf);
+        let drive = char::from(bytes[0]);
+        push_if_contains_leaf(&mut out, PathBuf::from(format!("{drive}:/{rest}")), leaf);
+        push_if_contains_leaf(&mut out, PathBuf::from(format!("{drive}:\\{rest}")), leaf);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn assert_candidates_absent(paths: &[PathBuf]) {
+    for path in paths {
+        assert!(
+            !path.exists(),
+            "refusing to exercise a drive component while host path exists: {}",
+            path.display()
+        );
+    }
+}
+
+fn reject_component_drive(ws: &Workspace, raw: &str, leaf: &str) {
+    let leaks = host_leak_candidates(raw, leaf);
+    assert_candidates_absent(&leaks);
+    let results = [
+        ws.write_file(raw, b"x"),
+        ws.read_file(raw).map(|_| ()),
+        ws.create_dir_all(raw),
+        ws.remove_file(raw),
+    ];
+    // Clean before asserting so a pre-fix escape does not leave a host file.
+    for path in &leaks {
+        assert_host_untouched(path, false);
+    }
+    for result in results {
+        assert_rejected(result, PathRejectReason::WindowsPrefix, raw);
+    }
 }
 
 #[test]
@@ -186,6 +261,63 @@ fn illegal_paths_are_rejected_on_every_operation() {
             );
         }
         other => panic!("expected host absolute path to be rejected, got {other:?}"),
+    }
+}
+
+#[test]
+fn component_drive_prefixes_are_rejected_on_every_operation() {
+    let ws = open(32);
+    let leaf = format!(
+        "circus-sandbox-drive-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0)
+    );
+    let drive = format!("C:{leaf}");
+    // `./C:...`, `nested/C:...`, and dot-prefixed / nested placements of the
+    // same drive component. A non-final component is included so the check
+    // cannot special-case only the last name.
+    let cases = [
+        format!("./{drive}"),
+        format!("nested/{drive}"),
+        format!("./nested/{drive}"),
+        format!("nested/./{drive}"),
+        format!(".dot/{drive}"),
+        format!("./.dot/{drive}"),
+        format!("nested/{drive}/tail"),
+        format!("./c:{leaf}"),
+        format!("dir/Z:{leaf}"),
+    ];
+    for raw in &cases {
+        reject_component_drive(&ws, raw, &leaf);
+    }
+}
+
+#[test]
+fn non_drive_colon_names_are_not_windows_prefixes() {
+    let ws = open(32);
+    let leaf = format!("circus-sandbox-colon-{}", std::process::id());
+    ws.create_dir_all("notes").unwrap();
+    let legal = [
+        format!("file:{leaf}.txt"),
+        format!("notes/file:{leaf}.txt"),
+        format!("notes/./file:{leaf}.txt"),
+        format!("CC:{leaf}.txt"),
+        format!(".hidden:{leaf}.txt"),
+    ];
+    for raw in &legal {
+        match ws.write_file(raw, b"ok") {
+            Ok(()) => {
+                assert_eq!(ws.read_file(raw).unwrap(), b"ok");
+                ws.remove_file(raw).unwrap();
+            }
+            Err(WorkspaceError::Io(_)) => {}
+            Err(other) => {
+                panic!("non-drive colon name must stay legal, {raw} -> {other:?}")
+            }
+        }
     }
 }
 

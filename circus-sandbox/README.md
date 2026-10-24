@@ -28,7 +28,7 @@ fn prepare() -> Result<(), circus_sandbox::WorkspaceError> {
 
 | 方法                             | 行为                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Workspace::new(max_file_bytes)` | 新建独立临时目录。`max_file_bytes` 必须是 `1..=usize::MAX-1`，否则返回 `InvalidLimit`。这是单个文件的读写上限，不是预分配大小，不是工作区总字节或文件数配额，也不是宿主磁盘配额或进程隔离。                                                                                                                                                                                                                                                                                                                                                 |
+| `Workspace::new(max_file_bytes)` | 新建独立临时目录。`max_file_bytes` 必须是 `1..=usize::MAX-1`，否则返回 `InvalidLimit`。这是单个文件的读写上限，不是预分配大小，不是工作区总字节或文件数配额，也不是宿主磁盘配额或进程隔离。Unix 上创建时请求 `0o700`，不隔离同账户或特权进程；Windows 目录权限不变。                                                                                                                                                                                                                                                                        |
 | `write_file(path, contents)`     | 写入或覆盖已有普通文件。不隐式创建父目录，也没有原子替换。`Closed`、非法路径、超限字节、缺失父目录和非普通文件都在截断之前返回，这些失败不修改已有文件，也不留下新文件。Unix 同样以 `nonblock(true)` 打开，Windows 不设置该标志，CreateFile 是 write+create 且不预先 truncate。确认是普通文件后先 `set_len(0)` 再 `write_all`。此后的 I/O 失败可能截断已有内容，或留下不完整或空文件。                                                                                                                                                      |
 | `read_file(path)`                | 读取普通文件的全部字节。目录、FIFO、设备及其他非普通节点，包括工作区内指向它们的符号链接，返回 `NotRegularFile`，并保留调用方路径。指向普通文件的工作区符号链接仍跟随。Unix 用 cap-std `OpenOptions` 的 `nonblock(true)` 打开，所以 `open` 本身不等待 FIFO 对端；这不是路径 metadata 预检。Windows 不设置该标志，读取是只读打开。不会按不可信 metadata 无限分配。超过上限时最多探测 `limit + 1` 字节后返回 `LimitExceeded`，`actual` 是这次探测到的长度，不是未知的文件总长。逃出工作区的符号链接仍是 cap-std 的 I/O 错误，不是新错误变体。 |
 | `create_dir_all(path)`           | 创建相对目录及其缺失的父目录。已存在时成功。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -38,6 +38,8 @@ fn prepare() -> Result<(), circus_sandbox::WorkspaceError> {
 这些方法会阻塞当前线程。库本身没有异步运行时。将来在 Tokio 异步上下文里调用时，必须放到 `spawn_blocking` 上，不能直接占住异步 worker，也不要引入第二套异步运行时。
 
 `Drop` 只尽力删除临时目录，不返回错误。需要确认清理结果时调用 `cleanup`。
+
+Unix 上，工作区根在创建时把 `0o700` 交给 tempfile `Builder::permissions`，作为 `mkdir` 的 mode，不是创建后再 `chmod`，也不修改进程 umask。内核 umask 只能再去掉权限位，不能给组或其他用户加权限，所以其他宿主用户不能遍历该目录。同账户进程和特权进程仍可打开它。Windows 不设置这个 Unix mode，目录创建行为不变。
 
 ## 代码快照
 
@@ -67,7 +69,7 @@ source.cleanup()?;
 
 `remove_file` 就是 cap-std 的 unlink：去掉路径最终组件上的非目录项。普通文件、符号链接、FIFO、socket，以及该平台 unlink 会删除的其他非目录节点，都会被删掉。最终组件是符号链接时，删的是链接本身，不打开、不跟随目标，因此也不会删掉链接指向的目录或文件。目录删不掉，返回 `Io`，目录及其内容保留。这不是“只删除普通文件”。读写才用 `NotRegularFile` 拒绝非普通节点；删除前再做类型检查会和 unlink 竞态，本 API 不做。
 
-同一 `Workspace` 的并发读写由内部 `RwLock` 保护，避免本进程里对这一个值的交错写入。这不是外部进程隔离：其他进程仍可改临时目录。这也不是崩溃安全的原子写。`write_file` 没有原子替换；只有已关闭、非法路径、超限、缺失父目录和非普通文件这些失败发生在截断之前，不修改已有文件。打开普通文件并 `set_len(0)` 之后的 I/O 失败，仍可能截断已有内容或留下不完整文件。这把锁不补上那些保证，也不构成磁盘配额。
+同一 `Workspace` 的并发读写由内部 `RwLock` 保护，避免本进程里对这一个值的交错写入。这不是外部进程隔离。Unix 上其他宿主用户不能遍历以 `0o700` 创建的工作区根，但同一账户的进程和特权进程仍可打开并修改临时目录。这也不是崩溃安全的原子写。`write_file` 没有原子替换；只有已关闭、非法路径、超限、缺失父目录和非普通文件这些失败发生在截断之前，不修改已有文件。打开普通文件并 `set_len(0)` 之后的 I/O 失败，仍可能截断已有内容或留下不完整文件。这把锁不补上那些保证，也不构成磁盘配额。
 
 可运行示例在 `examples/workspace.rs`。它实际执行写、读、删除和 `cleanup`。成功时标准输出只有读到的字节再加一个换行；失败写到标准错误并以状态码 1 退出，不打印与 `Result` 无关的成功字样：
 
@@ -141,7 +143,7 @@ npm --prefix circus-sandbox/qa run architecture
 
 ## 路径
 
-拒绝发生在打开句柄之前，并且 Windows 与 Linux 使用同一规则。非法路径是：空路径（`Empty`）、含 `\`（`Backslash`）、以盘符 `A:`–`Z:` 开头或以 `//` 开头（`WindowsPrefix`）、以 `/` 开头或 `Path::is_absolute()`（`Absolute`）、任一组件是 `..`（`ParentComponent`）。`cleanup` 成功后的文件操作是 `Closed`，不是这些路径类别。
+拒绝发生在打开句柄之前，并且 Windows 与 Linux 使用同一规则。非法路径是：空路径（`Empty`）、含 `\`（`Backslash`）、任一组件以 ASCII 字母加 `:` 开头（大小写不敏感），或以 `//` 开头（`WindowsPrefix`）、以 `/` 开头或 `Path::is_absolute()`（`Absolute`）、任一组件是 `..`（`ParentComponent`）。因此 `./C:name`、`nested/C:name` 和 `.dot/C:name` 都是 `WindowsPrefix`。`file:name` 与 `CC:name` 不是盘符，路径检查不拒绝；宿主若不允许该文件名，结果是 `Io`，不是 `WindowsPrefix`。已有分类顺序不变：`\` 先于盘符，整段开头的盘符或 `//` 先于绝对路径，`..` 先于仅出现在后续组件上的盘符。`cleanup` 成功后的文件操作是 `Closed`，不是这些路径类别。
 
 `foo/bar`、`foo/./bar` 可以通过。`create_dir_all` 之外不会自动创建父目录。
 
@@ -170,6 +172,16 @@ npm --prefix circus-sandbox/qa run architecture
 - 快照使用 cap-std 目录句柄和现有相对路径策略；总字节数与 entry 数是单次操作预算，不是 Workspace 总配额。
 - `CodeSnapshot::restore` 总是创建新工作区，失败时显式清理目标；该能力是进程内存副本，不是进程检查点、Docker 或持久化支持。
 - 新增真实示例：`cargo run --locked --example code_snapshot`。
+
+### 未发布：按组件拒绝 Windows 盘符
+
+- `WindowsPrefix` 覆盖任一组件上的 `A:`–`Z:` 盘符前缀（大小写不敏感），包括 `./C:name` 与 `nested/C:name`。Windows 与 Linux 仍使用同一规则，并在打开句柄之前拒绝。
+- `file:name`、`CC:name` 不是盘符，路径检查不拒绝。`\`、绝对路径和 `..` 的既有错误类别与优先顺序不变。
+
+### 未发布：工作区根不对其他宿主用户开放
+
+- Unix 上工作区根在创建时请求 `0o700`，经 tempfile `Builder::permissions` 传给 `mkdir`，不是事后 `chmod`，也不修改进程 umask。umask 只能使权限更严。其他宿主用户不能遍历该目录。
+- 这不隔离同一账户的进程或特权进程。Windows 目录创建行为不变。
 
 ### 未发布：声明依赖架构门禁
 

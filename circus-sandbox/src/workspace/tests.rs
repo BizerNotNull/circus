@@ -192,6 +192,33 @@ fn cleanup_treats_already_deleted_root_as_success() {
     workspace.cleanup().unwrap();
 }
 
+/// The workspace root must not be traversable by group or other. This does not
+/// isolate same-account or privileged processes; those can still open the
+/// directory. The read, write, and cleanup checks only prove this process can
+/// still use and remove it.
+#[cfg(unix)]
+#[test]
+fn unix_workspace_root_has_no_group_or_other_and_round_trips() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut workspace = Workspace::new(32).unwrap();
+    let root = workspace.temp.as_ref().unwrap().path().to_path_buf();
+    let mode = std::fs::metadata(&root).unwrap().permissions().mode();
+    assert_eq!(
+        mode & 0o077,
+        0,
+        "workspace root mode {mode:#o} grants group or other permissions"
+    );
+    workspace.write_file("note.txt", b"private").unwrap();
+    assert_eq!(workspace.read_file("note.txt").unwrap(), b"private");
+    workspace.cleanup().unwrap();
+    assert!(matches!(
+        workspace.read_file("note.txt").unwrap_err(),
+        WorkspaceError::Closed
+    ));
+    assert!(!root.exists());
+}
+
 #[cfg(windows)]
 #[test]
 fn failed_cleanup_keeps_ownership_until_retry() {
