@@ -432,7 +432,14 @@ async fn docker_status_timeout_does_not_destroy_the_instance()
             operation,
             ..
         }) => {
-            assert_eq!(instance_id.as_deref(), Some(id.as_str()));
+            // `id` came from the Docker CLI's short-ID listing; the domain
+            // reports the engine's full 64-character identity.
+            assert!(
+                instance_id
+                    .as_deref()
+                    .is_some_and(|full| full.starts_with(id.as_str())),
+                "reported {instance_id:?} does not match owned container {id}"
+            );
             assert_eq!(ownership, Ownership::StillPresent);
             assert_eq!(operation, SandboxOperation::Status);
         }
