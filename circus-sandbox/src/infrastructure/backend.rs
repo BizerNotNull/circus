@@ -33,22 +33,26 @@ impl InstanceId {
     }
 }
 
-/// Operations the lifecycle owner requires of every backend.
+/// Operations a backend can actually perform.
 ///
-/// A backend that cannot honor an operation must report it here so creation can
-/// reject the configuration before allocating an instance.
+/// Creation requires guest file transport only. Pause/resume, workspace
+/// snapshots, and interactive processes are negotiated when those operations
+/// are requested, so a backend can create and run without them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Capabilities {
     pub pause_resume: bool,
     pub file_transport: bool,
     /// Enumerates workspace paths and reads their payloads through the guest.
     pub workspace_snapshot: bool,
+    /// Attaches one interactive process to the instance.
+    pub spawn_process: bool,
 }
 
 /// Backend-neutral values needed for one create request.
 ///
 /// Backend-specific image, runtime, endpoint, and owner label stay inside the
 /// backend implementation. All values were validated by `SandboxConfig`.
+#[derive(Clone)]
 pub(crate) struct CommonSpec {
     pub memory: i64,
     pub nano_cpus: i64,

@@ -194,6 +194,7 @@ impl Backend for DockerBackend {
             pause_resume: true,
             file_transport: true,
             workspace_snapshot: true,
+            spawn_process: true,
         }
     }
 

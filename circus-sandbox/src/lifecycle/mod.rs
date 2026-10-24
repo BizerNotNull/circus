@@ -32,6 +32,8 @@ use crate::infrastructure::{
 };
 #[cfg(all(unix, feature = "containerd"))]
 use crate::infrastructure::{ContainerdConfig, ContainerdConfigError};
+#[cfg(feature = "kubernetes")]
+use crate::infrastructure::{KubernetesBackend, KubernetesConfig, KubernetesConfigError};
 use crate::observability::{OperationKind, OperationOutcome, SandboxMetrics, events};
 use crate::runtime::{BackendConfig, BackendConfigError, SandboxConfig};
 use crate::workspace::Workspace;
@@ -123,10 +125,13 @@ impl Sandbox {
     /// owned instance.
     ///
     /// Backend-neutral and backend-specific values are rejected before any
-    /// instance allocation. Capability requirements (pause/resume, guest file
-    /// transfer, workspace snapshot capture) are checked before creating an
-    /// instance. The backend then verifies its environment and that the image
-    /// already exists locally; this crate never pulls or contacts a registry.
+    /// instance allocation. Guest file transport is required before creating an
+    /// instance; pause/resume, workspace snapshots, and interactive processes
+    /// negotiate their own capability when requested. Docker and containerd
+    /// verify that the image already exists locally and never pull. The
+    /// Kubernetes backend loads an explicit kubeconfig, verifies API access and
+    /// a server-side dry run, and leaves image pulling to the node's kubelet
+    /// under `imagePullPolicy: IfNotPresent`.
     ///
     /// The owner label and instance name are fixed before the create request.
     /// Dropping this future, including while the create response is outstanding,
@@ -137,11 +142,12 @@ impl Sandbox {
     ///
     /// Returns [`SandboxError::BackendConfig`] for an invalid descriptor,
     /// [`SandboxError::Config`] for invalid neutral configuration,
-    /// [`SandboxError::UnsupportedCapability`] for an unsupported operation set,
-    /// [`SandboxError::BackendImageUnavailable`] when the local image is absent,
-    /// [`SandboxError::Backend`] or [`SandboxError::Workspace`] for other
-    /// preparation failures, and [`SandboxError::PolicyMismatch`] when the
-    /// engine's inspected effective policy differs from the constructed policy.
+    /// [`SandboxError::UnsupportedCapability`] when guest file transport is not
+    /// available, [`SandboxError::BackendImageUnavailable`] when a local image
+    /// is absent for a local backend, [`SandboxError::Backend`] or
+    /// [`SandboxError::Workspace`] for other preparation failures, and
+    /// [`SandboxError::PolicyMismatch`] when the inspected effective policy
+    /// differs from the constructed policy.
     /// A mismatch always initiates destruction and is never reported as
     /// success. If creation leaves cleanup outstanding,
     /// [`SandboxError::CreationCleanupRequired`] carries the original error and
@@ -171,6 +177,7 @@ impl Sandbox {
         let backend_kind = match &backend {
             BackendConfig::Docker(_) => "docker",
             BackendConfig::Containerd(_) => "containerd",
+            BackendConfig::Kubernetes(_) => "kubernetes",
         };
         let span = events::create_span(backend_kind);
         {
@@ -239,6 +246,37 @@ impl Sandbox {
                     let _ = descriptor;
                     Err(SandboxError::UnsupportedCapability {
                         capability: "containerd backend feature not compiled",
+                    })
+                }
+            }
+            BackendConfig::Kubernetes(descriptor) => {
+                #[cfg(feature = "kubernetes")]
+                {
+                    let kubernetes = KubernetesConfig::new(
+                        descriptor.kubeconfig(),
+                        descriptor.context(),
+                        descriptor.namespace(),
+                        descriptor.image(),
+                        descriptor.service_account(),
+                    )
+                    .map_err(|err| SandboxError::BackendConfig(map_kubernetes_config(err)))?;
+                    kubernetes
+                        .validate_common(&spec)
+                        .map_err(|err| SandboxError::BackendConfig(map_kubernetes_config(err)))?;
+                    let backend = KubernetesBackend::connect(
+                        kubernetes,
+                        spec.clone(),
+                        config.lifecycle_timeout(),
+                    )
+                    .await
+                    .map_err(|err| engine_err(*err))?;
+                    Self::create_with_backend(backend, spec, config, metrics).await
+                }
+                #[cfg(not(feature = "kubernetes"))]
+                {
+                    let _ = (descriptor, spec, config, metrics);
+                    Err(SandboxError::UnsupportedCapability {
+                        capability: "kubernetes backend feature not compiled",
                     })
                 }
             }
@@ -573,6 +611,31 @@ fn map_containerd_config(err: ContainerdConfigError) -> BackendConfigError {
         }
         ContainerdConfigError::UnsupportedSnapshotter { name } => {
             BackendConfigError::UnsupportedSnapshotter { name }
+        }
+    }
+}
+
+#[cfg(feature = "kubernetes")]
+fn map_kubernetes_config(err: KubernetesConfigError) -> BackendConfigError {
+    match err {
+        KubernetesConfigError::InvalidKubeconfigPath { value } => {
+            BackendConfigError::InvalidKubeconfigPath { value }
+        }
+        KubernetesConfigError::InvalidNamespace { value } => {
+            BackendConfigError::InvalidKubernetesNamespace { value }
+        }
+        KubernetesConfigError::InvalidContextName { value } => {
+            BackendConfigError::InvalidContextName { value }
+        }
+        KubernetesConfigError::InvalidServiceAccount { value } => {
+            BackendConfigError::InvalidServiceAccount { value }
+        }
+        KubernetesConfigError::InvalidImageReference { value } => {
+            BackendConfigError::InvalidImageReference { value }
+        }
+        KubernetesConfigError::ImageRequired => BackendConfigError::ImageRequired,
+        KubernetesConfigError::RootUserUnsupported { uid } => {
+            BackendConfigError::NonRootGuestRequired { uid }
         }
     }
 }

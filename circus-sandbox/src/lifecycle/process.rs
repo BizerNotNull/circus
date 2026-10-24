@@ -15,7 +15,9 @@ use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::operations::{cleanup_engine_error, destroy_report, need, required_id};
+use super::operations::{
+    cleanup_engine_error, destroy_report, need, require_capability, required_id,
+};
 use super::{CleanupReport, CommandGuard, Ownership, SandboxError, SandboxPhase, State};
 use crate::infrastructure::{Backend, ProcessSpec};
 use crate::observability::{TerminationKind, events};
@@ -242,6 +244,10 @@ pub(super) async fn spawn<B: Backend>(
     state: &mut State<B>,
     request: ProcessRequest,
 ) -> Result<ProcessSession, SandboxError> {
+    require_capability(
+        state.backend.capabilities().spawn_process,
+        "attach an interactive process",
+    )?;
     need(state, SandboxPhase::Running, "spawn_process")?;
     if state.process.is_some() {
         return Err(SandboxError::ProcessActive);

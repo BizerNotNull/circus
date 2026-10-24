@@ -6,7 +6,7 @@ use super::{ResourceLimits, ResourceLimitsError};
 
 /// Backend selection for [`crate::Sandbox::create`].
 ///
-/// Two variants are implemented. The enum name is stable so a future backend
+/// Three variants are implemented. The enum name is stable so a future backend
 /// can be added without changing the creation entry point; adding a variant is
 /// the only way to claim another backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +25,15 @@ pub enum BackendConfig {
     /// that the requested snapshotter is configured: [`crate::Sandbox::create`]
     /// validates and prepares it. `runsc` (gVisor) is rejected as unavailable.
     Containerd(ContainerdBackendConfig),
+    /// A Kubernetes namespace running a Linux image as a Pod with `runc` on
+    /// the node.
+    ///
+    /// See [`KubernetesBackendConfig`]. Selecting this variant does not assert
+    /// that the API server is reachable, that the namespace exists, or that the
+    /// image is cached on a node: [`crate::Sandbox::create`] validates and
+    /// prepares it. Requires the `kubernetes` crate feature; without it,
+    /// creation reports an unsupported capability.
+    Kubernetes(KubernetesBackendConfig),
 }
 
 impl BackendConfig {
@@ -67,6 +76,25 @@ impl BackendConfig {
             runtime,
             snapshotter,
         ))
+    }
+
+    /// Builds an explicit Kubernetes workload descriptor.
+    ///
+    /// `kubeconfig` must be an absolute path to a kubeconfig file; ambient
+    /// `KUBECONFIG` and `$HOME/.kube/config` are never consulted. `namespace`
+    /// is a DNS-1123 label and `image` must be a lowercase image reference.
+    /// The descriptor is validated before any Pod allocation; invalid values
+    /// are reported by [`crate::Sandbox::create`] as [`BackendConfigError`].
+    /// Use [`KubernetesBackendConfig::with_context`] or
+    /// [`KubernetesBackendConfig::with_service_account`] for the optional
+    /// values.
+    #[must_use]
+    pub fn kubernetes(
+        kubeconfig: impl Into<String>,
+        namespace: impl Into<String>,
+        image: impl Into<String>,
+    ) -> Self {
+        Self::Kubernetes(KubernetesBackendConfig::new(kubeconfig, namespace, image))
     }
 }
 
@@ -179,6 +207,88 @@ impl ContainerdBackendConfig {
     #[must_use]
     pub fn snapshotter(&self) -> &str {
         &self.snapshotter
+    }
+}
+
+/// Kubernetes workload descriptor: explicit kubeconfig, namespace, image, and
+/// optional context and service account.
+///
+/// Plain strings preserve the descriptor as data; parsing and validation are
+/// performed during creation. Credentials are read only from `kubeconfig`
+/// (never ambient `KUBECONFIG`, `$HOME/.kube/config`, or an in-cluster service
+/// account token). The image is not pulled by this crate: the node's kubelet
+/// pulls it when absent under `imagePullPolicy: IfNotPresent`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KubernetesBackendConfig {
+    kubeconfig: String,
+    context: Option<String>,
+    namespace: String,
+    image: String,
+    service_account: Option<String>,
+}
+
+impl KubernetesBackendConfig {
+    /// Stores the supplied descriptor values without reading the kubeconfig.
+    #[must_use]
+    pub fn new(
+        kubeconfig: impl Into<String>,
+        namespace: impl Into<String>,
+        image: impl Into<String>,
+    ) -> Self {
+        Self {
+            kubeconfig: kubeconfig.into(),
+            context: None,
+            namespace: namespace.into(),
+            image: image.into(),
+            service_account: None,
+        }
+    }
+
+    /// Selects a named kubeconfig context instead of the file's current
+    /// context.
+    #[must_use]
+    pub fn with_context(mut self, context: impl Into<String>) -> Self {
+        self.context = Some(context.into());
+        self
+    }
+
+    /// Runs the Pod under this service account instead of the namespace
+    /// default.
+    #[must_use]
+    pub fn with_service_account(mut self, service_account: impl Into<String>) -> Self {
+        self.service_account = Some(service_account.into());
+        self
+    }
+
+    /// Absolute kubeconfig path. Never resolved from ambient environment.
+    #[must_use]
+    pub fn kubeconfig(&self) -> &str {
+        &self.kubeconfig
+    }
+
+    /// Optional named context in that kubeconfig.
+    #[must_use]
+    pub fn context(&self) -> Option<&str> {
+        self.context.as_deref()
+    }
+
+    /// Namespace scoping every Kubernetes request.
+    #[must_use]
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// Image reference. The node's kubelet pulls it with
+    /// `imagePullPolicy: IfNotPresent`.
+    #[must_use]
+    pub fn image(&self) -> &str {
+        &self.image
+    }
+
+    /// Optional service account for the Pod.
+    #[must_use]
+    pub fn service_account(&self) -> Option<&str> {
+        self.service_account.as_deref()
     }
 }
 
@@ -485,6 +595,18 @@ pub enum BackendConfigError {
     InvalidNamespace { value: String },
     #[error("image reference is required and is not pulled by this crate")]
     ImageRequired,
+    #[error("kubeconfig must be an absolute file path: {value}")]
+    InvalidKubeconfigPath { value: String },
+    #[error("Kubernetes namespace must be a DNS-1123 label: {value}")]
+    InvalidKubernetesNamespace { value: String },
+    #[error("Kubernetes context name must be nonempty and at most 253 characters: {value}")]
+    InvalidContextName { value: String },
+    #[error("Kubernetes service account must be a DNS-1123 subdomain: {value}")]
+    InvalidServiceAccount { value: String },
+    #[error("image reference is not a valid Docker reference: {value}")]
+    InvalidImageReference { value: String },
+    #[error("Kubernetes runAsNonRoot requires a non-zero guest uid, got {uid}")]
+    NonRootGuestRequired { uid: u32 },
     #[error("pids {pids} cannot fit init, supervisor and command; minimum is 3")]
     SupervisorNeedsPid { pids: u32 },
 }
@@ -607,6 +729,7 @@ mod tests {
                 assert_eq!(docker.runtime(), "runc");
             }
             BackendConfig::Containerd(_) => panic!("expected a Docker descriptor"),
+            BackendConfig::Kubernetes(_) => panic!("expected a Docker descriptor"),
         }
     }
 
@@ -628,6 +751,34 @@ mod tests {
                 assert_eq!(containerd.snapshotter(), "overlayfs");
             }
             BackendConfig::Docker(_) => panic!("expected a containerd descriptor"),
+            BackendConfig::Kubernetes(_) => panic!("expected a containerd descriptor"),
         }
+    }
+
+    #[test]
+    fn kubernetes_descriptor_is_plain_data() {
+        let backend = BackendConfig::kubernetes(
+            "/etc/kubernetes/kubeconfig",
+            "sandboxes",
+            "docker.io/library/python:3.12-slim",
+        );
+        let BackendConfig::Kubernetes(kubernetes) = backend else {
+            panic!("expected a Kubernetes descriptor");
+        };
+        assert_eq!(kubernetes.kubeconfig(), "/etc/kubernetes/kubeconfig");
+        assert_eq!(kubernetes.namespace(), "sandboxes");
+        assert_eq!(kubernetes.image(), "docker.io/library/python:3.12-slim");
+        assert_eq!(kubernetes.context(), None);
+        assert_eq!(kubernetes.service_account(), None);
+
+        let kubernetes = KubernetesBackendConfig::new(
+            "/etc/kubernetes/kubeconfig",
+            "sandboxes",
+            "python:3.12-slim",
+        )
+        .with_context("circus")
+        .with_service_account("sandbox");
+        assert_eq!(kubernetes.context(), Some("circus"));
+        assert_eq!(kubernetes.service_account(), Some("sandbox"));
     }
 }

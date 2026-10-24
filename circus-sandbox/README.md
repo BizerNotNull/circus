@@ -1,12 +1,12 @@
 # circus-sandbox
 
-Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace 文件能力、受预算约束的进程内代码快照、`runtime::ResourceLimits` 请求校验、本地 OCI 镜像解析，以及后端中立的 `Sandbox::create(BackendConfig, SandboxConfig)` API。该 API 有两个已实现后端：显式本地 Linux Docker Engine + `runc`，以及显式本地 containerd + `runc`（`io.containerd.runc.v2` handler、`overlayfs` snapshotter）。workspace 文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；容器后端通过私有 lifecycle/infrastructure 模块运行 Linux 容器，`BackendConfig::Docker` / `BackendConfig::Containerd` 只是公开的后端选择描述，不暴露 bollard、containerd-client 或 tonic 类型。
+Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace 文件能力、受预算约束的进程内代码快照、`runtime::ResourceLimits` 请求校验、本地 OCI 镜像解析，以及后端中立的 `Sandbox::create(BackendConfig, SandboxConfig)` API。该 API 有三个已实现后端：显式本地 Linux Docker Engine + `runc`、显式本地 containerd + `runc`（`io.containerd.runc.v2` handler、`overlayfs` snapshotter），以及显式 kubeconfig 的 Kubernetes workload Pod（`kubernetes` feature）。workspace 文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；后端通过私有 lifecycle/infrastructure 模块运行 Linux 容器或 Pod，`BackendConfig::Docker` / `BackendConfig::Containerd` / `BackendConfig::Kubernetes` 只是公开的后端选择描述，不暴露 bollard、containerd-client、tonic、`kube` 或 `k8s-openapi` 类型。
 
-容器后端不是通用进程沙箱：`BackendConfig::Docker` 只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。`BackendConfig::Containerd` 只接受绝对 Unix socket、显式 namespace、本地已存在的 image reference、`runc` 与 `overlayfs`；`runsc` 在本机不可用并被显式拒绝。containerd 后端从本地 image config 解析 chain snapshot，缺失时只用本地 content/diff 解包，同样不访问 registry。详见 [containerd-runc.md](docs/containerd-runc.md)。`environment::prepare_docker_image` 只做本地镜像 inspect，把显式 reference 解析成不可变 image ID 并检查平台；它不会访问 registry，也不会读取凭据。`environment::EnvironmentPlan` 执行显式有序、逐步固定且不经过 shell 的准备工作，并在返回前确认容器与 staging 清理；`environment::EnvironmentId` 从解析后的镜像、平台、固定步骤和显式 tenant 域派生不透明 SHA-256 标识，不提供缓存或持久化。`http` feature（默认启用）提供认证 JSON HTTP 传输，见 [HTTP API](docs/http-api.md)。Kubernetes、gVisor、Kata、Firecracker、registry pull/认证仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker / containerd + runc slice 当作全部七领域交付。
+容器后端不是通用进程沙箱：`BackendConfig::Docker` 只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。`BackendConfig::Containerd` 只接受绝对 Unix socket、显式 namespace、本地已存在的 image reference、`runc` 与 `overlayfs`；`runsc` 在本机不可用并被显式拒绝。containerd 后端从本地 image config 解析 chain snapshot，缺失时只用本地 content/diff 解包，同样不访问 registry。`BackendConfig::Kubernetes` 只接受绝对 kubeconfig 路径、DNS-1123 namespace、合法 image reference 与可选 context/service account；它从不读取 `KUBECONFIG`、`$HOME/.kube/config` 或集群内 service-account 凭据。Pod 使用 `restartPolicy: Never`、`runAsNonRoot`、丢弃全部 capability、`RuntimeDefault` seccomp、只读根文件系统、`emptyDir` 工作区与 `imagePullPolicy: IfNotPresent`；镜像由节点 kubelet 在缺失时拉取，本 crate 不访问 registry。Kubernetes 后端不实现暂停/恢复、工作区快照和交互进程，这些操作返回类型化 `UnsupportedCapability`。详见 [kubernetes-runc.md](docs/kubernetes-runc.md) 与 [containerd-runc.md](docs/containerd-runc.md)。`environment::prepare_docker_image` 只做本地镜像 inspect，把显式 reference 解析成不可变 image ID 并检查平台；它不会访问 registry，也不会读取凭据。`environment::EnvironmentPlan` 执行显式有序、逐步固定且不经过 shell 的准备工作，并在返回前确认容器与 staging 清理；`environment::EnvironmentId` 从解析后的镜像、平台、固定步骤和显式 tenant 域派生不透明 SHA-256 标识，不提供缓存或持久化。`http` feature（默认启用）提供认证 JSON HTTP 传输，见 [HTTP API](docs/http-api.md)。Kubernetes workload 已实现，但真正的 pause/resume provider（B03）、Kubernetes 文件快照、gVisor、Kata、Firecracker、registry pull/认证仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker / containerd / Kubernetes workload slice 当作全部七领域交付。
 
-workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Docker 与 containerd 后端不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；两者的实际效果需要真实 Linux daemon 验证，containerd 的 cgroup 数值不从存储 spec 冒充生效证据，独立 workspace 仍没有总字节或宿主磁盘配额执行机制。`CodeSource::open` 仅供可信库调用方显式授予源目录读取能力，再复制到新建的 `Workspace`，不是挂载或直接接管源目录。`GitCheckout` 用受控宿主 Git 进程准备固定提交并可创建独立 worktree，属于可信准备流程，不是对抗性进程沙箱。
+workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Docker、containerd 与 Kubernetes 后端不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；两者的实际效果需要真实 daemon 或集群验证，containerd 的 cgroup 数值与 Kubernetes 的 Pod spec 都不从请求值冒充生效证据。Kubernetes 报告只包含从 Pod spec 读回的字段；节点实际 cgroup、CNI 网络隔离与 RuntimeClass 身份不在该报告中。独立 workspace 仍没有总字节或宿主磁盘配额执行机制。`CodeSource::open` 仅供可信库调用方显式授予源目录读取能力，再复制到新建的 `Workspace`，不是挂载或直接接管源目录。`GitCheckout` 用受控宿主 Git 进程准备固定提交并可创建独立 worktree，属于可信准备流程，不是对抗性进程沙箱。
 
-工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖还包括 bollard **0.21.1**、containerd-client **0.9**（构建期需要 `protoc`）、prost-types **0.14**、sha2 **0.10**、tokio **1.x**、tokio-util **0.7.x**、uuid **1.x**、futures-util **0.3.x**、thiserror **2.0.21**、serde_json **1.x**，以及 `http` feature 使用的 axum **0.8**、serde **1.x**、base64 **0.22**；测试客户端使用 reqwest **0.12**（仅 JSON feature）。`Cargo.lock` 固定解析版本，检查和运行都加 `--locked`。workspace 仍使用 cap-std **4.0.3**、cap-fs-ext **4.0.3**、tempfile **3.27.0**。
+工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖还包括 bollard **0.21.1**、containerd-client **0.9**（构建期需要 `protoc`）、prost-types **0.14**、sha2 **0.10**、tokio **1.x**、tokio-util **0.7.x**、uuid **1.x**、futures-util **0.3.x**、thiserror **2.0.21**、serde_json **1.x**，以及 `http` feature 使用的 axum **0.8**、serde **1.x**、base64 **0.22**；`kubernetes` feature 使用 kube **4.2.0** 与 k8s-openapi **0.28.0**（v1_36），两者都是 Apache-2.0，默认构建不编译它们；测试客户端使用 reqwest **0.12**（仅 JSON feature）。`Cargo.lock` 固定解析版本，检查和运行都加 `--locked`。workspace 仍使用 cap-std **4.0.3**、cap-fs-ext **4.0.3**、tempfile **3.27.0**。
 
 这里描述当前检出的真实实现，不以文件或工作流存在代替发布、合并和运行证据。完整目标及交付记录入口见 [交付计划](docs/delivery-plan.md)，QA、安全、Rust 与架构域门禁的实际范围见 [工程说明](docs/engineering.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。
 
@@ -109,13 +109,13 @@ Call `GitCheckout::cleanup().await` for observable, idempotent removal. `GitErro
 公开创建入口是 `Sandbox::create(BackendConfig, SandboxConfig).await`：
 
 - `runtime::SandboxConfig::new(limits, isolation, io_limits)` 只承载所有后端共有的要求：`ResourceLimits` 请求、`IsolationConfig` 隔离要求（no-new-privileges、drop all capabilities、read-only root、disabled network 必须全部为真）和 `IoLimits`。它不包含 endpoint、image 或 runtime。
-- `runtime::BackendConfig` 是后端选择枚举，当前有两个已实现变体：`BackendConfig::Docker(DockerBackendConfig)` 与 `BackendConfig::Containerd(ContainerdBackendConfig)`。它们分别包含显式本地 endpoint/socket、已存在的 image reference、OCI runtime 名称；containerd 描述另含 namespace 与 snapshotter；构造它们不连接任何 daemon。
-- Docker endpoint/image/runtime 的解析、仅 runc、以及 Docker 特有的 PID 下限等校验都在私有 `infrastructure::DockerConfig` 中完成；containerd 的 socket/namespace/image/runtime/snapshotter 校验在私有 `infrastructure::ContainerdConfig` 中完成，`runsc` 返回 `BackendConfigError::RuntimeUnavailable`。`Sandbox::create` 在分配任何容器之前返回 `SandboxError::BackendConfig(BackendConfigError)`；本地镜像不存在时返回 `SandboxError::BackendImageUnavailable { image }`；其他后端失败是 `SandboxError::Backend { message }`，不泄露 SDK 类型。Docker 的 restrict/limit 结果由 create 时的 inspect 校验，不匹配会清理已创建容器；containerd 的 `enforcement` 只报告从存储的 OCI spec 读回的结构事实，cgroup 数值保持 `None`。
-- `Sandbox::create` 还会在连接前检查后端是否声明支持 pause/resume、guest 文件传输和 workspace 快照捕获；不支持时返回 `SandboxError::UnsupportedCapability`。这些检查不表示其他后端已实现。
+- `runtime::BackendConfig` 是后端选择枚举，当前有三个已实现变体：`BackendConfig::Docker(DockerBackendConfig)`、`BackendConfig::Containerd(ContainerdBackendConfig)` 与 `BackendConfig::Kubernetes(KubernetesBackendConfig)`。它们分别包含显式本地 endpoint/socket、已存在的 image reference、OCI runtime 名称；containerd 描述另含 namespace 与 snapshotter；Kubernetes 描述含绝对 kubeconfig 路径、DNS-1123 namespace、image reference，以及可选 context 与 service account；构造它们不连接任何 daemon 或集群。
+- Docker endpoint/image/runtime 的解析、仅 runc、以及 Docker 特有的 PID 下限等校验都在私有 `infrastructure::DockerConfig` 中完成；containerd 的 socket/namespace/image/runtime/snapshotter 校验在私有 `infrastructure::ContainerdConfig` 中完成，`runsc` 返回 `BackendConfigError::RuntimeUnavailable`；Kubernetes 的 kubeconfig 绝对路径、namespace、context、service account、image reference 与非零 guest uid 校验在私有 `infrastructure::KubernetesConfig` 中完成。`Sandbox::create` 在分配任何容器或 Pod 之前返回 `SandboxError::BackendConfig(BackendConfigError)`；Docker/containerd 本地镜像不存在时返回 `SandboxError::BackendImageUnavailable { image }`；其他后端失败是 `SandboxError::Backend { message }`，不泄露 SDK 类型。Docker 的 restrict/limit 结果由 create 时的 inspect 校验，不匹配会清理已创建容器；containerd 的 `enforcement` 只报告从存储的 OCI spec 读回的项目；Kubernetes 的 `enforcement` 只报告从 Pod spec 读回的项目。Kubernetes prepare 加载显式 kubeconfig、列出 namespace、并对完整 Pod 做 server-side dry-run，不持久化对象也不拉取镜像。
+- 创建只要求后端支持创建、exec 与 guest 文件传输；缺少 guest 文件传输时在分配前返回 `SandboxError::UnsupportedCapability`。`pause`/`resume`、工作区快照捕获/恢复、`spawn_process` 各自在调用时检查能力并返回类型化 `UnsupportedCapability`，不再因缺少暂停或快照能力拒绝创建。Docker 与 containerd 报告全部能力；Kubernetes workload 只报告文件传输，因此上述四项在 Pod 上被显式拒绝。
 
 `SandboxStatus` 只报告当前 phase、`instance_id: Option<String>` 和 `enforcement: Option<EnforcementReport>`。`EnforcementReport` 的每个字段都是 inspect 到的证据，类型为 `Option`；`None` 表示后端没有报告该项。请求值不会复制成“已强制”的值。
 
-示例：`examples/sandbox_config.rs` 构造中立配置、展示 `BackendConfig::Docker` 与 `BackendConfig::Containerd` 描述，并观察无效 endpoint 与 Docker PID 下限在分配前被类型化拒绝；`examples/image_environment.rs` 解析本地不可变镜像 ID。两者都不需要连接成功，也不代表容器隔离已验证。
+示例：`examples/sandbox_config.rs` 构造中立配置、展示 `BackendConfig::Docker`、`BackendConfig::Containerd` 与 `BackendConfig::Kubernetes` 描述，并观察无效 endpoint 与 Docker PID 下限在分配前被类型化拒绝；`examples/image_environment.rs` 解析本地不可变镜像 ID。两者都不需要连接成功，也不代表容器或 Pod 隔离已验证。
 
 ## 资源请求值模型
 
@@ -229,25 +229,26 @@ CIRCUS_HTTP_TOKEN=example-token CIRCUS_HTTP_TENANT=local \
 
 同样在 `circus-sandbox/` 下执行：
 
-| 目的              | 命令                                                                                            |
-| ----------------- | ----------------------------------------------------------------------------------------------- |
-| 格式检查 / 格式化 | `cargo fmt --check` / `cargo fmt`                                                               |
-| Clippy            | `cargo clippy --locked --all-targets -- -D warnings`                                            |
-| 构建              | `cargo build --locked`                                                                          |
-| 测试              | `cargo test --locked`                                                                           |
-| 只跑文件 API 测试 | `cargo test --locked --test workspace`                                                          |
-| 文档              | `RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`                                         |
-| 运行示例          | `cargo run --locked --example workspace`                                                        |
-| 资源请求示例      | `cargo run --locked --example resource_policy`                                                  |
-| 镜像解析示例      | `cargo run --locked --example image_environment`                                                |
-| 镜像解析测试      | `cargo test --locked --test docker_environment -- --ignored`                                    |
-| 环境准备示例      | `cargo run --locked --example environment_identity`                                             |
-| 环境准备测试      | `cargo test --locked --test docker_environment_prep -- --ignored`                               |
-| 代码副本测试      | `cargo test --locked --test code_copy`                                                          |
-| 代码副本示例      | `cargo run --locked --example code_copy`                                                        |
-| Git worktree 测试 | `cargo test --locked --test git_worktree`                                                       |
-| Git worktree 示例 | `cargo run --locked --example git_worktree`                                                     |
-| 依赖策略          | 先 `cargo install --locked --version 0.20.2 cargo-deny`，再在本目录 `cargo deny --locked check` |
+| 目的                | 命令                                                                                                                     |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| 格式检查 / 格式化   | `cargo fmt --check` / `cargo fmt`                                                                                        |
+| Clippy              | `cargo clippy --locked --all-targets -- -D warnings`                                                                     |
+| 构建                | `cargo build --locked`                                                                                                   |
+| 测试                | `cargo test --locked`                                                                                                    |
+| 只跑文件 API 测试   | `cargo test --locked --test workspace`                                                                                   |
+| 文档                | `RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`                                                                  |
+| 运行示例            | `cargo run --locked --example workspace`                                                                                 |
+| 资源请求示例        | `cargo run --locked --example resource_policy`                                                                           |
+| 镜像解析示例        | `cargo run --locked --example image_environment`                                                                         |
+| 镜像解析测试        | `cargo test --locked --test docker_environment -- --ignored`                                                             |
+| 环境准备示例        | `cargo run --locked --example environment_identity`                                                                      |
+| 环境准备测试        | `cargo test --locked --test docker_environment_prep -- --ignored`                                                        |
+| 代码副本测试        | `cargo test --locked --test code_copy`                                                                                   |
+| 代码副本示例        | `cargo run --locked --example code_copy`                                                                                 |
+| Git worktree 测试   | `cargo test --locked --test git_worktree`                                                                                |
+| Git worktree 示例   | `cargo run --locked --example git_worktree`                                                                              |
+| 依赖策略            | 先 `cargo install --locked --version 0.20.2 cargo-deny`，再在本目录 `cargo deny --locked check`                          |
+| Kubernetes 集成测试 | `CIRCUS_KUBERNETES=1 cargo test --locked --features kubernetes --test kubernetes_workload -- --ignored --test-threads=1` |
 
 `cargo test --locked` 覆盖库测试和 `tests/`。要连示例一起编译，使用 `cargo test --locked --all-targets`。不要手改 `Cargo.lock` 来绕过解析失败。
 
@@ -271,7 +272,9 @@ npm --prefix circus-sandbox/qa run architecture
 
 `.github/workflows/sandbox-architecture.yml`（`Sandbox architecture`）使用同样的触发条件，没有路径过滤。`architecture (ubuntu-latest)` 与 `architecture (windows-latest)` 安装 Node.js 24.18.0、Rust 1.99.1 和 cargo-modules 0.28.0，执行 `npm ci` 与 `npm run architecture`，对真实 crate 图检查固定跨域矩阵；超时 20 分钟，不构建或测试 crate，也不要求 Docker。
 
-许可证 allow 只有 Apache-2.0、MIT、`Apache-2.0 WITH LLVM-exception`（winx 0.36.4）和 Unicode-3.0（unicode-ident 1.0.27）。没有例外列表。`multiple-versions` 只警告。当前 lock 里去不掉的传递重复是 `io-lifetimes` 2.0.4 与 3.0.1，以及 Windows SDK 绑定 `windows-sys` 0.59.0、0.60.2 与 0.61.2，都来自 cap-std / cap-fs-ext 4.0.3 的依赖闭包。细节见 [AGENTS.md](AGENTS.md)。工作流已配置不等于这些检查已经通过；结果看对应 PR 的 Actions。
+`.github/workflows/sandbox-kubernetes.yml`（`Sandbox Kubernetes`）在 PR 与手动运行时安装 Rust 1.99.1 和 k3s（官方脚本，`--disable=traefik`），等待节点 Ready，导出仅供该 job 使用的 kubeconfig，并用 `k3s ctr -n k8s.io` 预拉取 `docker.io/library/python:3.12-slim`，然后串行运行忽略的 `kubernetes_workload` 套件（`--features kubernetes`）。它不证明真实暂停/恢复、Kubernetes 工作区快照、RuntimeClass 隔离或 gVisor/Kata/KVM；这些能力未实现或未验证。
+
+许可证 allow 为 Apache-2.0、MIT、`Apache-2.0 WITH LLVM-exception`（winx 0.36.4）、Unicode-3.0（unicode-ident 1.0.27）、BSD-3-Clause（matchit 0.8.4）与 Zlib（foldhash 0.1.5），以及 `kubernetes` feature 的 rustls TLS 栈所需的 ISC（ring 0.17.14 的 `Apache-2.0 AND ISC`、rustls-webpki 0.103.16、untrusted 0.9.0）。没有例外列表。`cargo deny --locked check` 的默认依赖图不包含可选 kube/k8s-openapi；`--all-features` 使用同一 allow 列表。`multiple-versions` 只警告。当前 lock 里去不掉的传递重复是 `io-lifetimes` 2.0.4 与 3.0.1，以及 Windows SDK 绑定 `windows-sys` 0.59.0、0.60.2 与 0.61.2，都来自 cap-std / cap-fs-ext 4.0.3 的依赖闭包。细节见 [AGENTS.md](AGENTS.md)。工作流已配置不等于这些检查已经通过；结果看对应 PR 的 Actions。
 
 当前检出还包含质量与安全门禁：`Sandbox quality` 检查文档、链接、1200 行手写 Rust 上限和 QA 回归测试，并运行 npm audit 与 actionlint；`CodeQL QA` 分析 QA JavaScript；`Gitleaks` 扫描完整 Git 历史；`Dependency review` 只审查 PR 依赖差异；`CodeQL (actions)` 只分析安全工作流。Dependabot 每周更新 GitHub Actions、QA npm 和 Cargo，但不批准或合并。QA 固定 Node.js 24.18.0，使用现有 checker 与锁文件；根目录命令见工程说明。这些门禁不等于隔离测试，也不等于仓库全部漏洞已解决。
 
@@ -301,6 +304,14 @@ npm --prefix circus-sandbox/qa run architecture
 `cleanup` 的 I/O 失败也是 `Io`。此时工作区仍然打开，应保留同一个 `Workspace` 再调用 `cleanup`，不要丢弃错误后假设目录已消失。
 
 ## 变更
+
+### 未发布：Kubernetes workload 后端与按操作能力协商
+
+- 新增可选 `kubernetes` feature 与 `BackendConfig::Kubernetes(KubernetesBackendConfig)`：显式绝对 kubeconfig、可选 context、DNS-1123 namespace、image reference 与可选 service account；不读取环境凭据，不暴露 `kube`/`k8s-openapi` 类型。新增 `InvalidKubeconfigPath`、`InvalidKubernetesNamespace`、`InvalidContextName`、`InvalidServiceAccount`、`InvalidImageReference` 与 `NonRootGuestRequired` 配置错误。
+- 新私有 `KubernetesBackend` 真实创建 `restartPolicy: Never` Pod（唯一 Python sleep 容器、`runAsNonRoot`、`allowPrivilegeEscalation:false`、drop ALL、`RuntimeDefault` seccomp、只读根、`emptyDir` 工作区、资源 limits、`activeDeadlineSeconds`、`imagePullPolicy: IfNotPresent`、无 host mount/host network）；`prepare` 用显式 kubeconfig 列 namespace 并做 server-side dry-run，`create_owned` 校验读回的所有权与安全字段，`start` 等待 Ready/Running，`exec` 与 guest 文件传输复用 `guest_transport`/`guest_files.py`，`recover_owned` 只删除带本 sandbox owner label 的 Pod 并确认 404。
+- 创建期不再因缺少 pause/resume 或 workspace snapshot 能力拒绝创建；这些操作与 `spawn_process` 在调用时返回类型化 `UnsupportedCapability`。Docker 与 containerd 仍报告全部能力，行为不变。
+- Kubernetes workload 明确不支持暂停/恢复、工作区快照捕获/恢复、交互进程与 pids 限制；真正的 pause/resume provider（B03）仍未实现。
+- 新增忽略的真实 k3s 套件 `tests/kubernetes_workload.rs`（`CIRCUS_KUBERNETES=1`）与 `.github/workflows/sandbox-kubernetes.yml`；新增可选依赖 kube 4.2.0 与 k8s-openapi 0.28.0（Apache-2.0）。
 
 ### 未发布：调用方拥有的观测计数与结构化追踪事件
 

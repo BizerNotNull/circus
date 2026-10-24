@@ -43,6 +43,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             containerd.image(),
             containerd.runtime()
         ),
+        BackendConfig::Kubernetes(kubernetes) => println!(
+            "backend kubeconfig={} namespace={} image={}",
+            kubernetes.kubeconfig(),
+            kubernetes.namespace(),
+            kubernetes.image()
+        ),
     }
 
     let error = match Sandbox::create(

@@ -32,25 +32,31 @@ pub(super) fn common_spec(config: &SandboxConfig) -> CommonSpec {
     }
 }
 
-/// Rejects a configuration the selected backend cannot honor.
+/// Rejects a configuration whose backend cannot transfer guest files.
+///
+/// Creation only needs create/exec/file transport. Every other operation
+/// negotiates its own capability when it is requested, so a backend without
+/// pause/resume, snapshots, or interactive processes can still create and run
+/// a sandbox.
 pub(super) fn require_capabilities<B: Backend>(backend: &B) -> Result<(), SandboxError> {
-    let capabilities = backend.capabilities();
-    if !capabilities.pause_resume {
-        return Err(SandboxError::UnsupportedCapability {
-            capability: "pause and resume",
-        });
-    }
-    if !capabilities.file_transport {
+    if !backend.capabilities().file_transport {
         return Err(SandboxError::UnsupportedCapability {
             capability: "transfer guest files",
         });
     }
-    if !capabilities.workspace_snapshot {
-        return Err(SandboxError::UnsupportedCapability {
-            capability: "capture a workspace snapshot",
-        });
-    }
     Ok(())
+}
+
+/// Rejects one operation the selected backend cannot perform.
+pub(super) fn require_capability(
+    supported: bool,
+    capability: &'static str,
+) -> Result<(), SandboxError> {
+    if supported {
+        Ok(())
+    } else {
+        Err(SandboxError::UnsupportedCapability { capability })
+    }
 }
 
 pub(super) async fn start<B: Backend>(state: &mut State<B>) -> Result<(), SandboxError> {
@@ -107,6 +113,10 @@ async fn cleanup_transfer_failure<B: Backend, T>(
 }
 
 pub(super) async fn pause<B: Backend>(state: &mut State<B>) -> Result<(), SandboxError> {
+    require_capability(
+        state.backend.capabilities().pause_resume,
+        "pause and resume",
+    )?;
     need(state, SandboxPhase::Running, "pause")?;
     let id = required_id(state)?;
     if let Err(err) = state.backend.pause(&id).await {
@@ -117,6 +127,10 @@ pub(super) async fn pause<B: Backend>(state: &mut State<B>) -> Result<(), Sandbo
 }
 
 pub(super) async fn resume<B: Backend>(state: &mut State<B>) -> Result<(), SandboxError> {
+    require_capability(
+        state.backend.capabilities().pause_resume,
+        "pause and resume",
+    )?;
     need(state, SandboxPhase::Paused, "resume")?;
     let id = required_id(state)?;
     if let Err(err) = state.backend.resume(&id).await {

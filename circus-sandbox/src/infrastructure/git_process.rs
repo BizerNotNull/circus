@@ -9,6 +9,8 @@
 
 use crate::runtime::{ProcessCleanup, ProcessError};
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::{
     ffi::OsString,
     io,
@@ -105,11 +107,16 @@ async fn run(
     let mut out_open = true;
     let mut err_open = true;
     let mut may_signal = true;
+    #[cfg(target_os = "linux")]
+    let mut observed: Option<ExitStatus> = None;
     let primary = loop {
         #[cfg(target_os = "linux")]
-        match leader_exited(pid) {
-            Ok(true) => break None,
-            Ok(false) => {}
+        match observe_leader(pid) {
+            Ok(Some(status)) => {
+                observed = Some(status);
+                break None;
+            }
+            Ok(None) => {}
             Err(e) => {
                 may_signal = false;
                 break Some(io_error("observe leader", e));
@@ -150,6 +157,8 @@ async fn run(
         &mut may_signal,
         #[cfg(target_os = "linux")]
         pid,
+        #[cfg(target_os = "linux")]
+        observed,
     )
     .await
     {
@@ -182,7 +191,10 @@ async fn run(
                     if !may_signal {
                         std::future::pending::<()>().await;
                     }
-                    if terminate(&mut *child, &mut may_signal, pid).await.is_ok() {
+                    if terminate(&mut *child, &mut may_signal, pid, observed)
+                        .await
+                        .is_ok()
+                    {
                         let _ = done.send(true);
                         break;
                     }
@@ -202,6 +214,17 @@ async fn run(
     }
 }
 
+/// `try_wait` can report a vanished process group as ESRCH/ECHILD; that means
+/// no status is cached, not that the caller failed.
+#[cfg(target_os = "linux")]
+fn try_status(child: &mut dyn ChildWrapper) -> io::Result<Option<ExitStatus>> {
+    match child.try_wait() {
+        Ok(status) => Ok(status),
+        Err(error) if matches!(error.raw_os_error(), Some(3) | Some(10)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn capture(
     read: io::Result<usize>,
     buffer: &[u8],
@@ -217,22 +240,34 @@ fn capture(
     Ok(count != 0)
 }
 
+/// Observes leader exit without reaping it.
+///
+/// The zombie keeps the process group identity valid until the group is killed,
+/// and its status is the fallback when the group vanishes before the runtime
+/// wait runs.
 #[cfg(target_os = "linux")]
-fn leader_exited(pid: u32) -> io::Result<bool> {
+fn observe_leader(pid: u32) -> io::Result<Option<ExitStatus>> {
     use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
     let pid = Pid::from_raw(pid as i32).ok_or_else(|| io::Error::other("invalid child PID"))?;
-    waitid(
+    let status = waitid(
         WaitId::Pid(pid),
         WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
     )
-    .map(|status| status.is_some())
-    .map_err(Into::into)
+    .map_err(io::Error::from)?;
+    Ok(status.and_then(|status| {
+        if let Some(code) = status.exit_status() {
+            Some(ExitStatus::from_raw(code << 8))
+        } else {
+            status.terminating_signal().map(ExitStatus::from_raw)
+        }
+    }))
 }
 
 async fn terminate(
     child: &mut dyn ChildWrapper,
     may_signal: &mut bool,
     #[cfg(target_os = "linux")] pid: u32,
+    #[cfg(target_os = "linux")] observed: Option<ExitStatus>,
 ) -> io::Result<ExitStatus> {
     if !*may_signal {
         return Err(io::Error::other(
@@ -240,8 +275,18 @@ async fn terminate(
         ));
     }
     #[cfg(target_os = "linux")]
-    if let Err(error) = leader_exited(pid) {
+    if let Err(error) = observe_leader(pid) {
         *may_signal = false;
+        // The leader can disappear between the loop and this check; the
+        // status observed earlier is then the only honest answer.
+        if matches!(error.raw_os_error(), Some(3) | Some(10)) {
+            if let Some(status) = observed {
+                return Ok(status);
+            }
+            if let Some(status) = try_status(child)? {
+                return Ok(status);
+            }
+        }
         return Err(error);
     }
     // `killpg` reports ESRCH (3) when the whole group is already gone; that is
@@ -253,13 +298,19 @@ async fn terminate(
         return Err(error);
     }
     #[cfg(not(target_os = "linux"))]
-    child.start_kill()?;
+    child
+        .start_kill()
+        .map_err(|e| io::Error::new(e.kind(), format!("kill group: {e}")))?;
     #[cfg(target_os = "linux")]
     {
         let stop = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            if group_stopped(pid).await? {
-                break;
+            match group_stopped(pid).await {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(error) => {
+                    return Err(error);
+                }
             }
             if tokio::time::Instant::now() >= stop {
                 return Err(io::Error::new(
@@ -271,7 +322,34 @@ async fn terminate(
         }
     }
     *may_signal = false;
-    child.wait().await
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::io::Errno;
+        use rustix::process::{Pid, WaitOptions, waitpid};
+        let leader =
+            Pid::from_raw(pid as i32).ok_or_else(|| io::Error::other("invalid child PID"))?;
+        match waitpid(Some(leader), WaitOptions::empty()) {
+            Ok(Some((_, status))) => return Ok(ExitStatus::from_raw(status.as_raw())),
+            Ok(None) => {}
+            Err(Errno::CHILD | Errno::SRCH) => {}
+            Err(error) => {
+                return Err(error.into());
+            }
+        }
+        // Another runtime path reaped the leader first; use the status observed
+        // by `waitid(WNOWAIT)` or the runtime cache.
+        if let Some(status) = observed {
+            return Ok(status);
+        }
+        if let Some(status) = try_status(child)? {
+            return Ok(status);
+        }
+        Err(io::Error::other("leader exit status is unavailable"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        child.wait().await
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -294,22 +372,27 @@ async fn group_stopped(pgid: u32) -> io::Result<bool> {
     for pid in &before {
         let stat = match tokio::fs::read_to_string(format!("/proc/{pid}/stat")).await {
             Ok(stat) => stat,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            // A process that exits mid-read makes the kernel report ESRCH
+            // (or NotFound); take a fresh census instead of failing.
+            Err(e) if e.kind() == io::ErrorKind::NotFound || e.raw_os_error() == Some(3) => {
+                return Ok(false);
+            }
             Err(e) => return Err(e),
         };
-        let tail = stat
-            .rsplit_once(") ")
-            .ok_or_else(|| io::Error::other("invalid proc stat"))?
-            .1;
+        // A process that exits while its record is read leaves a truncated
+        // /proc entry. That is a changed census, not a protocol failure: report
+        // "not stopped" and let the caller take another census.
+        let Some(tail) = stat.rsplit_once(") ").map(|(_, tail)| tail) else {
+            return Ok(false);
+        };
         let mut fields = tail.split_ascii_whitespace();
-        let state = fields
-            .next()
-            .ok_or_else(|| io::Error::other("missing proc state"))?;
+        let Some(state) = fields.next() else {
+            return Ok(false);
+        };
         let _parent = fields.next();
-        let group = fields
-            .next()
-            .and_then(|s| s.parse::<u32>().ok())
-            .ok_or_else(|| io::Error::other("missing proc group"))?;
+        let Some(group) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            return Ok(false);
+        };
         if group == pgid && state != "Z" && state != "X" {
             return Ok(false);
         }

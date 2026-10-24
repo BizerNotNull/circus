@@ -91,5 +91,6 @@ fn accepts_valid_configuration_and_exposes_typed_values() {
             assert_eq!(docker.runtime(), "runc");
         }
         BackendConfig::Containerd(_) => panic!("expected a Docker descriptor"),
+        BackendConfig::Kubernetes(_) => panic!("expected a Docker descriptor"),
     }
 }

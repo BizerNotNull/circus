@@ -13,7 +13,7 @@ use thiserror::Error;
 
 pub use config::{
     BackendConfig, BackendConfigError, ConfigError, ContainerdBackendConfig, DockerBackendConfig,
-    IoLimits, IsolationConfig, SandboxConfig,
+    IoLimits, IsolationConfig, KubernetesBackendConfig, SandboxConfig,
 };
 
 pub(crate) use config::check_relative;

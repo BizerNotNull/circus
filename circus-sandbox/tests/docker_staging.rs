@@ -42,6 +42,7 @@ fn host(backend: &BackendConfig) -> String {
             }
         }
         BackendConfig::Containerd(_) => panic!("docker fixture received a containerd descriptor"),
+        BackendConfig::Kubernetes(_) => panic!("docker fixture received a Kubernetes descriptor"),
     }
 }
 

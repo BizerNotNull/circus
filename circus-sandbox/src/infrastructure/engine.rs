@@ -6,13 +6,13 @@ pub(crate) use images::ImageInfo;
 
 #[path = "engine_output.rs"]
 mod output;
-#[cfg(all(unix, feature = "containerd"))]
+#[cfg(any(all(unix, feature = "containerd"), feature = "kubernetes"))]
 pub(crate) use output::OutputCollector;
 pub(crate) use output::{OutputLimit, OutputPhase};
 
 #[path = "engine_manifest.rs"]
 mod manifest;
-#[cfg(all(unix, feature = "containerd"))]
+#[cfg(any(all(unix, feature = "containerd"), feature = "kubernetes"))]
 pub(crate) use manifest::decode as decode_manifest;
 pub(crate) use manifest::{WorkspaceEntry, WorkspaceEntryKind};
 
