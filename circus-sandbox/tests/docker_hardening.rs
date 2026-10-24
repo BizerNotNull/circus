@@ -427,26 +427,39 @@ async fn docker_status_timeout_does_not_destroy_the_instance()
         Fixture::with_config(backend()?, config_with_lifecycle(Duration::from_nanos(1))?).await?;
     let id = f.id.clone().expect("created container id");
 
-    match f.sandbox().status().await {
-        Err(SandboxError::TimedOut {
-            instance_id,
-            ownership,
-            operation,
-            ..
-        }) => {
-            // `id` came from the Docker CLI's short-ID listing; the domain
-            // reports the engine's full 64-character identity.
-            assert!(
-                instance_id
-                    .as_deref()
-                    .is_some_and(|full| full.starts_with(id.as_str())),
-                "reported {instance_id:?} does not match owned container {id}"
-            );
-            assert_eq!(ownership, Ownership::StillPresent);
-            assert_eq!(operation, SandboxOperation::Status);
+    // A one-nanosecond deadline can still race with an immediately ready
+    // inspection, so probe until the deadline actually fires. Whatever the
+    // outcome, the read-only status call must never destroy the instance.
+    let mut timed_out = false;
+    for _ in 0..64 {
+        match f.sandbox().status().await {
+            Err(SandboxError::TimedOut {
+                instance_id,
+                ownership,
+                operation,
+                ..
+            }) => {
+                // `id` came from the Docker CLI's short-ID listing; the domain
+                // reports the engine's full 64-character identity.
+                assert!(
+                    instance_id
+                        .as_deref()
+                        .is_some_and(|full| full.starts_with(id.as_str())),
+                    "reported {instance_id:?} does not match owned container {id}"
+                );
+                assert_eq!(ownership, Ownership::StillPresent);
+                assert_eq!(operation, SandboxOperation::Status);
+                timed_out = true;
+                break;
+            }
+            Ok(status) => assert_eq!(status.phase, SandboxPhase::Created),
+            other => panic!("unexpected status result: {other:?}"),
         }
-        other => panic!("unexpected status result: {other:?}"),
     }
+    assert!(
+        timed_out,
+        "a one-nanosecond status deadline never fired in 64 attempts"
+    );
 
     // The read-only inspection deadline must not have removed the container.
     require_inspect(&f.host, &id)?;
