@@ -102,7 +102,7 @@ jobs:
       - name: Check architecture tool formatting
         shell: bash
         run: |
-          node qa/node_modules/prettier/bin/prettier.cjs --check \
+          node qa/node_modules/prettier/bin/prettier.cjs --check --end-of-line auto \
             qa/architecture.mjs qa/architecture.test.mjs \
             ../.github/workflows/sandbox-architecture.yml
 
