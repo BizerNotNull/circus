@@ -78,19 +78,26 @@ impl Fixture {
     }
 }
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        if let Some(id) = &self.id {
-            let _ = Command::new("docker")
-                .args(["--host", &self.host, "rm", "-f", id])
-                .output();
-        }
-    }
-}
-
-async fn destroy(f: &mut Fixture) -> Result<(), Box<dyn std::error::Error>> {
+// The fixture owns exactly one container. Teardown is explicit and has no Drop
+// fallback: `Sandbox::destroy` reports success only after confirmed absence,
+// then the engine must also report the container gone. Unconfirmed removal
+// fails the test instead of being ignored.
+async fn teardown(f: &mut Fixture) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(sandbox) = f.sandbox.take() {
         sandbox.destroy().await?;
+    }
+    let Some(id) = f.id.as_deref() else {
+        return Err("fixture has no container ID; absence cannot be confirmed".into());
+    };
+    let inspected = Command::new("docker")
+        .args(["--host", &f.host, "inspect", id])
+        .output()?;
+    if inspected.status.success() {
+        return Err(format!("teardown did not remove container {id}").into());
+    }
+    let stderr = String::from_utf8_lossy(&inspected.stderr);
+    if !stderr.contains("No such") {
+        return Err(format!("teardown could not confirm absence of {id}: {stderr}").into());
     }
     Ok(())
 }
@@ -170,8 +177,7 @@ async fn docker_linux_runc_lifecycle() -> Result<(), Box<dyn std::error::Error>>
     f.sandbox().destroy().await?;
     assert_eq!(f.sandbox().status().await?.phase, SandboxPhase::Destroyed);
     f.sandbox().destroy().await?;
-    f.sandbox = None;
-    Ok(())
+    teardown(&mut f).await
 }
 
 #[tokio::test]
@@ -183,9 +189,9 @@ async fn docker_linux_runc_ownership_is_per_create() -> Result<(), Box<dyn std::
     assert_ne!(first.id, second.id);
     first.sandbox().start().await?;
     second.sandbox().start().await?;
-    destroy(&mut second).await?;
+    teardown(&mut second).await?;
     assert_eq!(first.sandbox().status().await?.phase, SandboxPhase::Running);
-    destroy(&mut first).await?;
+    teardown(&mut first).await?;
     Ok(())
 }
 
@@ -222,7 +228,7 @@ async fn docker_linux_runc_guest_paths_and_file_limits() -> Result<(), Box<dyn s
     let too_big = f.sandbox().read_file("too-big").await;
     assert!(too_big.is_err());
     assert!(f.sandbox().read_file("secret").await? == b"secret");
-    destroy(&mut f).await?;
+    teardown(&mut f).await?;
     Ok(())
 }
 
@@ -280,8 +286,8 @@ async fn docker_linux_runc_exec_abort_destroys_only_owner() -> Result<(), Box<dy
         survivor.sandbox().status().await?.phase,
         SandboxPhase::Destroyed
     );
-    destroy(&mut victim).await?;
-    destroy(&mut survivor).await?;
+    teardown(&mut victim).await?;
+    teardown(&mut survivor).await?;
     Ok(())
 }
 
@@ -330,7 +336,7 @@ async fn docker_linux_runc_invalid_commands_preserve_sandbox()
         let out = f.sandbox().exec(py(&["-c", "print('alive')"])).await?;
         assert_eq!(out.stdout, b"alive\n");
     }
-    destroy(&mut f).await?;
+    teardown(&mut f).await?;
     Ok(())
 }
 
@@ -374,6 +380,6 @@ async fn docker_linux_runc_staging_limit_is_not_a_path_error()
     f.sandbox().write_file("second", &vec![b'x'; 1024]).await?;
     f.sandbox().start().await?;
     assert_eq!(f.sandbox().read_file("second").await?, vec![b'x'; 1024]);
-    destroy(&mut f).await?;
+    teardown(&mut f).await?;
     Ok(())
 }

@@ -43,8 +43,10 @@ fn config(file_bytes: usize, workspace_bytes: u64) -> Result<SandboxConfig> {
     )?)
 }
 
-// The emergency fallback removes only the exact unique container we created.
-// It neither prunes other users' containers nor deletes any images.
+// The fixture owns exactly one container. Teardown is explicit and has no Drop
+// fallback: `Sandbox::destroy` reports success only after confirmed absence,
+// then the engine must also report the container gone. Unconfirmed removal
+// fails the test instead of being ignored.
 struct Fixture {
     sandbox: Sandbox,
     host: String,
@@ -82,14 +84,17 @@ impl Fixture {
     async fn destroy(&self) -> Result {
         self.sandbox.destroy().await?;
         assert_eq!(self.sandbox.status().await?.phase, SandboxPhase::Destroyed);
+        let inspected = Command::new("docker")
+            .args(["--host", &self.host, "inspect", &self.id])
+            .output()?;
+        if inspected.status.success() {
+            return Err(format!("container {} still exists after destroy", self.id).into());
+        }
+        let stderr = String::from_utf8_lossy(&inspected.stderr);
+        if !stderr.contains("No such") {
+            return Err(format!("could not confirm absence of {}: {stderr}", self.id).into());
+        }
         Ok(())
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = Command::new("docker")
-            .args(["--host", &self.host, "rm", "-f", &self.id])
-            .output();
     }
 }
 fn budget() -> SnapshotBudget {

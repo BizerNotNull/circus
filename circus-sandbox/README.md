@@ -149,7 +149,7 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
   cargo test --locked --test docker_sandbox --test docker_process -- --ignored
 ```
 
-测试使用 `python:3.12-slim`，可用 `CIRCUS_DOCKER_IMAGE` 指定另一个包含 Python 3 的本地 Linux 镜像。实际运行环境、命令、结果和限制应记录在对应 PR；不要把编译、忽略测试或 CI 通过写成隔离验证。
+测试使用 `python:3.12-slim`，可用 `CIRCUS_DOCKER_IMAGE` 指定另一个包含 Python 3 的本地 Linux 镜像。实际运行环境、命令、结果和限制应记录在对应 PR；不要把编译、忽略测试或 CI 通过写成隔离验证。GitHub 的 `Sandbox Docker` 工作流在 `ubuntu-latest` 上用相同环境变量逐个运行这些忽略套件，并先打印 Engine 版本与镜像证据；它只提供该次 GitHub 运行的真实 Engine 证据，不要求本地 Docker，未运行、取消或失败都不是通过声明。`agent_image` 仍只能手动验收：其镜像构建需要网络，不能离线构建。
 
 本地镜像解析测试同样默认忽略，且需要 `CIRCUS_DOCKER_ARCH` 指定 Docker 架构名（例如 `amd64` 或 `arm64`）：
 

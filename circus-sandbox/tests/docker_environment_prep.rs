@@ -277,7 +277,14 @@ async fn cancelled_preparation_releases_container() -> TestResult {
     // Give the exec request time to become the active operation before cancelling.
     tokio::time::sleep(Duration::from_millis(300)).await;
     handle.abort();
-    let _ = handle.await;
+    match handle.await {
+        Ok(_) => return Err("preparation completed instead of being cancelled".into()),
+        Err(error) => {
+            if !error.is_cancelled() {
+                return Err(error.into());
+            }
+        }
+    }
 
     tokio::time::timeout(WAIT, wait_absent_owned(&docker, &id)).await??;
     Ok(())

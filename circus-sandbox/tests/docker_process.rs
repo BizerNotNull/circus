@@ -52,13 +52,13 @@ impl Fixture {
         assert!(String::from_utf8_lossy(&result.stderr).contains("No such"));
         Ok(())
     }
-}
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = Command::new("docker")
-            .args(["--host", &self.host, "rm", "-f", &self.id])
-            .output();
+    // A fixture owns exactly one container. Teardown is explicit and has no
+    // Drop fallback: `Sandbox::destroy` reports success only after confirmed
+    // absence, then the engine must also report the container gone.
+    async fn teardown(&self) -> Result {
+        self.sandbox.destroy().await?;
+        self.assert_removed()
     }
 }
 
@@ -196,8 +196,7 @@ sys.exit(7)
     drop(process); // An old session must never cancel a new session.
     assert_eq!(drain(&second).await.0, b"second\n");
     assert_eq!(second.wait().await?, ProcessExit::Exited { exit_code: 0 });
-    f.sandbox.destroy().await?;
-    f.assert_removed()
+    f.teardown().await
 }
 
 #[tokio::test]
@@ -227,7 +226,7 @@ time.sleep(300)
             ProcessTermination::Cancelled,
         );
         assert_eq!(f.sandbox.status().await?.phase, SandboxPhase::Destroyed);
-        f.assert_removed()?;
+        f.teardown().await?;
     }
     Ok(())
 }
@@ -261,7 +260,7 @@ async fn timeout_and_output_limits_destroy_the_container() -> Result {
             tokio::time::timeout(Duration::from_secs(10), process.wait()).await??,
             reason,
         );
-        f.assert_removed()?;
+        f.teardown().await?;
     }
     Ok(())
 }
@@ -282,7 +281,7 @@ async fn full_output_queue_does_not_block_destroy() -> Result {
     })
     .await??;
     assert_terminated(process.wait().await?, ProcessTermination::Cancelled);
-    f.assert_removed()
+    f.teardown().await
 }
 
 #[tokio::test]
@@ -306,10 +305,9 @@ async fn dropping_session_cleans_only_its_container() -> Result {
         Ok::<_, SandboxError>(())
     })
     .await??;
-    f.assert_removed()?;
+    f.teardown().await?;
     assert_eq!(other.sandbox.status().await?.phase, SandboxPhase::Running);
-    other.sandbox.destroy().await?;
-    Ok(())
+    other.teardown().await
 }
 
 #[tokio::test]
@@ -331,7 +329,7 @@ async fn cancelled_blocked_stdin_write_cleans_container() -> Result {
         tokio::time::timeout(Duration::from_secs(10), process.wait()).await??,
         ProcessTermination::Cancelled,
     );
-    f.assert_removed()
+    f.teardown().await
 }
 
 #[tokio::test]
@@ -359,6 +357,5 @@ async fn rejected_process_request_keeps_sandbox_usable() -> Result {
         assert!(f.sandbox.spawn_process(request).await.is_err());
         assert_eq!(f.sandbox.status().await?.phase, SandboxPhase::Running);
     }
-    f.sandbox.destroy().await?;
-    Ok(())
+    f.teardown().await
 }

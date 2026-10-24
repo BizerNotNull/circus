@@ -10,18 +10,20 @@ use circus_sandbox::{
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-struct ContainerGuard<'a> {
-    host: &'a str,
-    id: String,
-}
-
-impl Drop for ContainerGuard<'_> {
-    fn drop(&mut self) {
-        // Assertions can unwind before async destroy; remove only this test's container.
-        let _ = Command::new("docker")
-            .args(["--host", self.host, "rm", "-f", &self.id])
-            .output();
+/// Requires the engine to report the exact owned container gone after destroy.
+/// There is no Drop fallback: an unconfirmed removal fails the test.
+fn confirm_absent(host: &str, id: &str) -> Result {
+    let inspected = Command::new("docker")
+        .args(["--host", host, "inspect", id])
+        .output()?;
+    if inspected.status.success() {
+        return Err(format!("container {id} still exists after destroy").into());
     }
+    let stderr = String::from_utf8_lossy(&inspected.stderr);
+    if !stderr.contains("No such") {
+        return Err(format!("could not confirm absence of {id}: {stderr}").into());
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -48,10 +50,7 @@ async fn codex_image_starts_offline_in_a_fresh_bounded_workspace() -> Result {
     // A second container must initialize its own home and project from scratch.
     for _ in 0..2 {
         let sandbox = Sandbox::create(backend.clone(), config.clone()).await?;
-        let guard = ContainerGuard {
-            host: &host,
-            id: sandbox.status().await?.instance_id.ok_or("missing id")?,
-        };
+        let id = sandbox.status().await?.instance_id.ok_or("missing id")?;
         let exercise = async {
             sandbox.start().await?;
             let enforcement = sandbox
@@ -96,11 +95,7 @@ async fn codex_image_starts_offline_in_a_fresh_bounded_workspace() -> Result {
         cleanup?;
         exercise?;
         assert_eq!(sandbox.status().await?.phase, SandboxPhase::Destroyed);
-        let inspected = Command::new("docker")
-            .args(["--host", &host, "inspect", &guard.id])
-            .output()?;
-        assert!(!inspected.status.success());
-        assert!(String::from_utf8_lossy(&inspected.stderr).contains("No such"));
+        confirm_absent(&host, &id)?;
     }
     Ok(())
 }

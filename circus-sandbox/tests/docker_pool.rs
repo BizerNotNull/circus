@@ -205,8 +205,10 @@ async fn baseline_single_use_release_and_drop_are_real() -> Result {
 #[ignore = "requires an explicit real Linux Docker Engine"]
 async fn leased_capacity_times_out_and_cancelled_waiter_does_not_steal_refill() -> Result {
     let _serial = DOCKER_TEST.lock().await;
+    let backend = backend()?;
+    let docker = docker(&backend)?;
     let pool = DockerPool::create(PoolConfig::new(
-        backend()?,
+        backend,
         config()?,
         1,
         None,
@@ -214,6 +216,7 @@ async fn leased_capacity_times_out_and_cancelled_waiter_does_not_steal_refill() 
     )?)
     .await?;
     let lease = pool.acquire(WAIT).await?;
+    let lease_id = id(lease.sandbox()).await?;
     assert!(matches!(
         pool.acquire(Duration::from_millis(100)).await,
         Err(PoolError::AcquireTimeout)
@@ -227,9 +230,12 @@ async fn leased_capacity_times_out_and_cancelled_waiter_does_not_steal_refill() 
     lease.release().await?;
     let next = pool.acquire(WAIT).await?;
     assert_eq!(pool.status().await?.leased, 1);
-    id(next.sandbox()).await?;
+    let next_id = id(next.sandbox()).await?;
     next.release().await?;
+    // Shutdown succeeds only after every owned container is confirmed absent.
     pool.shutdown().await?;
+    absent(&docker, &lease_id).await?;
+    absent(&docker, &next_id).await?;
     Ok(())
 }
 
