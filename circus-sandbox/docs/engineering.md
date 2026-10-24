@@ -66,7 +66,7 @@ facade           -> api, pool, lifecycle, environment, workspace, runtime, error
 
 ## 主机边界
 
-- 隔离证据必须来自 Linux 上可达的 Docker Engine，并且内存、CPU 与 pids 由显式配置限制。Windows 编译成功不是隔离通过。当前 Docker + runc 适配器代码已交付；`Sandbox Docker` 工作流会在 GitHub 托管运行器的真实 Engine 上执行忽略套件，但本检出未记录它的实际运行结果，因此仍不能写成已有真实 Engine 证据。
+- 隔离证据必须来自 Linux 上可达的 Docker Engine 或 containerd，并且内存、CPU 与 pids 由显式配置限制。Windows 编译成功不是隔离通过。当前 Docker 与 containerd + runc 适配器代码已交付；`Sandbox Docker` 与 `Sandbox containerd` 工作流会在 GitHub 托管运行器上执行各自忽略套件，但本检出未记录 CI 的实际运行结果，因此不能把本地 WSL 结果写成 CI 证据。
 - 验证只能操作自己创建的容器和卷，禁止全局 prune 或清理无关资源。
 - Rust 1.99.1 是项目基线，不是本机清单。工具链文件、组件和第三方库约束只维护在 [沙箱指南](../AGENTS.md)。rust-analyzer 不是构建依赖。
 
@@ -92,6 +92,8 @@ Paseo CI 与沙箱门禁互不代替。Action 的完整 SHA 以工作流文件�
 
 `.github/workflows/sandbox-docker.yml`（`Sandbox Docker`）只在 `pull_request` 与 `workflow_dispatch` 触发，无路径过滤；权限仅 `contents: read`，并发取消同一 ref 的旧运行。job `docker (<suite>)` 在 `ubuntu-latest` 上运行 `fail-fast: false` 的八项矩阵：`docker_sandbox`、`docker_snapshot`、`docker_pool`、`docker_hardening`、`docker_staging`、`docker_environment`、`docker_environment_prep`、`docker_process`，超时 60 分钟。每个 job 依次 checkout、安装 Rust 1.99.1（minimal）、`docker pull python:3.12-slim`、打印 Engine 版本与镜像 ID/RepoDigests，然后以 `CIRCUS_DOCKER_SANDBOX=1`、`CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock`、`CIRCUS_DOCKER_IMAGE=python:3.12-slim`、`CIRCUS_DOCKER_ARCH=amd64` 执行 `cargo test --locked --test <suite> -- --ignored`。它只在 GitHub 托管运行器上提供真实 Engine 证据：不要求本地 Docker，也不运行 Paseo；工作流存在、未运行、取消或失败都不是隔离已通过的声明。未加入 `agent-image` job：`circus-sandbox/images/codex/Dockerfile` 构建需要网络（`apt-get`、`npm ci` 和基础镜像拉取），不能离线构建，该镜像验收仍是显式 `CIRCUS_AGENT_IMAGE` 的手动流程。
 
+`.github/workflows/sandbox-containerd.yml`（`Sandbox containerd`）与 Docker 工作流同触发、同样无路径过滤且权限仅 `contents: read`；并发取消同一 ref 的旧运行。job `containerd (<suite>)` 在 `ubuntu-latest` 上运行 `fail-fast: false` 的三项矩阵：`containerd_sandbox`、`containerd_snapshot`、`containerd_process`，超时 60 分钟。每个 job 安装 Rust 1.99.1（minimal）与 `protobuf-compiler`（`containerd-client` 构建期生成 gRPC 绑定所需），在 `/run/containerd/containerd.sock` 上启动 containerd（若未运行），用 `sudo ctr -n default images pull docker.io/library/python:3.12-slim` 拉取镜像并打印版本，然后以 `CIRCUS_CONTAINERD=1`、`CIRCUS_CONTAINERD_SOCKET=/run/containerd/containerd.sock`、`CIRCUS_CONTAINERD_IMAGE=python:3.12-slim`、`CIRCUS_CONTAINERD_NAMESPACE=default` 执行 `sudo --preserve-env=... cargo test --locked --test <suite> -- --ignored`。它只证明该运行器上真实 containerd 的行为，不替代 Docker 套件，也不证明跨 daemon 版本的兼容性。
+
 `CodeQL QA` 超时 30 分钟。语言是 `javascript-typescript`，`build-mode` 为 none，查询集为 `security-extended`，配置文件是 `.github/codeql/sandbox-qa.yml`。权限是 contents、actions 的 read，以及 `security-events: write`。只分析 QA 源码，不分析 actions 或 Rust，也不扫描 Paseo。分析或上传失败则 job 失败；告警是否阻断合并属于 ruleset，不由分析工作流本身保证。
 
 完整历史密钥扫描的本地入口（仓库根目录）：
@@ -104,7 +106,7 @@ bash .github/scripts/sandbox-gitleaks.sh
 
 根 `.gitattributes` 仅对 `.github/scripts/sandbox-*.sh` 固定 LF，避免 Windows 检出的 CRLF 让 WSL/Bash 把 `pipefail` 等参数末尾的回车当作内容；不改变 Paseo 文件的换行策略。行尾约定不代替脚本的实际运行验证。
 
-Rust fmt、clippy、构建、测试、文档、example、cargo-deny、Rust CodeQL 和 `Sandbox Docker` 均已配置。Cargo 命令在 `circus-sandbox/` 执行，完整命令表见 [README](../README.md#命令)。`deny.toml` 已配置显式许可证 allow、漏洞、来源与依赖策略，细节见沙箱指南；dependency review 不替代许可证策略。某次实际运行结果只记在对应提交的 PR。
+Rust fmt、clippy、构建、测试、文档、example、cargo-deny、Rust CodeQL、`Sandbox Docker` 和 `Sandbox containerd` 均已配置。Cargo 命令在 `circus-sandbox/` 执行，完整命令表见 [README](../README.md#命令)。`deny.toml` 已配置显式许可证 allow、漏洞、来源与依赖策略，细节见沙箱指南；dependency review 不替代许可证策略。某次实际运行结果只记在对应提交的 PR。
 
 显式授权源目录的代码副本，在 `circus-sandbox/` 执行 `cargo test --locked --test code_copy` 和 `cargo run --locked --example code_copy`。前者用真实临时源验证内容、预算及拒绝边界，后者读取实际复制字节并显式清理源和目的工作区；都不要求 Git、Docker、沙箱池或运行时，不构成进程隔离证据。Windows 符号链接用例要求开发者模式或 `SeCreateSymbolicLinkPrivilege`，权限不足不得静默跳过。
 
@@ -118,6 +120,6 @@ secret scanning 与 push protection 是 GitHub 平台设置，不是工作流的
 
 `Workspace` 提供临时目录内的受限相对读写、建目录、unlink 和显式可重试幂等清理。`max_file_bytes` 是单文件上限，不是工作区总配额。内部 `RwLock` 保护同一值的并发读写，不是外部进程隔离或 crash-safe 原子替换。当前检出有真实 example、公开 API 集成测试和 crate 私有测试；某次运行的环境、命令与结果只记在对应 PR，不以旧提交的绿灯为新提交背书。
 
-尚未实现 Kubernetes、containerd、OCI 环境准备、Git clone/worktree、RPC、池、预启动和快照，以及工作区总配额；HTTP 传输已由 `src/http` 实现（见 [HTTP API](http-api.md)）。Docker + runc 适配器之外的隔离后端仍是规划。占位目录不是可调用模块。
+尚未实现 Kubernetes、OCI 环境准备、Git clone/worktree、RPC、池、预启动和快照，以及工作区总配额；HTTP 传输已由 `src/http` 实现（见 [HTTP API](http-api.md)）。Docker 与 containerd + runc 适配器之外的隔离后端仍是规划。占位目录不是可调用模块。
 
-当前已有一个明确限定为 Linux Docker + runc 的适配器；必须在 Linux 上按 [Docker + runc 文档](docker-linux-runc.md) 运行真实证据。主机引擎可达或 Windows 编译成功不能提前声明隔离通过。完整目标、依赖及池/快照验收仍见 [交付计划](delivery-plan.md)。
+当前已有明确限定为 Linux Docker + runc 与 containerd + runc 的适配器；必须在 Linux 上按 [Docker + runc 文档](docker-linux-runc.md) / [containerd + runc 文档](containerd-runc.md) 运行真实证据。主机引擎可达或 Windows 编译成功不能提前声明隔离通过。完整目标、依赖及池/快照验收仍见 [交付计划](delivery-plan.md)。

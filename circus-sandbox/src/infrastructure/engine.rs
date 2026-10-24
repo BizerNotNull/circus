@@ -6,10 +6,14 @@ pub(crate) use images::ImageInfo;
 
 #[path = "engine_output.rs"]
 mod output;
+#[cfg(all(unix, feature = "containerd"))]
+pub(crate) use output::OutputCollector;
 pub(crate) use output::{OutputLimit, OutputPhase};
 
 #[path = "engine_manifest.rs"]
 mod manifest;
+#[cfg(all(unix, feature = "containerd"))]
+pub(crate) use manifest::decode as decode_manifest;
 pub(crate) use manifest::{WorkspaceEntry, WorkspaceEntryKind};
 
 #[path = "engine_policy.rs"]
@@ -31,14 +35,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::observability::events;
 
-const GUEST_FILES: &str = include_str!("guest_files.py");
+use super::guest_transport::{
+    ExecIo, GuestFileMode, GuestStdin, TRANSFER_CHUNK_BYTES, helper_argv, helper_failure,
+    helper_limits,
+};
 
-/// One bounded host-to-guest copy buffer. The guest helper reads stdin in the
-/// same 64 KiB units, so neither side needs a whole-file buffer.
-const TRANSFER_CHUNK_BYTES: usize = 64 * 1024;
-
-/// One staging entry presented to a backend.
-///
+/// One bounded host-to-guest copy buffer is shared with the guest helper.
 /// Payloads are never accumulated for the whole tree. A directory carries no
 /// payload, an in-memory value is used for a single API write, and a staged
 /// file is transferred from an already-opened host handle in bounded chunks.
@@ -51,19 +53,6 @@ pub(crate) enum UploadSource {
     Directory,
     Bytes(Vec<u8>),
     File { file: std::fs::File, len: u64 },
-}
-
-/// Stdin framing for one guest exec.
-enum Stdin<'a> {
-    None,
-    Bytes(&'a [u8]),
-    File { file: std::fs::File, len: u64 },
-}
-
-impl Stdin<'_> {
-    fn attached(&self) -> bool {
-        !matches!(self, Self::None)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,22 +131,11 @@ pub(crate) struct ExecDone {
 
 struct FileRequest<'a> {
     relative: &'a str,
-    mode: &'static str,
-    stdin: Stdin<'a>,
+    mode: GuestFileMode,
+    stdin: GuestStdin<'a>,
     max_bytes: usize,
     /// Only `list` carries one; it becomes the helper's entry bound.
     max_entries: Option<usize>,
-}
-
-struct ExecIo<'a> {
-    stdin: Stdin<'a>,
-    /// Per-stream allowance for stdout.
-    stdout_limit: usize,
-    /// Per-stream allowance for stderr.
-    stderr_limit: usize,
-    /// Combined stdout+stderr budget. Always the explicit sum of the two
-    /// allowances, never an accidental doubling.
-    combined_limit: usize,
 }
 
 impl Engine {
@@ -383,8 +361,8 @@ impl Engine {
                 workspace,
                 FileRequest {
                     relative: "",
-                    mode: "list",
-                    stdin: Stdin::None,
+                    mode: GuestFileMode::List,
+                    stdin: GuestStdin::None,
                     max_bytes: usize::try_from(max_bytes).unwrap_or(usize::MAX),
                     max_entries: Some(max_entries),
                 },
@@ -414,8 +392,8 @@ impl Engine {
                     workspace,
                     FileRequest {
                         relative: &path,
-                        mode: "mkdir",
-                        stdin: Stdin::None,
+                        mode: GuestFileMode::Mkdir,
+                        stdin: GuestStdin::None,
                         max_bytes: 0,
                         max_entries: None,
                     },
@@ -435,8 +413,8 @@ impl Engine {
                     workspace,
                     FileRequest {
                         relative: &path,
-                        mode: "write",
-                        stdin: Stdin::Bytes(&bytes),
+                        mode: GuestFileMode::Write,
+                        stdin: GuestStdin::Bytes(&bytes),
                         max_bytes: 0,
                         max_entries: None,
                     },
@@ -456,8 +434,8 @@ impl Engine {
                     workspace,
                     FileRequest {
                         relative: &path,
-                        mode: "write",
-                        stdin: Stdin::File { file, len },
+                        mode: GuestFileMode::Write,
+                        stdin: GuestStdin::File { file, len },
                         max_bytes: 0,
                         max_entries: None,
                     },
@@ -483,8 +461,8 @@ impl Engine {
                 workspace,
                 FileRequest {
                     relative,
-                    mode: "read",
-                    stdin: Stdin::None,
+                    mode: GuestFileMode::Read,
+                    stdin: GuestStdin::None,
                     max_bytes,
                     max_entries: None,
                 },
@@ -512,8 +490,8 @@ impl Engine {
             workspace,
             FileRequest {
                 relative,
-                mode: "unlink",
-                stdin: Stdin::None,
+                mode: GuestFileMode::Unlink,
+                stdin: GuestStdin::None,
                 max_bytes: 0,
                 max_entries: None,
             },
@@ -536,35 +514,16 @@ impl Engine {
             max_bytes,
             max_entries,
         } = request;
-        let bound = match &stdin {
-            Stdin::None => 0,
-            Stdin::Bytes(bytes) => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-            Stdin::File { len, .. } => *len,
+        let bound = if mode == GuestFileMode::Write {
+            stdin.bound()
+        } else {
+            u64::try_from(max_bytes).unwrap_or(u64::MAX)
         };
-        let mut argv = vec![
-            "python3".to_string(),
-            "-I".to_string(),
-            "-B".to_string(),
-            "-c".to_string(),
-            GUEST_FILES.to_string(),
-            mode.to_string(),
-            workspace.to_string(),
-            relative.to_string(),
-            if mode == "write" {
-                bound
-            } else {
-                u64::try_from(max_bytes).unwrap_or(u64::MAX)
-            }
-            .to_string(),
-        ];
-        if let Some(max_entries) = max_entries {
-            argv.push(max_entries.to_string());
-        }
+        let argv = helper_argv(workspace, relative, mode, bound, max_entries);
         // The helper contract is explicit: stdout may carry up to
         // `max_bytes + 1` (the extra byte proves an over-limit file), stderr may
         // carry at most 4 KiB of diagnostics, and both share exactly their sum.
-        let stdout_limit = max_bytes.saturating_add(1);
-        let stderr_limit = 4096;
+        let (stdout_limit, stderr_limit, combined_limit) = helper_limits(max_bytes);
         let result = self
             .exec_input(
                 id,
@@ -575,29 +534,15 @@ impl Engine {
                     stdin,
                     stdout_limit,
                     stderr_limit,
-                    combined_limit: stdout_limit.saturating_add(stderr_limit),
+                    combined_limit,
                 },
             )
             .await?;
-        let kind = match result.exit_code {
-            0 => return Ok(result.stdout),
-            81 => EngineErrorKind::UnsafeFile,
-            82 => EngineErrorKind::Limit,
-            83 => EngineErrorKind::InvalidPath,
-            84 => EngineErrorKind::Protocol,
-            85 => EngineErrorKind::FileIo,
-            86 => EngineErrorKind::NotFound,
-            87 => EngineErrorKind::PermissionDenied,
-            88 => EngineErrorKind::EntryLimit,
-            _ => EngineErrorKind::Other,
-        };
-        Err(file_error(
-            kind,
-            format!(
-                "guest file helper failed (exit {}); Python3 is required",
-                result.exit_code
-            ),
-        ))
+        if result.exit_code == 0 {
+            Ok(result.stdout)
+        } else {
+            Err(helper_failure(result.exit_code))
+        }
     }
 
     pub(crate) async fn exec(
@@ -614,7 +559,7 @@ impl Engine {
             workdir,
             argv,
             ExecIo {
-                stdin: Stdin::None,
+                stdin: GuestStdin::None,
                 stdout_limit: output_limit,
                 stderr_limit: output_limit,
                 combined_limit: output_limit,
@@ -632,9 +577,9 @@ impl Engine {
         io: ExecIo<'_>,
     ) -> Result<ExecDone, EngineError> {
         let stdin_kind = match &io.stdin {
-            Stdin::None => "none",
-            Stdin::Bytes(_) => "bytes",
-            Stdin::File { .. } => "file",
+            GuestStdin::None => "none",
+            GuestStdin::Bytes(_) => "bytes",
+            GuestStdin::File { .. } => "file",
         };
         let began = std::time::Instant::now();
         let result = self.exec_input_inner(id, user, workdir, argv, io).await;
@@ -708,14 +653,14 @@ impl Engine {
         let send = async {
             let result = async {
                 match stdin {
-                    Stdin::None => {}
-                    Stdin::Bytes(bytes) => {
+                    GuestStdin::None => {}
+                    GuestStdin::Bytes(bytes) => {
                         input
                             .write_all(bytes)
                             .await
                             .map_err(|err| EngineError::new(err.to_string()))?;
                     }
-                    Stdin::File { file, len } => {
+                    GuestStdin::File { file, len } => {
                         let mut source = tokio::fs::File::from_std(file);
                         let mut chunk = vec![0u8; TRANSFER_CHUNK_BYTES];
                         let mut remaining = len;
@@ -882,7 +827,7 @@ impl RemovalControl for Engine {
     }
 }
 
-fn engine_error_kind(err: &EngineError) -> &'static str {
+pub(crate) fn engine_error_kind(err: &EngineError) -> &'static str {
     if err.policy.is_some() {
         return "policy_mismatch";
     }
@@ -908,7 +853,7 @@ fn recovered_label(recovered: &Recovered) -> &'static str {
     }
 }
 
-fn backend_transition(operation: &'static str, result: &Result<(), EngineError>) {
+pub(crate) fn backend_transition(operation: &'static str, result: &Result<(), EngineError>) {
     let (outcome, error_kind) = match result {
         Ok(()) => ("ok", "none"),
         Err(err) => ("error", engine_error_kind(err)),
@@ -916,7 +861,7 @@ fn backend_transition(operation: &'static str, result: &Result<(), EngineError>)
     events::backend_transition_completed(operation, outcome, error_kind);
 }
 
-fn file_error(kind: EngineErrorKind, message: impl Into<String>) -> EngineError {
+pub(crate) fn file_error(kind: EngineErrorKind, message: impl Into<String>) -> EngineError {
     EngineError {
         message: message.into(),
         not_found: false,

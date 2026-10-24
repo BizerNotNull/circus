@@ -27,6 +27,7 @@ fn host(backend: &BackendConfig) -> String {
                 endpoint.to_string()
             }
         }
+        BackendConfig::Containerd(_) => panic!("docker fixture received a containerd descriptor"),
     }
 }
 

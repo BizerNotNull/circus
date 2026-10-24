@@ -42,6 +42,7 @@ async fn codex_image_starts_offline_in_a_fresh_bounded_workspace() -> Result {
             endpoint if endpoint.starts_with('/') => format!("unix://{endpoint}"),
             endpoint => endpoint.to_string(),
         },
+        BackendConfig::Containerd(_) => panic!("docker fixture received a containerd descriptor"),
     };
     let config = SandboxConfig::new(
         ResourceLimits::new(512 * 1024 * 1024, 1000, 128, 128 * 1024 * 1024, 1024 * 1024)?,

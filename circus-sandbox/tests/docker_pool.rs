@@ -39,6 +39,7 @@ fn config() -> Result<SandboxConfig> {
 fn docker(backend: &BackendConfig) -> Result<bollard::Docker> {
     let endpoint = match backend {
         BackendConfig::Docker(descriptor) => descriptor.endpoint(),
+        BackendConfig::Containerd(_) => panic!("docker fixture received a containerd descriptor"),
     };
     let path = if endpoint.starts_with('/') {
         format!("unix://{endpoint}")

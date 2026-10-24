@@ -6,25 +6,25 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 
 - **当前开发阶段**：工作聚焦 `circus-sandbox` 的功能开发；现有工程门禁继续适用，不为新增功能重复建设工程基础设施。除非用户明确要求，不主动修改 `circus-paseo`。
 - **Paseo 暂不开发**：说明与开发规则见 [circus-paseo/CLAUDE.md](circus-paseo/CLAUDE.md)。除非任务明确要求，不修改其源码、依赖或配置。
-- **沙箱开发入口**：[circus-sandbox/AGENTS.md](circus-sandbox/AGENTS.md)，当前 API、配置与限制见 [circus-sandbox/README.md](circus-sandbox/README.md)。七个领域及 Docker/Kubernetes/containerd、runc/gVisor/Kata/Firecracker 均保留在[完整交付计划](circus-sandbox/docs/delivery-plan.md)中；当前只有 Docker + runc 后端，不代表全范围完成。门禁与命令见[工程说明](circus-sandbox/docs/engineering.md)，安全扫描约定见[安全说明](.github/sandbox-security.md)。按当前检出描述实现，不以规划或工作流存在代替交付与运行证据。
+- **沙箱开发入口**：[circus-sandbox/AGENTS.md](circus-sandbox/AGENTS.md)，当前 API、配置与限制见 [circus-sandbox/README.md](circus-sandbox/README.md)。七个领域及 Kubernetes、gVisor/Kata/Firecracker 均保留在[完整交付计划](circus-sandbox/docs/delivery-plan.md)中；当前有 Docker 与 containerd + runc 两个后端，不代表全范围完成。门禁与命令见[工程说明](circus-sandbox/docs/engineering.md)，安全扫描约定见[安全说明](.github/sandbox-security.md)。按当前检出描述实现，不以规划或工作流存在代替交付与运行证据。
 
 ## Architecture & Data Flow
 
 - 现有 Paseo：移动端/Web/桌面/CLI → 客户端协议层 → Node.js daemon，负责 Agent 管理及实时输出；这不是已接入 Rust 沙箱的链路。
-- 当前沙箱：文件调用方 → `Workspace` → cap-std `Dir`；Docker 调用方 → `api` → 私有 `lifecycle` → `infrastructure::Engine` → 本地 Linux Docker Engine。交互进程调用方 → `Sandbox::spawn_process` → `lifecycle::process` → 后端 attach 传输（每沙箱一个进程，I/O 任务只报告结果，删除仍由 lifecycle 拥有）。`ResourceLimits` 校验请求值，Docker 后端将显式资源与隔离配置映射到容器；校验本身不构成强制、预留或聚合准入。
+- 当前沙箱：文件调用方 → `Workspace` → cap-std `Dir`；Docker 调用方 → `api` → 私有 `lifecycle` → `infrastructure::Engine` → 本地 Linux Docker Engine；containerd 调用方 → `api` → 私有 `lifecycle` → `infrastructure::Backend` → 本地 containerd。交互进程调用方 → `Sandbox::spawn_process` → `lifecycle::process` → 后端 attach 传输（每沙箱一个进程，I/O 任务只报告结果，删除仍由 lifecycle 拥有）。`ResourceLimits` 校验请求值，Docker/containerd 后端将显式资源与隔离配置映射到容器；校验本身不构成强制、预留或聚合准入。
 - 目标沙箱：统一 API → 生命周期管理 → 基础设施调度 → 运行时隔离；镜像环境、代码工作区提供执行资源，预启动/快照/沙箱池优化启动。
-- 目标约束：对外 API 屏蔽后端差异；领域层与部署、隔离适配器分离。生命周期统一拥有状态与回收逻辑，调用方不得绕过它直接操作后端。已实现：环境准备计划与稳定标识、固定提交 Git clone/worktree、工作区文件快照与预启动池、交互进程会话。Kubernetes、containerd、gVisor、Kata、Firecracker、容器/VM 运行时快照（进程或客户机内存检查点）仍待实现；没有 HTTP/RPC 或 Paseo 链路。
+- 目标约束：对外 API 屏蔽后端差异；领域层与部署、隔离适配器分离。生命周期统一拥有状态与回收逻辑，调用方不得绕过它直接操作后端。已实现：Docker/containerd 后端、环境准备计划与稳定标识、固定提交 Git clone/worktree、工作区文件快照与预启动池、交互进程会话。Kubernetes、gVisor、Kata、Firecracker、容器/VM 运行时快照（进程或客户机内存检查点）仍待实现；没有 HTTP/RPC 或 Paseo 链路。
 
 ## Key Directories
 
-| 路径                    | 用途                                                                                                                                                                                                    |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `circus-sandbox/`       | Rust library crate；workspace、进程内代码快照、资源/配置校验与 Linux Docker + runc API，及对应 examples/tests、许可证策略。                                                                             |
-| `circus-sandbox/src/`   | 公开 `api`、`runtime` 及根门面；私有 workspace、lifecycle、infrastructure 实现。其余领域目录不代表能力已交付。                                                                                          |
-| `circus-sandbox/tests/` | 公开文件、代码快照与配置测试；Docker 集成测试默认忽略，须显式连接真实 Linux Engine。                                                                                                                    |
-| `circus-sandbox/docs/`  | 交付计划与工程事实。架构细节不在根指南复制。                                                                                                                                                            |
-| `circus-paseo/`         | 已有 npm workspace 应用；内部结构与开发流程交由其 `CLAUDE.md` 说明。                                                                                                                                    |
-| `.github/workflows/`    | Paseo CI 仍按路径触发。沙箱包含 `sandbox-metadata.yml`、`sandbox-quality.yml`、`sandbox-security.yml`、`sandbox-rust.yml` 和 `sandbox-architecture.yml`。各自范围见工程说明；它们不证明进程或容器隔离。 |
+| 路径                    | 用途                                                                                                                                                                                                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `circus-sandbox/`       | Rust library crate；workspace、进程内代码快照、资源/配置校验与 Linux Docker / containerd + runc API，及对应 examples/tests、许可证策略。                                                                                                                |
+| `circus-sandbox/src/`   | 公开 `api`、`runtime` 及根门面；私有 workspace、lifecycle、infrastructure 实现。其余领域目录不代表能力已交付。                                                                                                                                          |
+| `circus-sandbox/tests/` | 公开文件、代码快照与配置测试；Docker 与 containerd 集成测试默认忽略，须显式连接真实 Linux daemon。                                                                                                                                                      |
+| `circus-sandbox/docs/`  | 交付计划与工程事实。架构细节不在根指南复制。                                                                                                                                                                                                            |
+| `circus-paseo/`         | 已有 npm workspace 应用；内部结构与开发流程交由其 `CLAUDE.md` 说明。                                                                                                                                                                                    |
+| `.github/workflows/`    | Paseo CI 仍按路径触发。沙箱包含 `sandbox-metadata.yml`、`sandbox-quality.yml`、`sandbox-security.yml`、`sandbox-rust.yml`、`sandbox-docker.yml`、`sandbox-containerd.yml` 和 `sandbox-architecture.yml`。各自范围见工程说明；它们不证明进程或容器隔离。 |
 
 ## Development Commands
 

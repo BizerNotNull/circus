@@ -90,5 +90,6 @@ fn accepts_valid_configuration_and_exposes_typed_values() {
             assert_eq!(docker.image(), "alpine:3.20");
             assert_eq!(docker.runtime(), "runc");
         }
+        BackendConfig::Containerd(_) => panic!("expected a Docker descriptor"),
     }
 }

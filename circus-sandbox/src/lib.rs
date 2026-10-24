@@ -1,12 +1,12 @@
-//! Backend-neutral workspace files, snapshots, image preparation, and one real
-//! Linux container backend.
+//! Backend-neutral workspace files, snapshots, image preparation, and two real
+//! Linux container backends.
 //!
 //! [`Workspace`] confines file access to a directory it creates. [`Sandbox`] is
 //! a separate async API: it stages those files into a bounded tmpfs and runs
 //! commands in a Linux container through an explicitly selected local Docker
-//! Engine endpoint with `runc`. Creation takes a [`BackendConfig`] and a
-//! backend-neutral [`SandboxConfig`]; even though only the Docker backend is
-//! implemented, callers do not name backend SDK types.
+//! Engine endpoint or containerd daemon, both with `runc`. Creation takes a
+//! [`BackendConfig`] and a backend-neutral [`SandboxConfig`]; callers do not
+//! name backend SDK types.
 //!
 //! [`CodeSource`] copies an explicitly authorized source directory into a fresh
 //! owned workspace. [`CodeSnapshot`] captures workspace contents in memory;
@@ -36,8 +36,8 @@
 //! overflow, transport failure, or dropping the session requests owned
 //! container cleanup; a normal exit preserves container and workspace. A
 //! session is not a TTY, process-group signal API, or detached recovery
-//! mechanism. Not implemented: Kubernetes, containerd, gVisor, Kata,
-//! Firecracker, and registry pulls/authentication.
+//! mechanism. Not implemented: Kubernetes, gVisor, Kata, Firecracker, and
+//! registry pulls/authentication.
 //!
 //! The optional `http` feature (enabled by default) adds an authenticated JSON
 //! transport over the same [`Sandbox`] API (`http::HttpServer`). It requires an
@@ -111,10 +111,10 @@ mod workspace;
 #[doc(inline)]
 pub use api::{
     BackendConfig, BackendConfigError, CleanupFailure, CleanupReceipt, CleanupReport, CommandError,
-    CommandOutput, CommandRequest, ConfigError, DockerBackendConfig, EnforcementReport, IoLimits,
-    IsolationConfig, OutputPhase, Ownership, ProcessError, ProcessExit, ProcessOutput,
-    ProcessRequest, ProcessSession, ProcessTermination, Sandbox, SandboxConfig, SandboxError,
-    SandboxOperation, SandboxPhase, SandboxStatus, StagingError,
+    CommandOutput, CommandRequest, ConfigError, ContainerdBackendConfig, DockerBackendConfig,
+    EnforcementReport, IoLimits, IsolationConfig, OutputPhase, Ownership, ProcessError,
+    ProcessExit, ProcessOutput, ProcessRequest, ProcessSession, ProcessTermination, Sandbox,
+    SandboxConfig, SandboxError, SandboxOperation, SandboxPhase, SandboxStatus, StagingError,
 };
 #[doc(inline)]
 pub use workspace::{

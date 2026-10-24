@@ -31,6 +31,9 @@ allow = [
     # matchit 0.8.4 (through axum) is MIT AND BSD-3-Clause; permissive, OSI and
     # FSF approved, and required by the only selected HTTP framework.
     "BSD-3-Clause",
+    # foldhash 0.1.5 (through hashbrown in the containerd gRPC stack) is Zlib;
+    # permissive and both OSI and FSF approved.
+    "Zlib",
 ]
 exceptions = []
 

@@ -25,9 +25,13 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(all(unix, feature = "containerd"))]
+use crate::infrastructure::ContainerdBackend;
 use crate::infrastructure::{
     Backend, CommonSpec, DockerBackend, DockerConfig, DockerConfigError, InstanceId, PrepareError,
 };
+#[cfg(all(unix, feature = "containerd"))]
+use crate::infrastructure::{ContainerdConfig, ContainerdConfigError};
 use crate::observability::{OperationKind, OperationOutcome, SandboxMetrics, events};
 use crate::runtime::{BackendConfig, BackendConfigError, SandboxConfig};
 use crate::workspace::Workspace;
@@ -166,6 +170,7 @@ impl Sandbox {
     ) -> Result<Self, SandboxError> {
         let backend_kind = match &backend {
             BackendConfig::Docker(_) => "docker",
+            BackendConfig::Containerd(_) => "containerd",
         };
         let span = events::create_span(backend_kind);
         {
@@ -199,12 +204,55 @@ impl Sandbox {
         config: SandboxConfig,
         metrics: SandboxMetrics,
     ) -> Result<Self, SandboxError> {
-        let docker = backend_config(&backend)?;
         let spec = common_spec(&config);
-        docker
-            .validate_common(&spec)
-            .map_err(|err| SandboxError::BackendConfig(map_docker_config(err)))?;
-        let backend = DockerBackend::connect(docker)
+        match backend {
+            BackendConfig::Docker(descriptor) => {
+                let docker = DockerConfig::new(
+                    descriptor.endpoint(),
+                    descriptor.image(),
+                    descriptor.runtime(),
+                )
+                .map_err(|err| SandboxError::BackendConfig(map_docker_config(err)))?;
+                docker
+                    .validate_common(&spec)
+                    .map_err(|err| SandboxError::BackendConfig(map_docker_config(err)))?;
+                let backend = DockerBackend::connect(docker)
+                    .await
+                    .map_err(|err| engine_err(*err))?;
+                Self::create_with_backend(backend, spec, config, metrics).await
+            }
+            BackendConfig::Containerd(descriptor) => {
+                #[cfg(all(unix, feature = "containerd"))]
+                {
+                    let containerd = ContainerdConfig::new(
+                        descriptor.socket(),
+                        descriptor.namespace(),
+                        descriptor.image(),
+                        descriptor.runtime(),
+                        descriptor.snapshotter(),
+                    )
+                    .map_err(|err| SandboxError::BackendConfig(map_containerd_config(err)))?;
+                    Self::create_containerd(containerd, spec, config, metrics).await
+                }
+                #[cfg(not(all(unix, feature = "containerd")))]
+                {
+                    let _ = descriptor;
+                    Err(SandboxError::UnsupportedCapability {
+                        capability: "containerd backend feature not compiled",
+                    })
+                }
+            }
+        }
+    }
+
+    #[cfg(all(unix, feature = "containerd"))]
+    async fn create_containerd(
+        containerd: ContainerdConfig,
+        spec: CommonSpec,
+        config: SandboxConfig,
+        metrics: SandboxMetrics,
+    ) -> Result<Self, SandboxError> {
+        let backend = ContainerdBackend::connect(containerd)
             .await
             .map_err(|err| engine_err(*err))?;
         Self::create_with_backend(backend, spec, config, metrics).await
@@ -495,17 +543,6 @@ impl std::fmt::Debug for Sandbox {
     }
 }
 
-fn backend_config(backend: &BackendConfig) -> Result<DockerConfig, SandboxError> {
-    match backend {
-        BackendConfig::Docker(descriptor) => DockerConfig::new(
-            descriptor.endpoint(),
-            descriptor.image(),
-            descriptor.runtime(),
-        )
-        .map_err(|err| SandboxError::BackendConfig(map_docker_config(err))),
-    }
-}
-
 fn map_docker_config(err: DockerConfigError) -> BackendConfigError {
     match err {
         DockerConfigError::UnsupportedEndpoint { value } => {
@@ -517,6 +554,25 @@ fn map_docker_config(err: DockerConfigError) -> BackendConfigError {
         DockerConfigError::ImageRequired => BackendConfigError::ImageRequired,
         DockerConfigError::SupervisorNeedsPid { pids } => {
             BackendConfigError::SupervisorNeedsPid { pids }
+        }
+    }
+}
+
+#[cfg(all(unix, feature = "containerd"))]
+fn map_containerd_config(err: ContainerdConfigError) -> BackendConfigError {
+    match err {
+        ContainerdConfigError::InvalidSocketPath { value } => {
+            BackendConfigError::InvalidSocketPath { value }
+        }
+        ContainerdConfigError::InvalidNamespace { value } => {
+            BackendConfigError::InvalidNamespace { value }
+        }
+        ContainerdConfigError::ImageRequired => BackendConfigError::ImageRequired,
+        ContainerdConfigError::RuntimeUnavailable { name } => {
+            BackendConfigError::RuntimeUnavailable { name }
+        }
+        ContainerdConfigError::UnsupportedSnapshotter { name } => {
+            BackendConfigError::UnsupportedSnapshotter { name }
         }
     }
 }

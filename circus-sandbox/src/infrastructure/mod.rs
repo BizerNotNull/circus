@@ -1,13 +1,33 @@
 //! Docker deployment adapter. Not a public SDK surface.
 
 mod backend;
+#[cfg(all(unix, feature = "containerd"))]
+mod containerd;
+#[cfg(all(unix, feature = "containerd"))]
+mod containerd_config;
+#[cfg(all(unix, feature = "containerd"))]
+mod containerd_engine;
+#[cfg(all(unix, feature = "containerd"))]
+mod containerd_grpc;
+#[cfg(all(unix, feature = "containerd"))]
+mod containerd_image;
+#[cfg(all(unix, feature = "containerd"))]
+mod containerd_io;
+#[cfg(all(unix, feature = "containerd"))]
+mod containerd_spec;
 mod docker;
 mod engine;
 pub(crate) mod git_process;
+mod guest_transport;
 
 #[cfg(test)]
 pub(crate) use backend::Capabilities;
 pub(crate) use backend::{Backend, BackendProcess, CommonSpec, InstanceId, PrepareError};
+#[cfg(unix)]
+#[cfg(all(unix, feature = "containerd"))]
+pub(crate) use containerd::ContainerdBackend;
+#[cfg(all(unix, feature = "containerd"))]
+pub(crate) use containerd_config::{ContainerdConfig, ContainerdConfigError};
 pub(crate) use docker::{DockerBackend, DockerConfig, DockerConfigError, DockerEndpoint};
 pub(crate) use engine::{
     Engine, EngineError, EngineErrorKind, ImageInfo, OutputPhase, ProcessChunk, ProcessSpec,

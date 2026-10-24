@@ -12,8 +12,8 @@ mod config;
 use thiserror::Error;
 
 pub use config::{
-    BackendConfig, BackendConfigError, ConfigError, DockerBackendConfig, IoLimits, IsolationConfig,
-    SandboxConfig,
+    BackendConfig, BackendConfigError, ConfigError, ContainerdBackendConfig, DockerBackendConfig,
+    IoLimits, IsolationConfig, SandboxConfig,
 };
 
 pub(crate) use config::check_relative;

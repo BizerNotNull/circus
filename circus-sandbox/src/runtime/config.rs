@@ -6,9 +6,9 @@ use super::{ResourceLimits, ResourceLimitsError};
 
 /// Backend selection for [`crate::Sandbox::create`].
 ///
-/// Exactly one variant is implemented. The enum name is stable so a future
-/// backend can be added without changing the creation entry point; adding a
-/// variant is the only way to claim another backend.
+/// Two variants are implemented. The enum name is stable so a future backend
+/// can be added without changing the creation entry point; adding a variant is
+/// the only way to claim another backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendConfig {
     /// A local Docker Engine endpoint running a Linux image with `runc`.
@@ -17,6 +17,14 @@ pub enum BackendConfig {
     /// another backend exists, that the image is present, or that the engine is
     /// reachable: [`crate::Sandbox::create`] validates and prepares it.
     Docker(DockerBackendConfig),
+    /// A local containerd socket running a Linux image with `runc` through the
+    /// OCI runtime handler.
+    ///
+    /// See [`ContainerdBackendConfig`]. Selecting this variant does not assert
+    /// that the image is present or unpacked, that the daemon is reachable, or
+    /// that the requested snapshotter is configured: [`crate::Sandbox::create`]
+    /// validates and prepares it. `runsc` (gVisor) is rejected as unavailable.
+    Containerd(ContainerdBackendConfig),
 }
 
 impl BackendConfig {
@@ -34,6 +42,31 @@ impl BackendConfig {
         runtime: impl Into<String>,
     ) -> Self {
         Self::Docker(DockerBackendConfig::new(endpoint, image, runtime))
+    }
+
+    /// Builds an explicit containerd backend descriptor.
+    ///
+    /// `socket` must be an absolute path to a Unix socket. `namespace` scopes
+    /// every containerd request. `image` must already exist in that namespace;
+    /// this crate never pulls. `runtime` must be `runc`, and `snapshotter` must
+    /// be `overlayfs`. The descriptor is validated before any container
+    /// allocation; invalid values are reported by [`crate::Sandbox::create`]
+    /// as [`BackendConfigError`].
+    #[must_use]
+    pub fn containerd(
+        socket: impl Into<String>,
+        namespace: impl Into<String>,
+        image: impl Into<String>,
+        runtime: impl Into<String>,
+        snapshotter: impl Into<String>,
+    ) -> Self {
+        Self::Containerd(ContainerdBackendConfig::new(
+            socket,
+            namespace,
+            image,
+            runtime,
+            snapshotter,
+        ))
     }
 }
 
@@ -83,6 +116,72 @@ impl DockerBackendConfig {
     }
 }
 
+/// containerd backend descriptor: local socket, namespace, image, OCI runtime
+/// handler source, and snapshotter.
+///
+/// Plain strings preserve the descriptor as data; parsing and validation are
+/// backend details performed during creation. No registry credentials,
+/// containerd context, or ambient namespace are part of this value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerdBackendConfig {
+    socket: String,
+    namespace: String,
+    image: String,
+    runtime: String,
+    snapshotter: String,
+}
+
+impl ContainerdBackendConfig {
+    /// Stores the supplied descriptor values without connecting to containerd.
+    #[must_use]
+    pub fn new(
+        socket: impl Into<String>,
+        namespace: impl Into<String>,
+        image: impl Into<String>,
+        runtime: impl Into<String>,
+        snapshotter: impl Into<String>,
+    ) -> Self {
+        Self {
+            socket: socket.into(),
+            namespace: namespace.into(),
+            image: image.into(),
+            runtime: runtime.into(),
+            snapshotter: snapshotter.into(),
+        }
+    }
+
+    /// Absolute Unix socket path, for example `/run/containerd/containerd.sock`.
+    #[must_use]
+    pub fn socket(&self) -> &str {
+        &self.socket
+    }
+
+    /// containerd namespace scoping every request.
+    #[must_use]
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// Local image reference in that namespace. Never pulled.
+    #[must_use]
+    pub fn image(&self) -> &str {
+        &self.image
+    }
+
+    /// Requested OCI runtime name. Only `runc` is implemented; `runsc` is
+    /// unavailable on this host.
+    #[must_use]
+    pub fn runtime(&self) -> &str {
+        &self.runtime
+    }
+
+    /// Requested snapshotter name. Only `overlayfs` is implemented.
+    #[must_use]
+    pub fn snapshotter(&self) -> &str {
+        &self.snapshotter
+    }
+}
+
 /// Isolation requirements that must all be satisfied by every backend.
 ///
 /// There is no insecure constructor. A backend maps these requirements to its
@@ -91,9 +190,12 @@ impl DockerBackendConfig {
 /// The Docker backend interprets them as: a read-only container root
 /// filesystem, `no-new-privileges`, every Linux capability dropped, a private
 /// (disabled) network namespace, and the requested workspace path provided as
-/// a bounded tmpfs instead of a host bind. These interpretations live in the
-/// backend adapter; the values here are requirements only, not evidence that a
-/// running container achieved them. Use
+/// a bounded tmpfs instead of a host bind. The containerd backend interprets
+/// them as the same OCI spec properties: a read-only root filesystem, an empty
+/// capability set with `noNewPrivileges`, a new network namespace with no
+/// interfaces, and a bounded tmpfs at the requested workspace path. These
+/// interpretations live in the backend adapter; the values here are
+/// requirements only, not evidence that a running container achieved them. Use
 /// [`crate::SandboxStatus::enforcement`] for inspected evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IsolationConfig {
@@ -371,6 +473,16 @@ pub enum BackendConfigError {
     UnsupportedEndpoint { value: String },
     #[error("runtime {name} is not supported; only runc is accepted")]
     UnsupportedRuntime { name: String },
+    #[error("runtime {name} is not available on this host; only runc is implemented")]
+    RuntimeUnavailable { name: String },
+    #[error("snapshotter {name} is not supported; only overlayfs is implemented")]
+    UnsupportedSnapshotter { name: String },
+    #[error("containerd socket must be an absolute unix socket path: {value}")]
+    InvalidSocketPath { value: String },
+    #[error(
+        "containerd namespace must be nonempty and use only ASCII alphanumerics, '.', '_' or '-': {value}"
+    )]
+    InvalidNamespace { value: String },
     #[error("image reference is required and is not pulled by this crate")]
     ImageRequired,
     #[error("pids {pids} cannot fit init, supervisor and command; minimum is 3")]
@@ -494,6 +606,28 @@ mod tests {
                 assert_eq!(docker.image(), "alpine:3.20");
                 assert_eq!(docker.runtime(), "runc");
             }
+            BackendConfig::Containerd(_) => panic!("expected a Docker descriptor"),
+        }
+    }
+
+    #[test]
+    fn containerd_descriptor_is_plain_data() {
+        let backend = BackendConfig::containerd(
+            "/run/containerd/containerd.sock",
+            "circus",
+            "python:3.12-slim",
+            "runc",
+            "overlayfs",
+        );
+        match backend {
+            BackendConfig::Containerd(containerd) => {
+                assert_eq!(containerd.socket(), "/run/containerd/containerd.sock");
+                assert_eq!(containerd.namespace(), "circus");
+                assert_eq!(containerd.image(), "python:3.12-slim");
+                assert_eq!(containerd.runtime(), "runc");
+                assert_eq!(containerd.snapshotter(), "overlayfs");
+            }
+            BackendConfig::Docker(_) => panic!("expected a containerd descriptor"),
         }
     }
 }

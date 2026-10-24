@@ -31,6 +31,9 @@ impl Fixture {
                 endpoint if endpoint.starts_with('/') => format!("unix://{endpoint}"),
                 endpoint => endpoint.to_string(),
             },
+            BackendConfig::Containerd(_) => {
+                panic!("docker fixture received a containerd descriptor")
+            }
         };
         let config = SandboxConfig::new(
             ResourceLimits::new(64 * 1024 * 1024, 1000, 32, 8 * 1024 * 1024, 1024 * 1024)?,
