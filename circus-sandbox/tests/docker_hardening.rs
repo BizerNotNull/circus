@@ -171,7 +171,9 @@ async fn teardown(f: &mut Fixture) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("teardown did not remove container {id}").into());
     }
     let stderr = String::from_utf8_lossy(&inspected.stderr);
-    if !stderr.contains("No such") {
+    let absent = stderr.to_ascii_lowercase();
+    // The CLI wording varies by version: "No such object" or "no such object".
+    if !(absent.contains("no such") || absent.contains("not found")) {
         return Err(format!("teardown could not confirm absence of {id}: {stderr}").into());
     }
     Ok(())

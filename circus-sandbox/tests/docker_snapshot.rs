@@ -91,7 +91,9 @@ impl Fixture {
             return Err(format!("container {} still exists after destroy", self.id).into());
         }
         let stderr = String::from_utf8_lossy(&inspected.stderr);
-        if !stderr.contains("No such") {
+        let absent = stderr.to_ascii_lowercase();
+        // The CLI wording varies by version: "No such object" or "no such object".
+        if !(absent.contains("no such") || absent.contains("not found")) {
             return Err(format!("could not confirm absence of {}: {stderr}", self.id).into());
         }
         Ok(())

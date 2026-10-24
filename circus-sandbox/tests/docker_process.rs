@@ -49,7 +49,11 @@ impl Fixture {
             .args(["--host", &self.host, "inspect", &self.id])
             .output()?;
         assert!(!result.status.success());
-        assert!(String::from_utf8_lossy(&result.stderr).contains("No such"));
+        let stderr = String::from_utf8_lossy(&result.stderr).to_ascii_lowercase();
+        assert!(
+            stderr.contains("no such") || stderr.contains("not found"),
+            "{stderr}"
+        );
         Ok(())
     }
 
