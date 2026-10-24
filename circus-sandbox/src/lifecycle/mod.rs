@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "containerd"))]
 use crate::infrastructure::ContainerdBackend;
 use crate::infrastructure::{
     Backend, CommonSpec, ContainerdConfig, ContainerdConfigError, DockerBackend, DockerConfig,
@@ -234,7 +234,7 @@ impl Sandbox {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "containerd"))]
     async fn create_containerd(
         containerd: ContainerdConfig,
         spec: CommonSpec,
@@ -247,15 +247,15 @@ impl Sandbox {
         Self::create_with_backend(backend, spec, config, metrics).await
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(all(unix, feature = "containerd")))]
     async fn create_containerd(
         _containerd: ContainerdConfig,
         _spec: CommonSpec,
         _config: SandboxConfig,
         _metrics: SandboxMetrics,
     ) -> Result<Self, SandboxError> {
-        Err(SandboxError::Backend {
-            message: "the containerd backend requires a unix host".to_string(),
+        Err(SandboxError::UnsupportedCapability {
+            capability: "containerd backend feature not compiled",
         })
     }
 

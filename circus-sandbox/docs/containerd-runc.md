@@ -19,6 +19,16 @@
 
 本机 image 已解包为四个 committed snapshot，最终 chain id 为 `sha256:241d372eec8f05a802bb5ca99fba52dd93480b904cb0ca4f591e4f2e27ffd6da`。chain-id 算法在 `containerd_image.rs` 单元测试中与这些真实 snapshot key 对照。
 
+## 构建特性
+
+containerd 后端是可选 Cargo feature：`--features containerd`。它引入 `containerd-client`，该依赖在构建期调用 `protoc` 生成 gRPC 绑定，因此构建机必须安装 protobuf compiler（实测 3.21.12）。未启用 feature 时 `BackendConfig::Containerd` 仍可构造，但 `Sandbox::create` 返回 `SandboxError::UnsupportedCapability`，不会静默降级到 Docker。
+
+```bash
+cargo build --locked --features containerd
+CIRCUS_CONTAINERD=1 cargo test --locked --features containerd \
+  --test containerd_sandbox --test containerd_snapshot --test containerd_process -- --ignored --test-threads=1
+```
+
 ## 配置
 
 ```rust

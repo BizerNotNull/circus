@@ -82,7 +82,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -S /run/containerd/containerd.sock ]; then
-            sudo containerd >"$RUNNER_TEMP/containerd.log" 2>&1 &
+            sudo sh -c "containerd > '$RUNNER_TEMP/containerd.log' 2>&1 &"
           fi
           for _ in $(seq 1 100); do
             if [ -S /run/containerd/containerd.sock ]; then break; fi

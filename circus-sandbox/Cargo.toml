@@ -8,6 +8,8 @@ description = "Backend-neutral sandbox API with local Linux Docker + runc and co
 
 [features]
 default = ["http"]
+# Builds the containerd gRPC backend. Requires a `protoc` binary at build time.
+containerd = ["dep:containerd-client"]
 http = [
     "dep:axum",
     "dep:base64",
@@ -19,7 +21,7 @@ http = [
 axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "json", "tokio"] }
 base64 = { version = "0.22", optional = true }
 bollard = { version = "0.21.1", default-features = false, features = ["pipe"] }
-containerd-client = { version = "0.9", default-features = false, features = ["connect"] }
+containerd-client = { version = "0.9", default-features = false, features = ["connect"], optional = true }
 prost-types = { version = "0.14", default-features = false, features = ["std"] }
 cap-std = { version = "=4.0.3", default-features = false }
 cap-fs-ext = { version = "=4.0.3", default-features = false }
