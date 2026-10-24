@@ -42,7 +42,7 @@ docker --host "$CIRCUS_DOCKER_ENDPOINT" image inspect \
 
 DockerSandbox 会覆盖镜像 ENTRYPOINT 以启动自己的 supervisor；运行时 tmpfs 也会遮住构建时的 `/workspace`。因此调用方必须显式使用 `circus-agent`，不能依赖镜像入口初始化目录。默认工作区路径为 `/workspace`；本镜像暂不适配自定义 workspace 根。
 
-下面的持续 stdio 接入示例依赖 [PR #23 的交互进程 API](https://github.com/BizerNotNull/circus/pull/23)，尚未合入 `main`；本镜像的构建和下方离线验收只使用已有的 `exec` 接口，可以独立运行。接入交互进程 API 后，在 `sandbox.start()` 后先调用 `sandbox.create_dir_all("project")`，再传入以下 `ProcessRequest` 字段启动 Codex stdio 服务：
+下面的持续 stdio 接入示例使用 [PR #23 引入的交互进程 API](https://github.com/BizerNotNull/circus/pull/23)；下方离线验收通过 `exec` 运行镜像内的校验程序。在 `sandbox.start()` 后先调用 `sandbox.create_dir_all("project")`，再传入以下 `ProcessRequest` 字段启动 Codex stdio 服务：
 
 ```rust
 ProcessRequest {
