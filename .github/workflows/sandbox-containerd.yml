@@ -39,6 +39,7 @@ jobs:
           - containerd_sandbox
           - containerd_snapshot
           - containerd_process
+          - containerd_pool
     defaults:
       run:
         working-directory: circus-sandbox

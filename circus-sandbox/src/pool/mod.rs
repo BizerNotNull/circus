@@ -1,9 +1,9 @@
-//! Bounded, prestarted, single-use Docker sandboxes.
+//! Bounded, prestarted, single-use sandboxes for Docker and containerd.
 //!
 //! Every lease gets a fresh container. Returned containers are destroyed, never
 //! reset or offered to another caller. A baseline is explicitly shared workspace
 //! payload, not a process/memory checkpoint or a credential scanner. Container
-//! resource limits do not reserve aggregate host capacity. Docker/runc startup
+//! resource limits do not reserve aggregate host capacity. Backend startup
 //! still happens during warming and refill; this API makes no cold-start claim.
 
 mod lease;
@@ -70,7 +70,7 @@ impl PoolConfig {
     /// The handle is cloned into the pool worker. Every prestarted or refilled
     /// sandbox reports its create and lifecycle activity to the same handle, so
     /// pool activity is visible in one snapshot. Pool slot transitions are
-    /// recorded as cumulative counts; use [`DockerPool::status`] for current
+    /// recorded as cumulative counts; use [`SandboxPool::status`] for current
     /// gauges. This builder does not allocate a tracing subscriber.
     pub fn with_metrics(mut self, metrics: SandboxMetrics) -> Self {
         self.metrics = metrics;
@@ -131,7 +131,7 @@ pub enum PoolError {
     },
     #[error("construction failed and cleanup remains owned: {source}")]
     CleanupRequired {
-        pool: Box<DockerPool>,
+        pool: Box<SandboxPool>,
         #[source]
         source: Arc<PoolFailure>,
     },
@@ -151,21 +151,24 @@ impl Drop for Client {
 
 /// Cloneable client for a single bounded pool; leases are not cloneable.
 ///
-/// Last-client drop requests shutdown but cannot prove cleanup succeeded. Lease
-/// handles do not keep that drop guard alive. The worker retains all containers
-/// and retries failed removal independently of request futures.
+/// The pool is backend-neutral: it creates each container through the
+/// [`crate::Sandbox`] abstraction, so the same type serves Docker and
+/// containerd descriptors. Last-client drop requests shutdown but cannot prove
+/// cleanup succeeded. Lease handles do not keep that drop guard alive. The
+/// worker retains all containers and retries failed removal independently of
+/// request futures.
 #[derive(Clone)]
-pub struct DockerPool {
+pub struct SandboxPool {
     client: Arc<Client>,
 }
 
-impl fmt::Debug for DockerPool {
+impl fmt::Debug for SandboxPool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DockerPool").finish_non_exhaustive()
+        f.debug_struct("SandboxPool").finish_non_exhaustive()
     }
 }
 
-impl DockerPool {
+impl SandboxPool {
     /// Warms the entire capacity, restoring payload snapshots before starting
     /// and checking the actual Running status of every container. Cancellation
     /// requests shutdown without dropping in-flight creates.
