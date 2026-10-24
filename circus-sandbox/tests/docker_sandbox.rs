@@ -117,6 +117,7 @@ async fn docker_linux_runc_lifecycle() -> Result<(), Box<dyn std::error::Error>>
             .is_some_and(|caps| caps.iter().any(|c| c == "ALL"))
     );
     let security = f.sandbox().exec(py(&["-c", r###"from pathlib import Path; s=Path('/proc/self/status').read_text(); print(next(x for x in s.splitlines() if x.startswith('NoNewPrivs:'))); print(next(x for x in s.splitlines() if x.startswith('CapEff:')))"###])).await?;
+    assert_eq!(security.exit_code, 0);
     let security_text = String::from_utf8(security.stdout)?;
     assert!(
         security_text
@@ -128,6 +129,39 @@ async fn docker_linux_runc_lifecycle() -> Result<(), Box<dyn std::error::Error>>
             .lines()
             .any(|line| line.contains("CapEff:") && line.ends_with("0000000000000000"))
     );
+    let guest = f
+        .sandbox()
+        .exec(py(&[
+            "-c",
+            r###"
+import errno, os
+from pathlib import Path
+assert (os.getuid(), os.getgid()) == (65534, 65534)
+assert set(os.listdir('/sys/class/net')) == {'lo'}
+mounts = [line.split() for line in Path('/proc/self/mountinfo').read_text().splitlines()]
+root = next(m for m in mounts if m[4] == '/')
+assert 'ro' in root[5].split(',')
+workspace = next(m for m in mounts if m[4] == '/workspace')
+assert workspace[workspace.index('-') + 1] == 'tmpfs'
+assert {'rw', 'nosuid', 'nodev'} <= set(workspace[5].split(','))
+assert os.statvfs('/workspace').f_frsize * os.statvfs('/workspace').f_blocks == 8388608
+try:
+    Path('/isolation-write-probe').write_bytes(b'no')
+except OSError as error:
+    assert error.errno in (errno.EROFS, errno.EACCES)
+else:
+    raise AssertionError('root filesystem accepted a write')
+print('guest isolation verified')
+"###,
+        ]))
+        .await?;
+    assert_eq!(
+        guest.exit_code,
+        0,
+        "{}",
+        String::from_utf8_lossy(&guest.stderr)
+    );
+    assert_eq!(guest.stdout, b"guest isolation verified\n");
     let limits = f.sandbox().exec(py(&["-c", r###"from pathlib import Path; root=Path('/sys/fs/cgroup'); print((root/'memory.max').read_text().strip()); print((root/'pids.max').read_text().strip()); print((root/'cpu.max').read_text().strip())"###])).await?;
     let limit_text = String::from_utf8(limits.stdout)?;
     assert_eq!(limit_text.lines().next(), Some("67108864"));
