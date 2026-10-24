@@ -51,6 +51,10 @@
 | HTTP 认证与契约                              | HTTP 管理面默认拒绝匿名。请求和响应按该 PR 的 OpenAPI schema 校验                                                                                                                                                                                                                                                                                                                        | HTTP 传输之后                                        |
 | 文档与发布                                   | 支持边界可在文档中找到。发布说明只包含已合并且有证据的能力                                                                                                                                                                                                                                                                                                                               | 文档边界复核，然后发布就绪                           |
 
+## 当前配置模型切片
+
+本分支新增 lifecycle 配置模型（`DockerEndpoint`、`RuntimeName`、`IsolationConfig`、`IoLimits`、`SandboxConfig` 与 `ConfigError`）及公开验证测试和 `sandbox_config` 示例。它只验证显式请求：不连接 Docker、不拉取镜像、不启动容器、不执行隔离或资源强制；backend still not implemented in this branch。三进程下限是未来 supervisor profile 的支持要求，不是后端中立 `ResourceLimits` 的规则。后续真实后端必须消费这些模型并提供真实运行证据。
+
 ## 小 PR 顺序
 
 质量基线与安全基线已经独立合并，当前检出已有首个工作区 crate。其交付状态以 PR #5 为准，不在计划中预填合并或 CI 结果。后续实现依赖已合并到 `main` 的契约，而不是另一台机器上的未合并副本。

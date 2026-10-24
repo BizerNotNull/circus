@@ -47,7 +47,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod lifecycle;
 pub mod runtime;
+
+#[doc(inline)]
+pub use lifecycle::{
+    ConfigError, DockerEndpoint, IoLimits, IsolationConfig, RuntimeName, SandboxConfig,
+};
 mod workspace;
 
 #[doc(inline)]
