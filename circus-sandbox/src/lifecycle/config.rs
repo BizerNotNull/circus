@@ -203,7 +203,12 @@ impl SandboxConfig {
     /// Validates a complete configuration.
     ///
     /// Each create call generates its own ownership nonce before requesting a container.
-    /// `pids` must fit the init, supervisor, and a command (at least 3).
+    /// `pids` must be at least 3, the structural init/supervisor/command floor.
+    /// The requested limit is enforced unchanged and also covers runtime/helper
+    /// tasks charged to the container's PID cgroup, including temporary OCI exec
+    /// startup tasks. Passing validation does not guarantee arbitrary commands or
+    /// guest file operations can launch under every Docker/runc version; low
+    /// limits can still cause exec failures and lifecycle safety cleanup applies.
     /// The image is not pulled and must provide Python 3 for guest file operations.
     ///
     /// # Errors
