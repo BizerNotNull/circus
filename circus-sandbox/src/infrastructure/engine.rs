@@ -1,5 +1,8 @@
 //! Docker Engine calls. Bollard types stay in this module.
 
+mod process;
+pub(crate) use process::{EngineProcess, ProcessChunk, ProcessSpec};
+
 use std::collections::HashMap;
 
 use futures_util::StreamExt;

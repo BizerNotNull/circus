@@ -1,6 +1,11 @@
 //! Lifecycle owner for one Linux Docker sandbox.
 
 mod config;
+mod process;
+
+pub use process::{
+    ProcessError, ProcessExit, ProcessOutput, ProcessRequest, ProcessSession, ProcessTermination,
+};
 
 pub use config::{
     ConfigError, DockerEndpoint, IoLimits, IsolationConfig, OWNER_LABEL_KEY, RuntimeName,
@@ -83,6 +88,10 @@ pub struct CommandOutput {
 /// Matchable failure. Backend SDK types are not part of this enum.
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
+    #[error("invalid process request: {reason}")]
+    InvalidProcessRequest { reason: &'static str },
+    #[error("an interactive process is already active in this sandbox")]
+    ProcessActive,
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
@@ -164,6 +173,10 @@ enum Op {
         request: CommandRequest,
         reply: oneshot::Sender<Result<CommandOutput, SandboxError>>,
     },
+    Spawn {
+        request: ProcessRequest,
+        reply: oneshot::Sender<Result<ProcessSession, SandboxError>>,
+    },
     Status(oneshot::Sender<Result<SandboxStatus, SandboxError>>),
 }
 
@@ -233,6 +246,7 @@ impl DockerSandbox {
             phase: SandboxPhase::Created,
             shutdown: shutdown.clone(),
             create_unsettled: true,
+            process: None,
         };
         tokio::spawn(worker(state, rx, ready_tx));
         let mut guard = CommandGuard {
@@ -325,6 +339,18 @@ impl DockerSandbox {
         self.call(Op::Status).await?
     }
 
+    /// Starts one interactive process without occupying the lifecycle queue.
+    /// Files, status, pause/resume and destroy remain usable. Another interactive
+    /// process or one-shot exec is rejected until this process has finished.
+    /// Dropping the spawn future after acceptance may destroy the whole sandbox.
+    pub async fn spawn_process(
+        &self,
+        request: ProcessRequest,
+    ) -> Result<ProcessSession, SandboxError> {
+        request.validate()?;
+        self.call(|reply| Op::Spawn { request, reply }).await?
+    }
+
     async fn call<T>(&self, op: impl FnOnce(oneshot::Sender<T>) -> Op) -> Result<T, SandboxError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let cancel = CancellationToken::new();
@@ -366,6 +392,7 @@ struct State {
     phase: SandboxPhase,
     shutdown: CancellationToken,
     create_unsettled: bool,
+    process: Option<process::ActiveProcess>,
 }
 
 async fn worker(
@@ -416,6 +443,10 @@ async fn worker(
         let message = tokio::select! {
             biased;
             () = state.shutdown.cancelled() => None,
+            result = process::completed(&mut state.process) => {
+                process::finish(&mut state, result).await;
+                continue;
+            },
             message = rx.recv() => message,
         };
         let Some(message) = message else {
@@ -512,6 +543,10 @@ async fn dispatch(state: &mut State, message: Message) {
             let result = run!(exec(state, request), timeout);
             let _ = reply.send(result);
         }
+        Op::Spawn { request, reply } => {
+            let result = run!(process::spawn(state, request), file_timeout);
+            let _ = reply.send(result);
+        }
         Op::Status(reply) => {
             let result = run!(status(state), file_timeout);
             let _ = reply.send(result);
@@ -576,6 +611,14 @@ async fn cleanup_engine_error<T>(state: &mut State, err: EngineError) -> Result<
 }
 
 async fn destroy_state(state: &mut State) -> Result<(), SandboxError> {
+    process::stop(state).await;
+    let id = state.id.clone().or_else(|| Some(state.name.clone()));
+    let result = destroy_resources(state).await;
+    process::destroyed(state.process.take(), id, &result);
+    result
+}
+
+async fn destroy_resources(state: &mut State) -> Result<(), SandboxError> {
     if state.phase == SandboxPhase::Destroyed {
         return Ok(());
     }
@@ -744,6 +787,9 @@ async fn unlink(state: &mut State, path: &str) -> Result<(), SandboxError> {
 
 async fn exec(state: &mut State, request: CommandRequest) -> Result<CommandOutput, SandboxError> {
     need(state, SandboxPhase::Running, "exec")?;
+    if state.process.is_some() {
+        return Err(SandboxError::ProcessActive);
+    }
     if request.output_limit_bytes > state.config.output_limit_bytes() {
         return Err(SandboxError::OutputLimit {
             limit: state.config.output_limit_bytes(),

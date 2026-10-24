@@ -55,7 +55,8 @@ mod workspace;
 #[doc(inline)]
 pub use api::{
     CleanupReport, CommandOutput, CommandRequest, ConfigError, DockerEndpoint, DockerSandbox,
-    IoLimits, IsolationConfig, OWNER_LABEL_KEY, Ownership, RuntimeName, SandboxConfig,
+    IoLimits, IsolationConfig, OWNER_LABEL_KEY, Ownership, ProcessError, ProcessExit,
+    ProcessOutput, ProcessRequest, ProcessSession, ProcessTermination, RuntimeName, SandboxConfig,
     SandboxError, SandboxPhase, SandboxStatus,
 };
 #[doc(inline)]
