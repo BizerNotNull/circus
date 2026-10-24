@@ -82,7 +82,7 @@ impl fmt::Display for TenantDomain {
 /// Equality and ordering compare the digest bytes. Two values are equal exactly
 /// when every included input was equivalent. The value carries no cache entry
 /// or storage handle.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EnvironmentId {
     digest: [u8; 32],
 }
@@ -191,12 +191,6 @@ impl fmt::Display for EnvironmentId {
             write!(formatter, "{byte:02x}")?;
         }
         Ok(())
-    }
-}
-
-impl fmt::Debug for EnvironmentId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "EnvironmentId({self})")
     }
 }
 
