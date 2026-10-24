@@ -624,7 +624,7 @@ mod snapshot_tests;
 #[doc(inline)]
 pub use code_source::{CodeCopyError, CodeSource};
 #[doc(inline)]
-pub use git::{GitCheckout, GitCleanup, GitError, GitOptions, GitRevision, GitSource};
+pub use git::{GitCheckout, GitCleanup, GitError, GitOptions, GitRevision, GitSource, GitWorktree};
 #[doc(inline)]
 pub use snapshot::{CodeSnapshot, SnapshotBudget, SnapshotError};
 #[cfg(test)]

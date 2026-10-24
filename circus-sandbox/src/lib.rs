@@ -12,8 +12,9 @@
 //!
 //! The bounded Docker pool prestarts fresh single-use containers and never
 //! resets dirty leases. [`GitCheckout`] prepares a fixed commit with a controlled
-//! host Git process. Not implemented: Kubernetes, gVisor, Kata, Firecracker,
-//! OCI environment resolution/pull, and HTTP.
+//! host Git process, and [`GitCheckout::create_worktree`] adds independent
+//! detached [`GitWorktree`] values at that commit. Not implemented: Kubernetes,
+//! gVisor, Kata, Firecracker, OCI environment resolution/pull, and HTTP.
 //!
 //! # Blocking
 //!
@@ -67,7 +68,7 @@ pub use api::{
 #[doc(inline)]
 pub use workspace::{
     CodeCopyError, CodeSnapshot, CodeSource, GitCheckout, GitCleanup, GitError, GitOptions, GitRevision,
-    GitSource, PathRejectReason, SnapshotBudget, SnapshotError, Workspace, WorkspaceError,
+    GitSource, GitWorktree, PathRejectReason, SnapshotBudget, SnapshotError, Workspace, WorkspaceError,
 };
 
 #[doc(inline)]

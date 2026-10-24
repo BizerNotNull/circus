@@ -4,7 +4,7 @@ Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace �
 
 容器后端不是通用进程沙箱：它只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。Kubernetes、containerd、gVisor、Kata、Firecracker、OCI 环境准备、HTTP/RPC 仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker + runc slice 当作全部七领域交付。
 
-workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Docker 后端不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；Docker 设置的实际效果需要真实 Linux Engine 验证，独立 workspace 仍没有总字节或宿主磁盘配额执行机制。`CodeSource::open` 仅供可信库调用方显式授予源目录读取能力，再复制到新建的 `Workspace`，不是挂载或直接接管源目录。`GitCheckout` 用受控宿主 Git 进程准备固定提交，属于可信准备流程，不是对抗性进程沙箱。
+workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Docker 后端不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；Docker 设置的实际效果需要真实 Linux Engine 验证，独立 workspace 仍没有总字节或宿主磁盘配额执行机制。`CodeSource::open` 仅供可信库调用方显式授予源目录读取能力，再复制到新建的 `Workspace`，不是挂载或直接接管源目录。`GitCheckout` 用受控宿主 Git 进程准备固定提交并可创建独立 worktree，属于可信准备流程，不是对抗性进程沙箱。
 
 工具链基线是 Rust **1.99.1**、edition **2024**。直接依赖还包括 bollard **0.21.1**、tokio **1.x**、tokio-util **0.7.x**、uuid **1.x**、futures-util **0.3.x** 和 thiserror **2.0.21**；`Cargo.lock` 固定解析版本，检查和运行都加 `--locked`。workspace 仍使用 cap-std **4.0.3**、cap-fs-ext **4.0.3**、tempfile **3.27.0**。
 
@@ -83,6 +83,8 @@ cargo run --locked --example workspace
 ```bash
 cargo run --locked --example code_copy
 cargo test --locked --test code_copy
+cargo run --locked --example git_worktree
+cargo test --locked --test git_worktree
 ```
 
 ## Fixed-revision Git workspaces
@@ -90,6 +92,12 @@ cargo test --locked --test code_copy
 `GitSource::local` and `GitSource::https` accept only explicitly authorized absolute local paths or HTTPS URLs without credentials, queries, fragments, or alternate protocols. `GitRevision` accepts only a complete 40- or 64-character commit ID. `GitCheckout::clone` prepares that commit with the configured absolute Git binary in a private temporary repository, disables ambient configuration and credentials, disables recursive submodules and tags, and verifies the checked-out object ID.
 
 `GitCheckout::copy_to_workspace` returns a code-only `Workspace`: the checkout's private `.git` metadata is retained by `GitCheckout` and is never copied. The copy is independent and bounded by the per-file and one-shot snapshot budgets. The source path, repository root, private home, hooks, and configuration are not exposed publicly.
+
+`GitCheckout::create_worktree` adds a detached worktree of that prepared repository at the same verified commit with `git worktree add --detach`, in a separate newly created private directory under the configured storage root, with its administrative entry recorded in the checkout's private repository. The checkout retains ownership of the shared repository and its primary directory; each returned `GitWorktree` owns only its own private directory and administrative entry. Two worktrees are independent, and removing one through `GitWorktree::cleanup` never removes the source repository, the primary checkout directory, or a sibling worktree. Concurrent worktrees are supported. Cleaning the checkout removes its private repository and therefore the administrative metadata of any live worktree, but it does not remove those worktrees' own directories; such a worktree can still be copied from and must still be cleaned explicitly (or by dropping its handle).
+
+`GitWorktree::copy_to_workspace` uses the same filtered, code-only copy as the checkout: the worktree's root `.git` file and its private administrative metadata are excluded, so copies contain no Git state. Symlinks, non-regular nodes, path violations, and the per-file or snapshot budget fail the copy exactly as for the checkout, and each call produces an independent `Workspace`. Worktree creation uses the checkout's configured timeout as its whole-operation deadline; every worktree copy starts its own whole-operation deadline of the same length, covering queueing and the blocking copy. Dropping a worktree handle cancels its owner, and dropping a copy future cancels that copy; either path drains started blocking work, explicitly removes the created destination, and retains cleanup responsibility if removal cannot be confirmed.
+
+`GitWorktree::cleanup` is explicit and idempotent and uses `git worktree remove --force` for that worktree, then `git worktree prune --expire now`, then removes its private directory. A dirty worktree is therefore removed with `--force`: modified and untracked files in that worktree are discarded, not preserved, and no other worktree is affected. A removal that cannot be confirmed returns `GitError::CleanupRequired` with an opaque `GitCleanup` receipt, and the retained owner keeps retrying; the same handle may call `cleanup` again while that retry is pending. Repeated calls after success return `Ok(())`, while copies after successful cleanup return `GitError::Closed`; creation after checkout cleanup also returns `GitError::Closed`. If the checkout's private repository has already been removed, worktree cleanup still removes its own private directory because no administrative entry remains. Each removal Git command has the checkout's configured per-process timeout.
 
 Git preparation is trusted host-side work, not an OS process or filesystem isolation boundary. A local grant trusts the filesystem repository; an HTTPS grant is not an SSRF policy. The storage parent has no library-enforced disk quota and must be bounded by the deployer. A detached worker owns allocation, processes, blocking copies, and explicit removal. Dropping a clone/copy future cancels work but does not drop that owner; started blocking work drains before its destination is explicitly removed. Each clone or copy has one whole-operation deadline. Clone output has one combined stdout/stderr budget across all commands. Only the selected source protocol is enabled. Private home, config, temporary files, and empty hooks live beside, not inside, the repository.
 
@@ -158,6 +166,8 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
 | 资源请求示例      | `cargo run --locked --example resource_policy`                                                  |
 | 代码副本测试      | `cargo test --locked --test code_copy`                                                          |
 | 代码副本示例      | `cargo run --locked --example code_copy`                                                        |
+| Git worktree 测试 | `cargo test --locked --test git_worktree`                                                       |
+| Git worktree 示例 | `cargo run --locked --example git_worktree`                                                     |
 | 依赖策略          | 先 `cargo install --locked --version 0.20.2 cargo-deny`，再在本目录 `cargo deny --locked check` |
 
 `cargo test --locked` 覆盖库测试和 `tests/`。要连示例一起编译，使用 `cargo test --locked --all-targets`。不要手改 `Cargo.lock` 来绕过解析失败。
@@ -224,7 +234,8 @@ npm --prefix circus-sandbox/qa run architecture
 - 新增只读 `CodeSource`，将调用方显式授权的源目录逐文件复制到新建的能力工作区；原有内存 `CodeSnapshot` 不变。
 - 使用单文件限制与单次内容/条目预算，拒绝链接、特殊节点和不可移植名称；清理失败保留部分工作区所有权以供重试。
 - 新增受控宿主 Git 进程、固定 40/64 位提交校验、代码-only 工作区复制和 `GitCleanup` 清理回执；恢复环境隔离边界与清理责任不适用项。
-- 新增真实临时目录公开 API 测试和 `code_copy`、`git_clone` 示例；不声明 Git 进程隔离、池、运行时隔离、一致快照或未来写入总配额。
+- 新增 `GitCheckout::create_worktree` 与独立 `GitWorktree`：固定提交的 detached worktree、代码-only 复制、并发 worktree 与幂等清理；`--force` 删除脏 worktree 会丢弃其未提交修改，不删除源仓库、主检出或其他 worktree，也不声明进程/磁盘隔离。
+- 新增真实临时目录公开 API 测试和 `code_copy`、`git_clone`、`git_worktree` 示例；不声明 Git 进程隔离、池、运行时隔离、一致快照或未来写入总配额。
 
 ### 未发布：预启动 Docker 租约池
 

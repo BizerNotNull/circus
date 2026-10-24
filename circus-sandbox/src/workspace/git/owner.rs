@@ -6,6 +6,7 @@ use tokio::time::Instant;
 
 pub(super) enum Request {
     Copy { max_file_bytes: usize, budget: SnapshotBudget, cancel: CancellationToken, started: Instant, reply: oneshot::Sender<Result<(), GitError>>, slot: std::sync::Arc<std::sync::Mutex<Option<Result<Workspace, GitError>>>>, acknowledgment: oneshot::Receiver<()> },
+    Worktree { started: Instant, reply: oneshot::Sender<Result<super::GitWorktree, GitError>> },
     Cleanup(oneshot::Sender<Result<(), GitError>>),
 }
 struct Resources { root: Option<PathBuf>, destinations: Vec<Workspace> }
@@ -33,10 +34,10 @@ async fn remove(resources: Resources) -> (Resources, io::Result<()>) {
         (resources, result)
     }).await.expect("Git removal worker panicked")
 }
-fn required(source: GitError, cleanup: &GitCleanup) -> GitError {
+pub(super) fn required(source: GitError, cleanup: &GitCleanup) -> GitError {
     GitError::CleanupRequired { source: Box::new(source), cleanup: cleanup.clone() }
 }
-fn pending_process(error: &GitError) -> Option<ProcessCleanup> {
+pub(super) fn pending_process(error: &GitError) -> Option<ProcessCleanup> {
     match error {
         GitError::Process(ProcessError::Cleanup { cleanup, .. }) => Some(cleanup.clone()),
         _ => None,
@@ -110,11 +111,21 @@ pub(super) async fn serve(source: GitSource, revision: GitRevision, options: Git
                             match request {
                                 Request::Cleanup(reply) => { let _ = reply.send(Ok(())); },
                                 Request::Copy { reply, .. } => { let _ = reply.send(Err(GitError::Closed)); },
+                                Request::Worktree { reply, .. } => { let _ = reply.send(Err(GitError::Closed)); },
                             }
                         }
                         return;
                     }
                 }
+            },
+            Request::Worktree { started, reply } => {
+                let Some(root) = resources.root.clone() else { let _ = reply.send(Err(GitError::Closed)); continue; };
+                let cancel = shutdown.child_token();
+                let deadline = started + options.timeout;
+                let result = super::worktree::create(root, options.clone(), revision.clone(), deadline, &cancel).await;
+                // A dropped receiver drops the new worktree handle, whose independent
+                // owner then removes the directory and administrative entry.
+                let _ = reply.send(result);
             },
             Request::Copy { max_file_bytes, budget, cancel, started, reply, slot, acknowledgment } => {
                 let Some(root) = &resources.root else { let _ = reply.send(Err(GitError::Closed)); continue; };
@@ -132,7 +143,7 @@ pub(super) async fn serve(source: GitSource, revision: GitRevision, options: Git
                 };
                 let result = result.expect("Git copy worker panicked").map_err(GitError::Copy);
                 if let Some(trigger) = trigger {
-                    retain_result(result, &mut resources);
+                    retain_result(result, &mut resources.destinations);
                     // Cancellation ends this checkout only when a destination cannot
                     // be removed. This keeps the failed destination worker-owned.
                     let destinations = std::mem::take(&mut resources.destinations);
@@ -150,7 +161,7 @@ pub(super) async fn serve(source: GitSource, revision: GitRevision, options: Git
                     if delivered { let _ = acknowledgment.await; }
                     let undelivered = slot.lock().expect("Git delivery lock poisoned").take();
                     if let Some(undelivered) = undelivered {
-                        retain_result(undelivered, &mut resources);
+                        retain_result(undelivered, &mut resources.destinations);
                         let destinations = std::mem::take(&mut resources.destinations);
                         let (mut partial, removal) = remove(Resources { root: None, destinations }).await;
                         if removal.is_err() {
@@ -165,14 +176,14 @@ pub(super) async fn serve(source: GitSource, revision: GitRevision, options: Git
     }
     finish(resources, None, done).await;
 }
-fn retain_result(result: Result<Workspace, GitError>, resources: &mut Resources) {
+pub(super) fn retain_result(result: Result<Workspace, GitError>, destinations: &mut Vec<Workspace>) {
     match result {
-        Ok(workspace) => resources.destinations.push(workspace),
-        Err(GitError::Copy(CodeCopyError::CopyCleanup { destination, .. })) => resources.destinations.push(*destination),
+        Ok(workspace) => destinations.push(workspace),
+        Err(GitError::Copy(CodeCopyError::CopyCleanup { destination, .. })) => destinations.push(*destination),
         _ => {},
     }
 }
-fn remaining(deadline: Instant, cancel: &CancellationToken) -> Result<Duration, GitError> {
+pub(super) fn remaining(deadline: Instant, cancel: &CancellationToken) -> Result<Duration, GitError> {
     if cancel.is_cancelled() { return Err(ProcessError::Cancelled.into()); }
     deadline.checked_duration_since(Instant::now()).filter(|time| !time.is_zero()).ok_or_else(|| ProcessError::Timeout.into())
 }
@@ -190,7 +201,7 @@ async fn prepare(root: &Path, source: GitSource, revision: &GitRevision, options
     ];
     let mut head = Vec::new();
     for args in commands {
-        let output = run(root, args, protocol, options, remaining(deadline, cancel)?, output_left, cancel).await?;
+        let output = run(root, args, Some(protocol), options, remaining(deadline, cancel)?, output_left, cancel).await?;
         output_left -= output.stdout.len() + output.stderr.len();
         head = output.stdout;
     }
@@ -198,12 +209,15 @@ async fn prepare(root: &Path, source: GitSource, revision: &GitRevision, options
     if String::from_utf8_lossy(&head).trim() != revision.0 { return Err(GitError::Revision("git returned a different commit".into())); }
     Ok(())
 }
-async fn run(root: &Path, args: Vec<OsString>, protocol: &str, options: &GitOptions, timeout: Duration, output_limit: usize, cancel: &CancellationToken) -> Result<ProcessOutput, GitError> {
+pub(super) async fn run(root: &Path, args: Vec<OsString>, protocol: Option<&str>, options: &GitOptions, timeout: Duration, output_limit: usize, cancel: &CancellationToken) -> Result<ProcessOutput, GitError> {
     let mut hardened = Vec::new();
     for config in ["protocol.allow=never", "core.fsmonitor=false", "submodule.recurse=false", "fetch.recurseSubmodules=false", "credential.helper=", "credential.interactive=false", "core.autocrlf=false", "core.symlinks=true", "init.templateDir="] {
         hardened.extend([OsString::from("-c"), OsString::from(config)]);
     }
-    hardened.extend(["-c".into(), format!("protocol.{protocol}.allow=always").into(), "-c".into()]);
+    if let Some(protocol) = protocol {
+        hardened.extend(["-c".into(), format!("protocol.{protocol}.allow=always").into()]);
+    }
+    hardened.extend(["-c".into()]);
     let mut hooks = OsString::from("core.hooksPath="); hooks.push(root.join("empty-hooks")); hardened.push(hooks);
     hardened.extend(args);
     let mut environment: Vec<(OsString, OsString)> = [
