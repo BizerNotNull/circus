@@ -46,7 +46,7 @@ Kubernetes、containerd、池与快照仍保留为规划目标；当前只有 Do
 - API 使用领域请求、结果和错误；预期失败返回 `Result`，禁止用 panic 处理外部输入或吞掉清理失败。
 - 生命周期显式建模合法转换；失败与取消必须有资源归属及回收路径，销毁应可重复调用。
 - 通过构造参数注入后端、配置及外部服务；trait 只用于真实替换边界，不引入全局可变状态。
-- 当前 workspace API 是同步且阻塞的。将来从异步上下文调用时必须 `spawn_blocking`；计划中的异步运行时仍只有 Tokio，不引入 async-std/smol 或第二套运行时。取消与超时不得遗留孤儿资源。阻塞任务开始后不能靠 abort 终止。
+- 当前 workspace API 是同步且阻塞的。从异步上下文调用时必须 `spawn_blocking`；Docker 后端已使用 Tokio，不引入 async-std/smol 或第二套运行时。取消与超时不得遗留孤儿资源。阻塞任务开始后不能靠 abort 终止。
 - 隔离级别、资源限制和权限由显式配置决定；禁止静默降级隔离，禁止默认把宿主目录或凭据暴露给沙箱。
 
 ## Rust 工具链基线
@@ -68,7 +68,7 @@ Kubernetes、containerd、池与快照仍保留为规划目标；当前只有 Do
 
 ## 第三方库选型与去重
 
-以下是按职责确定的默认选择。只有实现需要该能力时才加入 `Cargo.toml`。当前直接依赖只有 [`cap-std` 4.0.3](https://github.com/bytecodealliance/cap-std)、[`cap-fs-ext` 4.0.3](https://github.com/bytecodealliance/cap-std)（Unix 上 `OpenOptionsSyncExt::nonblock`，不开 default features）、[`tempfile` 3.x](https://docs.rs/tempfile/latest/tempfile/)、[`thiserror` 2.x](https://github.com/dtolnay/thiserror)（均为非预发布）。表中其余库仍未引入。优先标准库，其次选择有持续维护、公开源码和实际采用的库；不为降低流行度放弃成熟生态，也不以 stars 或下载量代替性能证据。crate 版本在首次引入时选择兼容上述工具链的较新非预发布版，核对 MSRV、许可证与安全公告，并由 `Cargo.lock` 固定实际解析版本。
+以下是按职责确定的默认选择。只有实现需要该能力时才加入 `Cargo.toml`。当前直接依赖包括 `cap-std` / `cap-fs-ext` 4.0.3、tempfile、thiserror，以及 Docker 后端使用的 bollard 0.21.1、futures-util、Tokio、tokio-util 和 uuid；准确版本与 features 以 `Cargo.toml` 和 `Cargo.lock` 为准。表中其余库仍是选型约定，不代表已引入。优先标准库，其次选择有持续维护、公开源码和实际采用的库；不为降低流行度放弃成熟生态，也不以 stars 或下载量代替性能证据。crate 版本在首次引入时选择兼容上述工具链的较新非预发布版，核对 MSRV、许可证与安全公告，并由 `Cargo.lock` 固定实际解析版本。
 
 | 类别                    | 默认选择                                                                                                                 | 选择依据与使用边界                                                                                                                                                                                  |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -90,7 +90,7 @@ Kubernetes、containerd、池与快照仍保留为规划目标；当前只有 Do
 
 ### 性能依据与兼容边界
 
-- “性能最好”限定为目标平台、真实数据与相同语义下的测量结果。workspace 文件 API 可以运行，但尚无进程或容器沙箱，**没有本项目最快库的实测结论**。表中选型综合性能机制、维护与生态适配；网络/后端 SDK 不存在可脱离负载比较的统一性能排名。
+- “性能最好”限定为目标平台、真实数据与相同语义下的测量结果。workspace 文件 API 和 Docker + runc 适配器已实现，但**没有本项目最快库的实测结论**。表中选型综合性能机制、维护与生态适配；网络/后端 SDK 不存在可脱离负载比较的统一性能排名。
 - JSON 的具体取舍：sonic-rs 上游 README 提供 Xeon Platinum 8260 上 twitter/citm_catalog/canada 数据的基准，安全 `from_slice` 在这些结构体解析用例中快于 serde_json/simd-json；这是**上游结果，非本项目测量**。调研时仓库约 937 stars，是有实际采用但非最大众的性能型选择；stars 仅作采用度信号。[基准与运行条件](https://github.com/cloudwego/sonic-rs#benchmark)。
 - sonic-rs 并非 serde_json 的无条件替代：非类型化 Value 的重复键行为存在差异，SDK 暴露的 serde_json 类型不能直接互换。[兼容说明](https://github.com/cloudwego/sonic-rs/blob/main/docs/serdejson_compatibility.md)。业务 JSON 默认只选 sonic-rs；遇到硬性兼容要求时先评估全局改选，而非任意新增第二套解析路径。
 - 不把上游建议的 `-C target-cpu=native` 无条件用于分发产物；构建机与部署 CPU 可能不同，须明确目标指令集并验证可移植性。首次实现 JSON 路径时测量真实负载的吞吐、分配与尾延迟，同时验证重复键、数值精度、非法 UTF-8 和资源上限；不靠 unchecked API 或放松语义获得“更快”。
@@ -103,15 +103,16 @@ Kubernetes、containerd、池与快照仍保留为规划目标；当前只有 Do
 
 ## Runtime, Commands & QA
 
-- Rust 核心使用上述 Cargo 工具链，不继承 Paseo 的工具链版本。服务入口尚未配置。`.github/workflows/sandbox-rust.yml` 显示名为 `Sandbox Rust`，检查名为 `rust (ubuntu-latest)`、`rust (windows-latest)`、`dependencies` 和 `codeql`。没有路径过滤，不调用 Paseo CI；`main` push、PR 的 `opened`/`reopened`/`synchronize`、merge queue 和 `workflow_dispatch` 都会启动。结果只记在对应 PR，不在本文声称当前提交已通过。命令在 `circus-sandbox/` 执行，rustup 读取本目录 `rust-toolchain.toml`。工作流存在不是服务可运行、隔离通过或分支保护已配置。`.github/workflows/sandbox-architecture.yml` 使用同一组触发条件，检查名为 `architecture (ubuntu-latest)` 与 `architecture (windows-latest)`。
-- 本 crate 不允许 unsafe。库只导出已实现的 `Workspace` 文件 API 和 `runtime` 资源值模型，不预建其他空模块，也不创建空壳二进制来假装后端可用。
+- Rust 核心使用上述 Cargo 工具链，不继承 Paseo 的工具链版本。服务入口尚未配置。`.github/workflows/sandbox-rust.yml` 显示名为 `Sandbox Rust`，检查名为 `rust (ubuntu-latest)`、`rust (windows-latest)`、`docker-integration`、`dependencies` 和 `codeql`。没有路径过滤，不调用 Paseo CI；`main` push、PR 的 `opened`/`reopened`/`synchronize`、merge queue 和 `workflow_dispatch` 都会启动。结果只记在对应 PR，不在本文声称当前提交已通过。命令在 `circus-sandbox/` 执行，rustup 读取本目录 `rust-toolchain.toml`。工作流存在不是服务可运行、隔离通过或分支保护已配置。`.github/workflows/sandbox-architecture.yml` 使用同一组触发条件，检查名为 `architecture (ubuntu-latest)` 与 `architecture (windows-latest)`。
+- 本 crate 不允许 unsafe。库导出已实现的 `Workspace` 文件 API、`runtime` 资源值模型与 Docker + runc 领域 API，不暴露 bollard 类型，不预建其他空模块，也不创建空壳二进制来假装后端可用。
 - 格式检查：`cargo fmt --check`（写回用 `cargo fmt`）。
 - Clippy：`cargo clippy --locked --all-targets -- -D warnings`。
 - 构建：`cargo build --locked`。
 - 测试：`cargo test --locked`。公开文件 API 集成测试是 `cargo test --locked --test workspace`。连示例一起编译用 `cargo test --locked --all-targets`。
+- 真实 Docker 门禁：`docker-integration` 在 Ubuntu 独立运行，普通 Linux/Windows `cargo test --locked` 不执行默认忽略的真实 Engine 测试。Linux 本地复现须显式拉取镜像并设置 opt-in、Unix endpoint 与 image，完整命令及 example 见 [Docker + runc 文档](docs/docker-linux-runc.md#real-engine-gate-and-local-reproduction)。
 - 文档：`RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`。与 CI 的文档检查一致。
 - 文件示例：`cargo run --locked --example workspace`，必须实际写、读、删除并 `cleanup`，打印读到的字节，不能打印与 `Result` 无关的成功字样。资源示例：`cargo run --locked --example resource_policy`，构造合法请求、标明单位，再观察冲突请求的类型化拒绝；它不是后端 smoke。
-- 单元测试与模块共置，可覆盖符号链接逃逸、大于上限的已有文件读取，以及清理失败后的重试。读取超限时 `LimitExceeded.actual` 是探测到的 `limit + 1`，不是未知总长。公开 API 不能制造超限文件，所以 `tests/` 只验证写上限、恰好等于上限的读取、非法路径、嵌套目录/删除、重复 `cleanup` 与 `Closed`。符号链接用例的必要前提是进程能创建符号链接。Windows 需要开发者模式，或持有 `SeCreateSymbolicLinkPrivilege`。缺少该权限时对应用例必须失败，不能把 `PermissionDenied` 当成跳过并静默返回成功。不要修改宿主安全设置、组策略或开发者模式来让测试通过。需要容器或虚拟化的测试应显式标注环境要求并隔离资源；当前没有这类测试。
+- 单元测试与模块共置，可覆盖符号链接逃逸、大于上限的已有文件读取，以及清理失败后的重试。读取超限时 `LimitExceeded.actual` 是探测到的 `limit + 1`，不是未知总长。公开 API 不能制造超限文件，所以 workspace 集成测试只验证写上限、恰好等于上限的读取、非法路径、嵌套目录/删除、重复 `cleanup` 与 `Closed`。符号链接用例的必要前提是进程能创建符号链接。Windows 需要开发者模式，或持有 `SeCreateSymbolicLinkPrivilege`。缺少该权限时对应用例必须失败，不能把 `PermissionDenied` 当成跳过并静默返回成功。不要修改宿主安全设置、组策略或开发者模式来让测试通过。需要容器或虚拟化的测试必须显式标注环境要求并隔离资源；现有 `tests/docker_sandbox.rs` 默认忽略，要求显式 opt-in 和真实 Linux Docker Engine。
 - 架构域门禁：先安装 `cargo-modules` 0.28.0，再在仓库根目录执行 `npm --prefix circus-sandbox/qa ci` 和 `npm --prefix circus-sandbox/qa run architecture`。脚本必须用真实的 `cargo modules dependencies --lib --all-features --no-externs --no-owns` DOT，验证工具精确为 0.28.0，按语义 ID 和声明 kind 投影到顶层域，接受同域 getter/impl 递归，拒绝固定矩阵之外的跨域 `uses` 边。不得用 `--acyclic`、`--no-fns`/`--no-types`、手写 Rust 源码解析或忽略 analyzer 失败来绕过。矩阵、根门面规则和限制只在[工程说明](docs/engineering.md#架构域门禁)维护，不在本文件复制第二份。
 - 架构门禁只证明当前 crate 的跨域 `uses` 边满足 allowlist DAG；它不证明外部 SDK 暴露面，也不检查域内循环。`cargo-modules` 是 MPL-2.0 开发期 CLI 工具，`dotparser` 1.1.1 是 MIT 的 QA 依赖，都不是 crate 的运行时依赖。
 - 启动优化必须测量冷启动与复用路径，并验证复用不泄露状态。没有覆盖率百分比门槛。实际后端行为必须有运行证据，不能仅靠 mock；workspace 文件测试使用真实临时目录。Windows 编译成功不能当成隔离或 Linux 后端通过，也不能把缺少符号链接权限时的静默跳过当成符号链接约束已验证。
@@ -122,6 +123,7 @@ Kubernetes、containerd、池与快照仍保留为规划目标；当前只有 Do
 ### CI 检查内容
 
 - `rust`：两个平台都在 `circus-sandbox/` 安装 Rust 1.99.1（minimal，含 rustfmt 与 clippy），然后跑 `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`、`cargo test --locked`、`RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`、`cargo run --locked --example workspace` 和 `cargo run --locked --example resource_policy`。`fail-fast` 为 false。这是源码级检查，不是容器或进程隔离验证。
+- `docker-integration`：独立 `ubuntu-latest` job，Rust 1.99.1，超时 30 分钟，权限仅 `contents: read`。检查本地 Unix socket、Linux Engine、cgroup v2 与已注册的 runc，显式拉取 `python:3.12-slim`，再以 `CIRCUS_DOCKER_SANDBOX=1`、`CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock`、`CIRCUS_DOCKER_IMAGE=python:3.12-slim` 执行真实测试与 Docker example。失败关闭，不以 mock 或 `continue-on-error` 替代；配置存在不代表已取得通过证据。
 - `dependencies`：只在 `ubuntu-latest`。`cargo install --locked --version 0.20.2 cargo-deny`，然后 `cargo deny --locked check`。本地复现使用同一安装版本，并在 `circus-sandbox/` 执行检查。
 - `codeql`：只在 `ubuntu-latest`。语言 `rust`，`build-mode: none`，配置 `.github/codeql/sandbox-rust.yml`。只分析 `circus-sandbox`，忽略 `circus-paseo` 与 `circus-sandbox/target`。它不编译 crate，不能代替 `cargo test`。
 - `architecture (ubuntu-latest)` / `architecture (windows-latest)`：在 `circus-sandbox/` 安装 Rust 1.99.1、在 QA 安装 Node.js 24.18.0，然后 `cargo install --locked --version 0.28.0 cargo-modules`、`npm --prefix circus-sandbox/qa ci`、`npm --prefix circus-sandbox/qa run architecture`。作业超时 20 分钟，`fail-fast` 为 false，无 Docker 要求。实际运行器先验证 `rustc` 与 `cargo-modules` 版本，再由脚本解析真实 DOT；失败、空图、错误 crate、未知顶层命名空间或违禁跨域边都使检查失败。
