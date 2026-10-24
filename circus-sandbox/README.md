@@ -119,7 +119,7 @@ npm --prefix circus-sandbox/qa run architecture
 
 ## 路径
 
-拒绝发生在打开句柄之前，并且 Windows 与 Linux 使用同一规则。非法路径是：空路径（`Empty`）、含 `\`（`Backslash`）、以盘符 `A:`–`Z:` 开头或以 `//` 开头（`WindowsPrefix`）、以 `/` 开头或 `Path::is_absolute()`（`Absolute`）、任一组件是 `..`（`ParentComponent`）。`cleanup` 成功后的文件操作是 `Closed`，不是这些路径类别。
+拒绝发生在打开句柄之前，并且 Windows 与 Linux 使用同一规则。非法路径是：空路径（`Empty`）、含 `\`（`Backslash`）、任一组件以 ASCII 字母加 `:` 开头（大小写不敏感），或以 `//` 开头（`WindowsPrefix`）、以 `/` 开头或 `Path::is_absolute()`（`Absolute`）、任一组件是 `..`（`ParentComponent`）。因此 `./C:name`、`nested/C:name` 和 `.dot/C:name` 都是 `WindowsPrefix`。`file:name` 与 `CC:name` 不是盘符，路径检查不拒绝；宿主若不允许该文件名，结果是 `Io`，不是 `WindowsPrefix`。已有分类顺序不变：`\` 先于盘符，整段开头的盘符或 `//` 先于绝对路径，`..` 先于仅出现在后续组件上的盘符。`cleanup` 成功后的文件操作是 `Closed`，不是这些路径类别。
 
 `foo/bar`、`foo/./bar` 可以通过。`create_dir_all` 之外不会自动创建父目录。
 
@@ -141,6 +141,11 @@ npm --prefix circus-sandbox/qa run architecture
 `cleanup` 的 I/O 失败也是 `Io`。此时工作区仍然打开，应保留同一个 `Workspace` 再调用 `cleanup`，不要丢弃错误后假设目录已消失。
 
 ## 变更
+
+### 未发布：按组件拒绝 Windows 盘符
+
+- `WindowsPrefix` 覆盖任一组件上的 `A:`–`Z:` 盘符前缀（大小写不敏感），包括 `./C:name` 与 `nested/C:name`。Windows 与 Linux 仍使用同一规则，并在打开句柄之前拒绝。
+- `file:name`、`CC:name` 不是盘符，路径检查不拒绝。`\`、绝对路径和 `..` 的既有错误类别与优先顺序不变。
 
 ### 未发布：工作区根不对其他宿主用户开放
 

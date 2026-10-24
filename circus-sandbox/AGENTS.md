@@ -8,7 +8,7 @@
 
 - `Workspace` 同步 API：`new`、`write_file`、`read_file`、`create_dir_all`、`remove_file`、`cleanup`。方法会阻塞调用线程。
 - 临时工作区由 tempfile 新建，不接受宿主目录，公开 API 不暴露工作区根路径。Unix 上根目录在创建时用 `Builder::permissions` 请求 `0o700`，mode 是 `mkdir` 参数，不是事后 `chmod`，也不修改进程 umask。umask 只能再去掉权限位。这只让其他宿主用户不能遍历；同账户进程和特权进程不隔离。不要改回 tempfile 的 `0o777` 默认，也不要靠创建后改权限。Windows 不设置 Unix mode，目录创建行为保持平台默认。
-- 跨平台拒绝空路径、绝对路径、`..`、Windows 盘符/UNC 前缀和反斜杠；通过后的访问走 cap-std，防止符号链接逃逸和基于路径字符串的 TOCTOU。
+- 跨平台拒绝空路径、绝对路径、`..`、反斜杠、以 `//` 开头的 UNC，以及任一组件上的 Windows 盘符前缀（ASCII 字母后紧跟 `:`，大小写不敏感，含 `./C:name` 与 `nested/C:name`）。非盘符冒号（`file:name`、`CC:name`）不是这条规则。`\`、绝对路径和 `..` 的既有错误类别优先于仅出现在后续组件上的盘符。通过后的访问走 cap-std，防止符号链接逃逸和基于路径字符串的 TOCTOU。
 - 读写使用同一个 `max_file_bytes`。它是单个文件的上限：`new` 拒绝 `0` 和 `usize::MAX`，以便读取 `limit + 1` 时不溢出，也不按该上限预分配。它不是工作区总字节配额、文件数配额或宿主磁盘配额，当前也没有总配额 API。写满临时目录是宿主磁盘耗尽，不是 `LimitExceeded`。不要把这个参数写成沙箱配额，也不要在本 crate 增加总配额 API。后续真实进程或容器后端必须显式限制资源。
 - `write_file` 不是原子替换。已关闭、非法路径、超限、缺失父目录和非普通文件在截断前返回，这些失败不修改已有文件。打开普通文件后先把长度设为 0 再写入；此后的 I/O 失败可能截断或留下不完整内容。不要写成原子写入，也不要为此增加原子 API。
 - Unix 上 `read_file` / `write_file` 通过 cap-std `OpenOptions` 设置 `nonblock(true)` 再打开，因此 `open` 本身不等待 FIFO 对端。句柄级 `is_file` 在任何读取或 `set_len`/写入之前执行。路径 metadata 预检不是这个修复：工作区内指向 FIFO 的符号链接，以及打开前普通文件被换成 FIFO，都不得阻塞，并返回 `NotRegularFile`（保留调用方路径）。指向普通文件的工作区符号链接仍跟随。逃出工作区的符号链接仍是 cap-std 的 I/O 错误，不是新错误变体。Windows 不设置该标志；CreateFile 保持 write+create 且不预先 truncate，读取是只读打开。目录、FIFO、设备及其他非普通节点，包括指向它们的工作区符号链接，都是 `NotRegularFile`。
