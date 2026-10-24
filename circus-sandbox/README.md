@@ -96,6 +96,23 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
 
 测试使用 `python:3.12-slim`，可用 `CIRCUS_DOCKER_IMAGE` 指定另一个包含 Python 3 的本地 Linux 镜像。实际运行环境、命令、结果和限制应记录在对应 PR；不要把编译、忽略测试或 CI 通过写成隔离验证。
 
+### 预启动 Docker 池
+
+`PoolConfig::new(sandbox, capacity, baseline, lease_ttl: Duration)` 要求正容量和显式正 TTL；`DockerPool::create(config).await` 在所有槽位完成实际 create、可选基线恢复、start 和 Running 检查后才成功。TTL 从租约分配时开始，不从预热或排队开始；到期请求撤销并中断仍在执行的命令，实际销毁是异步的，必须等待清理确认，不能把到期当作容器已不存在。`acquire(Duration)` 必须给出正超时；超时为 `PoolError::AcquireTimeout`，存活等待者 FIFO，取消等待不会占用租约。`PoolLease::sandbox()` 借用真实后端；租约不可克隆。每次租约只使用一次，`release().await`、Drop 或到期都销毁容器，确认不存在后才按不可变配置补充全新容器，绝不 reset 或跨租用复用脏容器。
+
+基线 `Option<Arc<CodeSnapshot>>` 只能包含调用者明确授权共享的输入；它不是凭据扫描器，也不是进程/内存检查点。容量约束包含 ready、creating、leased、retiring 和 cleanup_required；`status().await` 的这些互斥计数连同关闭后的 absent 合计为 capacity。`ResourceLimits` 是每容器限制，不是宿主聚合资源预留。
+
+`shutdown().await` 关闭准入、取消等待并**撤销尚未归还的租约**，销毁所有池拥有的容器；成功才证明全部已不存在。取消 shutdown future 不会停止清理。最后一个池客户端 Drop 只请求同样的关闭，不证明成功；失败清理仍由后台所有者持有并重试。构造失败若返回 `PoolError::CleanupRequired { pool, source }`，必须保留该 pool 并重试 shutdown，可沿标准错误 source 链查看原因。真实测试与计时示例在 `circus-sandbox/` 执行（默认镜像须已存在，测试请求 32 PIDs）：
+
+```bash
+CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
+  cargo test --locked --test docker_pool -- --ignored
+CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
+  cargo run --locked --example docker_pool
+```
+
+示例分别观察 cold create + restore + start、完整预热和 warm acquire 的 Instant 耗时，并执行基线字节、显式 release/shutdown；不是承诺加速比。Windows 端点可设为 `npipe:////./pipe/dockerDesktopLinuxEngine`；环境变量由所用 shell 显式设置。
+
 ## 命令
 
 同样在 `circus-sandbox/` 下执行：

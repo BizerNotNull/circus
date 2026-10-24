@@ -18,4 +18,25 @@ A staging validation failure leaves the sandbox `Created`, retains its container
 
 The ignored integration test requires `CIRCUS_DOCKER_SANDBOX=1` and `CIRCUS_DOCKER_ENDPOINT`; it must run against a real Linux Docker Engine with cgroup v2. `CIRCUS_DOCKER_IMAGE` optionally overrides the default `python:3.12-slim` image and must refer to a local Linux image containing Python 3. The example is `docker_sandbox` and also requires an endpoint. Run it with `cargo test --locked --test docker_sandbox -- --ignored`.
 
-Snapshot, Docker commit, HTTP, Git, environment resolution/pull, pools, and other runtimes are planned but not implemented. A read-only root plus tmpfs workspace would not preserve workspace writes in a Docker commit; a future snapshot must archive and restore files.
+## Prestarted single-use Docker pool
+
+`PoolConfig::new(SandboxConfig, capacity, Option<Arc<CodeSnapshot>>, lease_ttl: Duration)` rejects zero capacity and requires an explicit positive lease TTL. TTL begins at lease allocation, not pool warmup or acquire queue entry. Expiry requests revocation and interrupts an in-flight command; it is not instantaneous proof of container absence. Await confirmed cleanup before treating capacity as reusable. `DockerPool::create(config).await` warms the entire capacity before returning: each fresh container is created, its optional baseline restored while Created, started, and checked for actual Running status. This uses the real Docker/runc lifecycle; it does not checkpoint a process or eliminate startup cost. `examples/docker_pool.rs` observes cold create + restore + start, full pool warmup, and acquisition separately with `Instant`, executes the restored program bytes, then explicitly releases and shuts down. Individual timings are not a guaranteed speedup.
+
+`DockerPool` clients are cloneable, but `PoolLease` is not. `acquire(&self, Duration).await` requires a positive explicit deadline, returns `PoolError::AcquireTimeout` on timeout, and serves live waiters FIFO. Cancelled waiters do not consume slots. `PoolLease::sandbox()` borrows the real `DockerSandbox`; it does not export a clonable owning handle. Every lease is single-use: release or Drop destroys that container, and only confirmed absence permits fresh replacement from the immutable configuration and optional baseline. No dirty container is reset or reoffered. Baseline contents are explicitly authorized shared input, not discovered secrets or a credential-scanning policy. Never use a previous tenant's changes as the baseline.
+
+`status().await` reports public disjoint `capacity`, `ready`, `creating`, `leased`, `retiring`, `cleanup_required`, `absent`, and `closing` fields; all slot categories including absent sum to capacity. Cleanup failures continue occupying capacity rather than allowing unbounded replacement. `ResourceLimits` applies to each container, not aggregate host reservation/admission. A slow refill does not require suspending ready acquisitions.
+
+`release(self).await` observes destruction of the released container; Drop only requests it. `shutdown().await` rejects new acquisitions, cancels queued acquisitions, and **revokes outstanding leases**, destroying their containers even if lease handles remain alive. It is idempotent and succeeds only after every owned container is confirmed absent. Cancelling the shutdown future does not stop the cleanup worker or discard in-flight create results. Last-client Drop requests shutdown but is not proof of cleanup; lease handles do not keep that last-client guard alive. The worker retains unresolved resources and retries removal. If construction returns `PoolError::CleanupRequired { pool, source }`, retain that returned cleanup owner and call `pool.shutdown().await` again; the structured error/source chain preserves the preparation cause. No global prune or source-cache deletion is used.
+
+From `circus-sandbox/`, explicitly opt into the ignored real integration tests or timing example:
+
+```bash
+CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
+  cargo test --locked --test docker_pool -- --ignored
+CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
+  cargo run --locked --example docker_pool
+```
+
+The default local image is `python:3.12-slim`, optionally overridden with `CIRCUS_DOCKER_IMAGE`; it must already exist and contain Python 3. Fixtures and the example request 32 PIDs. On Windows, explicitly set the same variables in your shell with endpoint `npipe:////./pipe/dockerDesktopLinuxEngine`. Tests check baseline bytes and empty directories, private-marker isolation across fresh leases, SDK inspect HTTP 404 after release/drop/shutdown/expiry, bounded concurrent leases and timeouts, cancellation, TTL revocation of a command awaiting a long-running Python child followed by fresh refill, retained preparation-error sources, and an unrelated surviving container. They are opt-in tests, not evidence that this checkout has exercised Docker successfully.
+
+Docker commit, HTTP, Git, environment resolution/pull, and other runtimes remain outside this backend. A read-only root plus tmpfs workspace would not preserve workspace writes in a Docker commit; code snapshots archive and restore workspace payload, not process state.

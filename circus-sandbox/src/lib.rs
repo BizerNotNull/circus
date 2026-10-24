@@ -5,10 +5,9 @@
 //! commands in a Linux container through an explicit local Docker endpoint.
 //! Public types do not expose the Docker SDK.
 //!
-//! This is not a Kubernetes, gVisor, Kata, or Firecracker backend. Snapshot,
-//! pool, Git, and HTTP are not implemented. A readonly root plus tmpfs workspace
-//! means a Docker commit would not preserve workspace writes; a later snapshot
-//! must restore an archive.
+//! This is not a Kubernetes, gVisor, Kata, or Firecracker backend. Workspace
+//! snapshots contain payload files, not process memory. The bounded Docker
+//! pool prestarts fresh single-use containers; it never resets dirty leases.
 //!
 //! # Blocking
 //!
@@ -49,6 +48,7 @@
 pub mod api;
 mod infrastructure;
 mod lifecycle;
+pub mod pool;
 pub mod runtime;
 mod workspace;
 
@@ -65,3 +65,6 @@ pub use workspace::{
 
 #[doc(inline)]
 pub use runtime::{ResourceLimits, ResourceLimitsError};
+
+#[doc(inline)]
+pub use pool::{DockerPool, PoolConfig, PoolError, PoolFailure, PoolLease, PoolStatus};
