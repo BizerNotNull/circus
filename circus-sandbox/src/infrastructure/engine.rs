@@ -6,13 +6,13 @@ pub(crate) use images::ImageInfo;
 
 #[path = "engine_output.rs"]
 mod output;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "containerd"))]
 pub(crate) use output::OutputCollector;
 pub(crate) use output::{OutputLimit, OutputPhase};
 
 #[path = "engine_manifest.rs"]
 mod manifest;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "containerd"))]
 pub(crate) use manifest::decode as decode_manifest;
 pub(crate) use manifest::{WorkspaceEntry, WorkspaceEntryKind};
 

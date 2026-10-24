@@ -28,9 +28,10 @@ use tokio_util::sync::CancellationToken;
 #[cfg(all(unix, feature = "containerd"))]
 use crate::infrastructure::ContainerdBackend;
 use crate::infrastructure::{
-    Backend, CommonSpec, ContainerdConfig, ContainerdConfigError, DockerBackend, DockerConfig,
-    DockerConfigError, InstanceId, PrepareError,
+    Backend, CommonSpec, DockerBackend, DockerConfig, DockerConfigError, InstanceId, PrepareError,
 };
+#[cfg(all(unix, feature = "containerd"))]
+use crate::infrastructure::{ContainerdConfig, ContainerdConfigError};
 use crate::observability::{OperationKind, OperationOutcome, SandboxMetrics, events};
 use crate::runtime::{BackendConfig, BackendConfigError, SandboxConfig};
 use crate::workspace::Workspace;
@@ -221,15 +222,25 @@ impl Sandbox {
                 Self::create_with_backend(backend, spec, config, metrics).await
             }
             BackendConfig::Containerd(descriptor) => {
-                let containerd = ContainerdConfig::new(
-                    descriptor.socket(),
-                    descriptor.namespace(),
-                    descriptor.image(),
-                    descriptor.runtime(),
-                    descriptor.snapshotter(),
-                )
-                .map_err(|err| SandboxError::BackendConfig(map_containerd_config(err)))?;
-                Self::create_containerd(containerd, spec, config, metrics).await
+                #[cfg(all(unix, feature = "containerd"))]
+                {
+                    let containerd = ContainerdConfig::new(
+                        descriptor.socket(),
+                        descriptor.namespace(),
+                        descriptor.image(),
+                        descriptor.runtime(),
+                        descriptor.snapshotter(),
+                    )
+                    .map_err(|err| SandboxError::BackendConfig(map_containerd_config(err)))?;
+                    Self::create_containerd(containerd, spec, config, metrics).await
+                }
+                #[cfg(not(all(unix, feature = "containerd")))]
+                {
+                    let _ = descriptor;
+                    Err(SandboxError::UnsupportedCapability {
+                        capability: "containerd backend feature not compiled",
+                    })
+                }
             }
         }
     }
@@ -245,18 +256,6 @@ impl Sandbox {
             .await
             .map_err(|err| engine_err(*err))?;
         Self::create_with_backend(backend, spec, config, metrics).await
-    }
-
-    #[cfg(not(all(unix, feature = "containerd")))]
-    async fn create_containerd(
-        _containerd: ContainerdConfig,
-        _spec: CommonSpec,
-        _config: SandboxConfig,
-        _metrics: SandboxMetrics,
-    ) -> Result<Self, SandboxError> {
-        Err(SandboxError::UnsupportedCapability {
-            capability: "containerd backend feature not compiled",
-        })
     }
 
     async fn create_with_backend<B: Backend>(
@@ -559,6 +558,7 @@ fn map_docker_config(err: DockerConfigError) -> BackendConfigError {
     }
 }
 
+#[cfg(all(unix, feature = "containerd"))]
 fn map_containerd_config(err: ContainerdConfigError) -> BackendConfigError {
     match err {
         ContainerdConfigError::InvalidSocketPath { value } => {

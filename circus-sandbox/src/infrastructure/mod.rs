@@ -3,6 +3,7 @@
 mod backend;
 #[cfg(all(unix, feature = "containerd"))]
 mod containerd;
+#[cfg(all(unix, feature = "containerd"))]
 mod containerd_config;
 #[cfg(all(unix, feature = "containerd"))]
 mod containerd_engine;
@@ -25,6 +26,7 @@ pub(crate) use backend::{Backend, BackendProcess, CommonSpec, InstanceId, Prepar
 #[cfg(unix)]
 #[cfg(all(unix, feature = "containerd"))]
 pub(crate) use containerd::ContainerdBackend;
+#[cfg(all(unix, feature = "containerd"))]
 pub(crate) use containerd_config::{ContainerdConfig, ContainerdConfigError};
 pub(crate) use docker::{DockerBackend, DockerConfig, DockerConfigError, DockerEndpoint};
 pub(crate) use engine::{
