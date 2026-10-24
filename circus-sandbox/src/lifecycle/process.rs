@@ -360,9 +360,7 @@ pub(super) fn destroyed(
             // A typed cleanup failure reports the ownership it actually
             // observed; anything else leaves ownership unknown and retryable.
             Err(SandboxError::CleanupRequired {
-                ownership,
-                detail,
-                ..
+                ownership, detail, ..
             }) => CleanupReport {
                 instance_id,
                 ownership: *ownership,

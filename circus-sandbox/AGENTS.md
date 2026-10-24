@@ -32,16 +32,16 @@
 
 尚未实现的目标链路（Kubernetes、containerd、容器/VM 运行时快照、HTTP/RPC 等）仍然只是规划，不得按目录存在推断能力；预启动池、工作区文件快照、Git 准备与交互进程会话已实现。
 
-| 目录                  | 职责与边界                                                                                                                                                                                                             |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/api/`            | 统一创建、执行命令、文件操作、销毁入口；不泄露后端类型，不预设 HTTP、RPC 或进程内传输。                                                                                                                                |
-| `src/lifecycle/`      | 创建、启动、运行、暂停、恢复、销毁的状态转换与资源回收；状态只能由此修改。                                                                                                                                             |
-| `src/infrastructure/` | Docker、Kubernetes、containerd 等部署与调度适配；负责资源分配，不承担隔离机制实现。                                                                                                                                    |
-| `src/runtime/`        | 已实现后端中立的资源请求值校验，不执行资源限制。当前 Docker + runc 隔离策略由 `infrastructure`/`lifecycle` 显式配置并验证；Kubernetes、containerd、gVisor、Kata Containers、Firecracker 等仍未实现。                   |
-| `src/environment/`    | OCI 镜像、基础环境、依赖准备与可复现环境标识。                                                                                                                                                                         |
-| `src/workspace/`      | 已实现：能力目录内的相对文件读写、建目录、删除与回收，进程内 `CodeSnapshot`，显式授权源的 `CodeSource` 独立代码副本，固定提交 `GitCheckout` 与自有 `GitWorktree`。Git 准备是受控可信宿主进程，不是进程或文件系统隔离。 |
-| `src/pool/`           | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。                                                                                                                                               |
-| `tests/`              | `tests/workspace.rs` 验证公开 workspace API；`tests/docker_sandbox.rs`、`docker_process.rs`、`docker_hardening.rs`、`docker_snapshot.rs`、`docker_pool.rs`、`docker_environment*.rs`、`git_*` 与 `agent_image.rs` 都是默认忽略、仅连接显式真实 Docker Engine（或真实宿主 Git）的集成测试。                                                                             |
+| 目录                  | 职责与边界                                                                                                                                                                                                                                                                                 |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/api/`            | 统一创建、执行命令、文件操作、销毁入口；不泄露后端类型，不预设 HTTP、RPC 或进程内传输。                                                                                                                                                                                                    |
+| `src/lifecycle/`      | 创建、启动、运行、暂停、恢复、销毁的状态转换与资源回收；状态只能由此修改。                                                                                                                                                                                                                 |
+| `src/infrastructure/` | Docker、Kubernetes、containerd 等部署与调度适配；负责资源分配，不承担隔离机制实现。                                                                                                                                                                                                        |
+| `src/runtime/`        | 已实现后端中立的资源请求值校验，不执行资源限制。当前 Docker + runc 隔离策略由 `infrastructure`/`lifecycle` 显式配置并验证；Kubernetes、containerd、gVisor、Kata Containers、Firecracker 等仍未实现。                                                                                       |
+| `src/environment/`    | OCI 镜像、基础环境、依赖准备与可复现环境标识。                                                                                                                                                                                                                                             |
+| `src/workspace/`      | 已实现：能力目录内的相对文件读写、建目录、删除与回收，进程内 `CodeSnapshot`，显式授权源的 `CodeSource` 独立代码副本，固定提交 `GitCheckout` 与自有 `GitWorktree`。Git 准备是受控可信宿主进程，不是进程或文件系统隔离。                                                                     |
+| `src/pool/`           | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。                                                                                                                                                                                                                   |
+| `tests/`              | `tests/workspace.rs` 验证公开 workspace API；`tests/docker_sandbox.rs`、`docker_process.rs`、`docker_hardening.rs`、`docker_snapshot.rs`、`docker_pool.rs`、`docker_environment*.rs`、`git_*` 与 `agent_image.rs` 都是默认忽略、仅连接显式真实 Docker Engine（或真实宿主 Git）的集成测试。 |
 
 Kubernetes、containerd、池与容器/VM 运行时快照仍保留为规划目标；已有内存代码快照不等于这些目标已完成。当前只有 Docker + runc 适配器支持真实容器路径，禁止用空适配器声称支持。运行时必须先消费 workspace 文件契约再开发。
 

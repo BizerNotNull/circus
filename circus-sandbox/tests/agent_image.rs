@@ -40,13 +40,7 @@ async fn codex_image_starts_offline_in_a_fresh_bounded_workspace() -> Result {
         },
     };
     let config = SandboxConfig::new(
-        ResourceLimits::new(
-            512 * 1024 * 1024,
-            1000,
-            128,
-            128 * 1024 * 1024,
-            1024 * 1024,
-        )?,
+        ResourceLimits::new(512 * 1024 * 1024, 1000, 128, 128 * 1024 * 1024, 1024 * 1024)?,
         IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
         IoLimits::new(256 * 1024, Duration::from_secs(15))?,
     )?;

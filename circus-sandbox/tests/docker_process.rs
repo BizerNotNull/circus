@@ -39,11 +39,7 @@ impl Fixture {
         )?;
         let sandbox = Sandbox::create(backend, config).await?;
         let id = sandbox.status().await?.instance_id.ok_or("missing id")?;
-        let fixture = Self {
-            sandbox,
-            host,
-            id,
-        };
+        let fixture = Self { sandbox, host, id };
         fixture.sandbox.start().await?;
         Ok(fixture)
     }

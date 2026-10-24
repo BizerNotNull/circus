@@ -795,6 +795,7 @@ fn state_with_staging(
         shutdown: CancellationToken::new(),
         create_unsettled: false,
         cleanup,
+        process: None,
     }
 }
 
