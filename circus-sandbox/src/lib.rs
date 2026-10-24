@@ -5,10 +5,11 @@
 //! commands in a Linux container through an explicit local Docker endpoint.
 //! Public types do not expose the Docker SDK.
 //!
-//! This is not a Kubernetes, gVisor, Kata, or Firecracker backend. Snapshot,
-//! pool, Git, and HTTP are not implemented. A readonly root plus tmpfs workspace
-//! means a Docker commit would not preserve workspace writes; a later snapshot
-//! must restore an archive.
+//! Docker workspace snapshots capture regular files and directories, including
+//! running tmpfs writes, into an in-process [`CodeSnapshot`]. Restore replaces
+//! a newly created sandbox's staging for its next start. This is not process,
+//! memory, VM, or Docker-commit checkpointing. Kubernetes, gVisor, Kata,
+//! Firecracker, pools, Git, and HTTP are not implemented.
 //!
 //! # Blocking
 //!

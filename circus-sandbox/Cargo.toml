@@ -12,8 +12,9 @@ cap-std = { version = "=4.0.3", default-features = false }
 cap-fs-ext = { version = "=4.0.3", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tempfile = "3.27.0"
+tar = "0.4.46"
 thiserror = "2.0.21"
-tokio = { version = "1.47", default-features = false, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util"] }
+tokio = { version = "1.47", default-features = false, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "fs"] }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 uuid = { version = "1", default-features = false, features = ["v4", "std"] }
 

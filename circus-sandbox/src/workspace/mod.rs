@@ -332,7 +332,7 @@ impl Workspace {
         }
     }
 
-    fn ensure_open(&self) -> Result<(), WorkspaceError> {
+    pub(crate) fn ensure_open(&self) -> Result<(), WorkspaceError> {
         if self.temp.is_none() {
             return Err(WorkspaceError::Closed);
         }

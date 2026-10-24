@@ -11,6 +11,7 @@ use cap_fs_ext::OpenOptionsSyncExt;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
 use cap_std::fs::{Dir, File, OpenOptions};
 
+mod archive;
 use super::{Workspace, WorkspaceError, check_path, lock_poisoned, read_regular};
 
 /// Why a code-snapshot capture or restore failed.
@@ -19,6 +20,30 @@ use super::{Workspace, WorkspaceError, check_path, lock_poisoned, read_regular};
 /// capture. [`WorkspaceError`] stays the file-operation error.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
+    /// Archive contained unsupported, malformed, or ambiguous data.
+    #[error("invalid workspace archive: {reason}")]
+    InvalidArchive {
+        /// Why the archive was rejected, without exposing backend SDK types.
+        reason: String,
+    },
+
+    /// A transport or restore limit was zero.
+    #[error("invalid archive limit")]
+    InvalidArchiveLimit,
+
+    /// Archive staging cleanup failed after import.
+    #[error("archive staging cleanup failed: {cleanup}")]
+    ArchiveCleanup {
+        /// Temporary import workspace retained so cleanup can be retried.
+        archive: Box<Workspace>,
+        #[source]
+        /// Why explicit cleanup failed.
+        cleanup: WorkspaceError,
+    },
+
+    /// Snapshot operation was interrupted before staging commit.
+    #[error("snapshot operation interrupted before staging commit")]
+    Interrupted,
     /// `max_total_bytes` or `max_entries` was zero.
     #[error(
         "snapshot budget must be positive, got max_total_bytes={max_total_bytes} max_entries={max_entries}"
@@ -44,10 +69,10 @@ pub enum SnapshotError {
 
     /// File bytes, not path lengths, exceeded the capture byte budget.
     ///
-    /// `actual` is the detected total including the probe byte that did not
-    /// fit; it is not an untrusted metadata file size. A single file still
-    /// fails first with [`WorkspaceError::LimitExceeded`] when its
-    /// per-file cap is tighter.
+    /// `actual` is the detected total: a bounded read's probe byte for direct
+    /// workspace capture, or declared payload lengths checked before archive
+    /// allocation. A file fails first with [`WorkspaceError::LimitExceeded`]
+    /// when its per-file cap is tighter.
     #[error("snapshot byte count {actual} exceeds capture budget {limit}")]
     ByteLimit {
         /// Configured total-byte cap.
@@ -151,8 +176,8 @@ impl SnapshotBudget {
 /// Owned, immutable copy of regular files and directories.
 ///
 /// Bytes live in this process only. Drop frees that memory; it does not delete
-/// a workspace. The value is not a process or memory checkpoint and does not
-/// imply Docker, container, or pool support. It is not serialized.
+/// a workspace. The value is not a process or memory checkpoint and is not
+/// serialized. Docker's workspace-only API reuses this immutable value.
 ///
 /// [`Self::restore`] creates a new [`Workspace`]. It does not overwrite the
 /// workspace that was captured.
@@ -185,9 +210,18 @@ enum Body {
 }
 
 impl CodeSnapshot {
+    pub(crate) fn from_workspace_archive(
+        file: std::fs::File,
+        expected_root: &str,
+        max_file_bytes: usize,
+        budget: SnapshotBudget,
+    ) -> Result<Self, SnapshotError> {
+        archive::from_workspace_archive(file, expected_root, max_file_bytes, budget)
+    }
+
     /// Per-file cap copied from the captured workspace.
     ///
-    /// Restore uses this same cap. It is not the capture byte budget.
+    /// [`Self::restore`] uses this cap; Docker restoration uses target limits.
     pub fn max_file_bytes(&self) -> usize {
         self.max_file_bytes
     }
@@ -213,6 +247,42 @@ impl CodeSnapshot {
     /// Blocks the calling thread.
     pub fn restore(&self) -> Result<Workspace, SnapshotError> {
         self.restore_with_file_cap(self.max_file_bytes)
+    }
+    pub(crate) fn restore_with_limits(
+        &self,
+        max_file_bytes: usize,
+        max_total_bytes: usize,
+    ) -> Result<Workspace, SnapshotError> {
+        if max_file_bytes == 0 || max_file_bytes == usize::MAX {
+            return Err(SnapshotError::InvalidArchiveLimit);
+        }
+        if max_total_bytes == 0 {
+            return Err(SnapshotError::InvalidArchiveLimit);
+        }
+        let mut total = 0usize;
+        for entry in &self.entries {
+            if let Body::File(bytes) = &entry.body {
+                if bytes.len() > max_file_bytes {
+                    return Err(SnapshotError::Workspace(WorkspaceError::LimitExceeded {
+                        limit: max_file_bytes,
+                        actual: bytes.len(),
+                    }));
+                }
+                total = total
+                    .checked_add(bytes.len())
+                    .ok_or_else(|| SnapshotError::ByteLimit {
+                        limit: max_total_bytes,
+                        actual: usize::MAX,
+                    })?;
+                if total > max_total_bytes {
+                    return Err(SnapshotError::ByteLimit {
+                        limit: max_total_bytes,
+                        actual: total,
+                    });
+                }
+            }
+        }
+        self.restore_with_file_cap(max_file_bytes)
     }
 
     pub(crate) fn restore_with_file_cap(
@@ -272,8 +342,8 @@ impl Workspace {
     /// rules as [`Self::write_file`]. `max_file_bytes` still caps each file.
     /// `budget` caps this call's retained bytes and entry count only.
     ///
-    /// Does not modify this workspace. Blocks the calling thread. Not a process
-    /// checkpoint and not Docker support.
+    /// Does not modify this workspace. Blocks the calling thread. Docker's
+    /// separate async snapshot API also captures running workspace archives.
     pub fn capture_code_snapshot(
         &self,
         budget: SnapshotBudget,

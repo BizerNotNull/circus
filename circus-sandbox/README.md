@@ -165,10 +165,16 @@ npm --prefix circus-sandbox/qa run architecture
 
 ## 变更
 
+### 未发布：Docker 工作区文件快照
+
+- 新增 `capture_workspace_snapshot` 和 `restore_workspace_snapshot`：使用 Docker archive API 捕获运行中 tmpfs 的普通文件/目录，并替换新建 sandbox 的启动暂存区；复用 `Arc<CodeSnapshot>`，不复制队列中的快照载荷。
+- 运行态捕获临时暂停后恢复，已暂停的 sandbox 保持暂停；独立限制 archive 传输、文件载荷与条目数量，恢复使用目标配置限制。清理失败保留所有权，完整语义见[后端文档](docs/docker-linux-runc.md#workspace-file-snapshots)。
+- 不代表进程、内存、VM checkpoint 或 Docker commit，不声明本次改动已经通过真实 Docker 验证。
+
 ### 未发布：当前能力与完整交付边界
 
 - 同步 workspace、受字节/条目预算约束的进程内代码快照、资源请求值校验，以及显式配置的异步 Linux Docker + runc 后端是当前实现；Docker API 的生命周期、命令/文件操作与前提见[后端文档](docs/docker-linux-runc.md)。
-- 进程内代码副本与尚未实现的容器/VM 快照明确区分；Kubernetes、containerd、gVisor、Kata、Firecracker、OCI 环境准备、Git、预启动与池仍保留在完整交付范围，没有 HTTP/RPC 或 Paseo 接入。
+- 工作区文件快照与尚未实现的进程/内存/VM checkpoint 明确区分；Kubernetes、containerd、gVisor、Kata、Firecracker、OCI 环境准备、Git、预启动与池仍保留在完整交付范围，没有 HTTP/RPC 或 Paseo 接入。
 - 本次修订只纠正文档事实，不声明发布、合并、检查或真实运行成功。
 
 ### 未发布：声明依赖架构门禁

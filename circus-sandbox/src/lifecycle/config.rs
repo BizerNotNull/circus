@@ -118,8 +118,8 @@ impl IsolationConfig {
     /// Builds a Linux isolation policy.
     ///
     /// `workspace_path` is an absolute container path, never a host path. It is
-    /// mounted as a bounded tmpfs. The root filesystem is read-only, so a later
-    /// Docker commit would not preserve workspace writes. Snapshot is unsupported.
+    /// mounted as a bounded tmpfs. The root filesystem is read-only, so Docker
+    /// commit omits workspace writes; workspace snapshots use archive capture.
     ///
     /// # Errors
     ///

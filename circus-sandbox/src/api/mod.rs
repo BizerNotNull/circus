@@ -5,3 +5,5 @@ pub use crate::lifecycle::{
     DockerSandbox, IoLimits, IsolationConfig, OWNER_LABEL_KEY, Ownership, RuntimeName,
     SandboxConfig, SandboxError, SandboxPhase, SandboxStatus, StagingError,
 };
+
+pub use crate::workspace::{CodeSnapshot, SnapshotBudget, SnapshotError};

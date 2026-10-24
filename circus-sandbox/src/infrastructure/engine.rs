@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use futures_util::StreamExt;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 const GUEST_FILES: &str = include_str!("guest_files.py");
 
@@ -277,6 +277,69 @@ impl Engine {
 
     pub(crate) async fn resume(&self, id: &str) -> Result<(), EngineError> {
         self.docker.unpause_container(id).await.map_err(map_err)
+    }
+
+    /// Download only the configured workspace, never the container root.
+    /// The anonymous file is deleted on close, including cancellation/errors.
+    pub(crate) async fn download_workspace_archive(
+        &self,
+        id: &str,
+        workspace: &str,
+        max_archive_bytes: u64,
+    ) -> Result<std::fs::File, EngineError> {
+        if max_archive_bytes == 0 {
+            return Err(file_error(
+                EngineErrorKind::Limit,
+                "archive byte limit must be positive",
+            ));
+        }
+        let file = tokio::task::spawn_blocking(tempfile::tempfile)
+            .await
+            .map_err(|err| {
+                file_error(
+                    EngineErrorKind::FileIo,
+                    &format!("archive tempfile task: {err}"),
+                )
+            })?
+            .map_err(|err| {
+                file_error(EngineErrorKind::FileIo, &format!("archive tempfile: {err}"))
+            })?;
+        let mut file = tokio::fs::File::from_std(file);
+        let options = bollard::query_parameters::DownloadFromContainerOptionsBuilder::new()
+            .path(workspace)
+            .build();
+        let mut stream = self.docker.download_from_container(id, Some(options));
+        let mut total = 0u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(map_err)?;
+            let size = u64::try_from(chunk.len())
+                .map_err(|_| file_error(EngineErrorKind::Limit, "archive chunk size overflow"))?;
+            total = total
+                .checked_add(size)
+                .filter(|total| *total <= max_archive_bytes)
+                .ok_or_else(|| {
+                    file_error(
+                        EngineErrorKind::Limit,
+                        "workspace archive exceeds transport byte limit",
+                    )
+                })?;
+            file.write_all(&chunk).await.map_err(|err| {
+                file_error(EngineErrorKind::FileIo, &format!("archive write: {err}"))
+            })?;
+        }
+        if total == 0 {
+            return Err(file_error(
+                EngineErrorKind::Protocol,
+                "empty workspace archive response",
+            ));
+        }
+        file.flush()
+            .await
+            .map_err(|err| file_error(EngineErrorKind::FileIo, &format!("archive flush: {err}")))?;
+        file.rewind().await.map_err(|err| {
+            file_error(EngineErrorKind::FileIo, &format!("archive rewind: {err}"))
+        })?;
+        Ok(file.into_std().await)
     }
 
     pub(crate) async fn upload(
