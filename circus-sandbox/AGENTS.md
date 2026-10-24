@@ -7,7 +7,7 @@
 已实现：
 
 - `Workspace` 同步 API：`new`、`write_file`、`read_file`、`create_dir_all`、`remove_file`、`cleanup`。方法会阻塞调用线程。
-- 临时工作区由 tempfile 新建，不接受宿主目录，公开 API 不暴露工作区根路径。
+- 临时工作区由 tempfile 新建，不接受宿主目录，公开 API 不暴露工作区根路径。Unix 上根目录在创建时用 `Builder::permissions` 请求 `0o700`，mode 是 `mkdir` 参数，不是事后 `chmod`，也不修改进程 umask。umask 只能再去掉权限位。这只让其他宿主用户不能遍历；同账户进程和特权进程不隔离。不要改回 tempfile 的 `0o777` 默认，也不要靠创建后改权限。Windows 不设置 Unix mode，目录创建行为保持平台默认。
 - 跨平台拒绝空路径、绝对路径、`..`、Windows 盘符/UNC 前缀和反斜杠；通过后的访问走 cap-std，防止符号链接逃逸和基于路径字符串的 TOCTOU。
 - 读写使用同一个 `max_file_bytes`。它是单个文件的上限：`new` 拒绝 `0` 和 `usize::MAX`，以便读取 `limit + 1` 时不溢出，也不按该上限预分配。它不是工作区总字节配额、文件数配额或宿主磁盘配额，当前也没有总配额 API。写满临时目录是宿主磁盘耗尽，不是 `LimitExceeded`。不要把这个参数写成沙箱配额，也不要在本 crate 增加总配额 API。后续真实进程或容器后端必须显式限制资源。
 - `write_file` 不是原子替换。已关闭、非法路径、超限、缺失父目录和非普通文件在截断前返回，这些失败不修改已有文件。打开普通文件后先把长度设为 0 再写入；此后的 I/O 失败可能截断或留下不完整内容。不要写成原子写入，也不要为此增加原子 API。
@@ -111,7 +111,7 @@
 - 测试：`cargo test --locked`。公开文件 API 集成测试是 `cargo test --locked --test workspace`。连示例一起编译用 `cargo test --locked --all-targets`。
 - 文档：`RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`。与 CI 的文档检查一致。
 - 文件示例：`cargo run --locked --example workspace`，必须实际写、读、删除并 `cleanup`，打印读到的字节，不能打印与 `Result` 无关的成功字样。资源示例：`cargo run --locked --example resource_policy`，构造合法请求、标明单位，再观察冲突请求的类型化拒绝；它不是后端 smoke。
-- 单元测试与模块共置，可覆盖符号链接逃逸、大于上限的已有文件读取，以及清理失败后的重试。读取超限时 `LimitExceeded.actual` 是探测到的 `limit + 1`，不是未知总长。公开 API 不能制造超限文件，所以 `tests/` 只验证写上限、恰好等于上限的读取、非法路径、嵌套目录/删除、重复 `cleanup` 与 `Closed`。符号链接用例的必要前提是进程能创建符号链接。Windows 需要开发者模式，或持有 `SeCreateSymbolicLinkPrivilege`。缺少该权限时对应用例必须失败，不能把 `PermissionDenied` 当成跳过并静默返回成功。不要修改宿主安全设置、组策略或开发者模式来让测试通过。需要容器或虚拟化的测试应显式标注环境要求并隔离资源；当前没有这类测试。
+- 单元测试与模块共置，可覆盖符号链接逃逸、大于上限的已有文件读取，以及清理失败后的重试。读取超限时 `LimitExceeded.actual` 是探测到的 `limit + 1`，不是未知总长。公开 API 不能制造超限文件，所以 `tests/` 只验证写上限、恰好等于上限的读取、非法路径、嵌套目录/删除、重复 `cleanup` 与 `Closed`。Unix 私有测试 `unix_workspace_root_has_no_group_or_other_and_round_trips` 断言工作区根 mode 没有组或其他权限，并仍能写、读和 `cleanup`；它不证明同账户或特权进程被隔离。符号链接用例的必要前提是进程能创建符号链接。Windows 需要开发者模式，或持有 `SeCreateSymbolicLinkPrivilege`。缺少该权限时对应用例必须失败，不能把 `PermissionDenied` 当成跳过并静默返回成功。不要修改宿主安全设置、组策略或开发者模式来让测试通过。需要容器或虚拟化的测试应显式标注环境要求并隔离资源；当前没有这类测试。
 - 架构域门禁：先安装 `cargo-modules` 0.28.0，再在仓库根目录执行 `npm --prefix circus-sandbox/qa ci` 和 `npm --prefix circus-sandbox/qa run architecture`。脚本必须用真实的 `cargo modules dependencies --lib --all-features --no-externs --no-owns` DOT，验证工具精确为 0.28.0，按语义 ID 和声明 kind 投影到顶层域，接受同域 getter/impl 递归，拒绝固定矩阵之外的跨域 `uses` 边。不得用 `--acyclic`、`--no-fns`/`--no-types`、手写 Rust 源码解析或忽略 analyzer 失败来绕过。矩阵、根门面规则和限制只在[工程说明](docs/engineering.md#架构域门禁)维护，不在本文件复制第二份。
 - 架构门禁只证明当前 crate 的跨域 `uses` 边满足 allowlist DAG；它不证明外部 SDK 暴露面，也不检查域内循环。`cargo-modules` 是 MPL-2.0 开发期 CLI 工具，`dotparser` 1.1.1 是 MIT 的 QA 依赖，都不是 crate 的运行时依赖。
 - 启动优化必须测量冷启动与复用路径，并验证复用不泄露状态。没有覆盖率百分比门槛。实际后端行为必须有运行证据，不能仅靠 mock；workspace 文件测试使用真实临时目录。Windows 编译成功不能当成隔离或 Linux 后端通过，也不能把缺少符号链接权限时的静默跳过当成符号链接约束已验证。
