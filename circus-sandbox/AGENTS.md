@@ -16,8 +16,9 @@
 - `remove_file` 是 cap-std `Dir::remove_file`：对最终组件 unlink，不跟随该符号链接。非目录项都会删，包括普通文件、符号链接、FIFO 和 socket。目录返回 `Io` 且保留。文档若写成“只删除普通文件”，纠正文档；不要加删除前的类型预检，那会和 unlink 竞态。`NotRegularFile` 只属于读写。
 - 同一 `Workspace` 的并发读写由内部 `RwLock` 保护。这只序列化本进程内对这一个值的调用，不是外部进程隔离，也不是 crash-safe 原子写。不要把这把锁写成原子替换或磁盘配额，也不要为此增加原子写入 API。
 - `runtime::ResourceLimits` / `ResourceLimitsError` 是后端中立的资源值模型，无 `Default`。内存/工作区为正字节数且不超过 `i64::MAX`，CPU 为正 milli-CPU（`1000` 等于一个 CPU），进程数为正；工作区不超过内存，单文件上限不超过工作区。单文件上限为 `1..usize::MAX`，拒绝 `0` 和 `usize::MAX`，与 `Workspace::new` 一致。标量错误先于关联错误。校验不提供聚合准入/预留、内核强制或隔离，不附加宿主容量或 Docker 专用约束。
+- `Workspace::capture_code_snapshot` 使用字节/条目预算捕获普通文件和目录，拒绝符号链接与特殊节点；`CodeSnapshot::restore` 创建独立工作区。这是进程内存中的有界代码快照，进程退出后不持久存在，不是容器/VM 文件系统、进程或客户机内存检查点。
 
-未实现，不得写成现有能力：Kubernetes、containerd、HTTP/RPC、Git clone/worktree、沙箱池、快照、工作区总配额执行、宿主磁盘配额、Paseo 接入。当前 Docker slice 的范围和限制见 [Linux Docker + runc](docs/docker-linux-runc.md) 及 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。不修改 `../circus-paseo/`。
+未实现，不得写成现有能力：Kubernetes、containerd、HTTP/RPC、Git clone/worktree、沙箱池、容器/VM 运行时快照、工作区总配额执行、宿主磁盘配额、Paseo 接入。已有内存代码快照不代表运行时快照完成。当前 Docker slice 的范围和限制见 [Linux Docker + runc](docs/docker-linux-runc.md) 及 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。不修改 `../circus-paseo/`。
 
 用户说明见 [README.md](README.md)，工程命令与门禁边界见 [docs/engineering.md](docs/engineering.md)，完整目标及交付记录入口见 [docs/delivery-plan.md](docs/delivery-plan.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。当前检出已有 Workspace crate、许可证策略、元数据/质量/安全/Rust 工作流，但开发约定和工作流存在仍然不是“全部领域已交付”或检查已通过。
 
@@ -25,7 +26,7 @@
 
 当前调用路径包括：workspace 调用方 → `circus_sandbox::Workspace` → cap-std `Dir`，资源请求调用方 → `runtime::ResourceLimits`，以及 Docker 调用方 → `api` → `lifecycle` → `infrastructure::Engine` → Docker Engine。Docker 后端不泄露 bollard 类型，所有状态修改由 lifecycle worker 串行拥有。
 
-尚未实现的目标链路（Kubernetes、containerd、池、快照、HTTP/RPC 等）仍然只是规划，不得按目录存在推断能力。
+尚未实现的目标链路（Kubernetes、containerd、池、容器/VM 运行时快照、HTTP/RPC 等）仍然只是规划，不得按目录存在推断能力。
 
 | 目录                  | 职责与边界                                                                                                                                                                                           |
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -34,11 +35,11 @@
 | `src/infrastructure/` | Docker、Kubernetes、containerd 等部署与调度适配；负责资源分配，不承担隔离机制实现。                                                                                                                  |
 | `src/runtime/`        | 已实现后端中立的资源请求值校验，不执行资源限制。当前 Docker + runc 隔离策略由 `infrastructure`/`lifecycle` 显式配置并验证；Kubernetes、containerd、gVisor、Kata Containers、Firecracker 等仍未实现。 |
 | `src/environment/`    | OCI 镜像、基础环境、依赖准备与可复现环境标识。                                                                                                                                                       |
-| `src/workspace/`      | 已实现：能力目录内的相对文件读写、建目录、删除与回收。尚未实现 Git clone、worktree 或代码副本管理。                                                                                                  |
+| `src/workspace/`      | 已实现：能力目录内的相对文件读写、建目录、删除、回收，以及有界内存代码快照与新工作区恢复。尚未实现 Git clone、worktree 或代码副本管理。                                                              |
 | `src/pool/`           | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。                                                                                                                             |
 | `tests/`              | `tests/workspace.rs` 验证公开 workspace API；`tests/docker_sandbox.rs` 是默认忽略、仅连接显式真实 Docker Engine 的 Linux + runc 集成测试。                                                           |
 
-Kubernetes、containerd、池与快照仍保留为规划目标；当前只有 Docker + runc 适配器支持真实容器路径，禁止用空适配器声称支持。运行时必须先消费 workspace 文件契约再开发。
+Kubernetes、containerd、池与容器/VM 运行时快照仍保留为规划目标；已有内存代码快照不等于这些目标已完成。当前只有 Docker + runc 适配器支持真实容器路径，禁止用空适配器声称支持。运行时必须先消费 workspace 文件契约再开发。
 
 ## Code Conventions & Common Patterns
 
