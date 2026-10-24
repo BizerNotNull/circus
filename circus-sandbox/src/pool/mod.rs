@@ -51,7 +51,9 @@ impl PoolConfig {
 
 /// A coherent actor snapshot. Categories are disjoint. `absent` counts slots
 /// whose containers are confirmed absent during shutdown; all categories sum
-/// to `capacity`. Cleanup failures continue occupying their original slot.
+/// to `capacity`. Cleanup failures continue occupying their original slot:
+/// `retiring` means destruction is in progress and no attempt has failed yet,
+/// while `cleanup_required` means the latest attempt could not confirm absence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolStatus {
     pub capacity: usize,

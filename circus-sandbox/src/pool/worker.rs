@@ -35,7 +35,10 @@ enum State {
     Creating,
     Ready(Arc<DockerSandbox>),
     Leased { sandbox: Arc<DockerSandbox>, expires: Instant },
-    Retiring(Arc<DockerSandbox>),
+    Retiring {
+        sandbox: Arc<DockerSandbox>,
+        receipt: CleanupReceipt,
+    },
     CleanupRequired {
         sandbox: Option<Arc<DockerSandbox>>,
         receipt: Option<CleanupReceipt>,
@@ -161,8 +164,11 @@ impl Worker {
     }
 
     fn retire(&mut self, slot: usize, sandbox: Arc<DockerSandbox>) {
-        self.slots[slot].state = State::Retiring(sandbox.clone());
         let receipt = sandbox.revoke();
+        self.slots[slot].state = State::Retiring {
+            sandbox,
+            receipt: receipt.clone(),
+        };
         self.jobs.push(Box::pin(async move {
             let result = receipt.wait().await.map(|_| ())
                 .map_err(|source| failure("revoke and destroy", source));
@@ -239,12 +245,14 @@ impl Worker {
                     if !self.closing { self.create(slot); }
                 }
                 Err(source) => {
-                    let sandbox = match &self.slots[slot].state {
-                        State::Retiring(sandbox) => Some(sandbox.clone()),
+                    let (sandbox, receipt) = match &self.slots[slot].state {
+                        State::Retiring { sandbox, receipt } => {
+                            (Some(sandbox.clone()), Some(receipt.clone()))
+                        }
                         _ => unreachable!("cleanup future owns a retiring slot"),
                     };
                     self.slots[slot].state = State::CleanupRequired {
-                        sandbox, receipt: None, waiting: false,
+                        sandbox, receipt, waiting: false,
                         source: source.clone(), retry: Instant::now() + Duration::from_secs(1),
                     };
                     for reply in self.slots[slot].returns.drain(..) {
@@ -302,7 +310,7 @@ impl Worker {
                         if let Some(reply) = reply { owned.returns.push(reply); }
                         self.retire(slot, sandbox);
                     }
-                    State::Retiring(_) => { if let Some(reply) = reply { owned.returns.push(reply); } }
+                    State::Retiring { .. } => { if let Some(reply) = reply { owned.returns.push(reply); } }
                     State::CleanupRequired { source, .. } => {
                         if let Some(reply) = reply {
                             let _ = reply.send(Err(PoolError::Operation { source: source.clone() }));
@@ -394,11 +402,17 @@ impl Worker {
             retiring: 0, cleanup_required: 0, absent: 0, closing: self.closing,
         };
         for slot in &self.slots {
-            match slot.state {
+            match &slot.state {
                 State::Creating => status.creating += 1,
                 State::Ready(_) => status.ready += 1,
                 State::Leased { .. } => status.leased += 1,
-                State::Retiring(_) => status.retiring += 1,
+                State::Retiring { receipt, .. } => {
+                    if receipt.last_attempt_failed() {
+                        status.cleanup_required += 1;
+                    } else {
+                        status.retiring += 1;
+                    }
+                }
                 State::CleanupRequired { .. } => status.cleanup_required += 1,
                 State::Absent => status.absent += 1,
             }
