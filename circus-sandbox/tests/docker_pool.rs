@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use circus_sandbox::{
-    BackendConfig, CodeSnapshot, CommandRequest, DockerPool, IoLimits, IsolationConfig, PoolConfig,
-    PoolError, PoolStatus, ResourceLimits, Sandbox, SandboxConfig, SandboxPhase, SnapshotBudget,
+    BackendConfig, CodeSnapshot, CommandRequest, IoLimits, IsolationConfig, PoolConfig, PoolError,
+    PoolStatus, ResourceLimits, Sandbox, SandboxConfig, SandboxPhase, SandboxPool, SnapshotBudget,
     Workspace,
 };
 
@@ -115,7 +115,7 @@ fn accounted(status: &PoolStatus) {
     );
 }
 
-async fn ready(pool: &DockerPool, count: usize) -> Result {
+async fn ready(pool: &SandboxPool, count: usize) -> Result {
     tokio::time::timeout(WAIT, async {
         loop {
             let status = pool.status().await?;
@@ -155,7 +155,7 @@ async fn baseline_single_use_release_and_drop_are_real() -> Result {
     let config = config()?;
     let docker = docker(&backend)?;
     let bytes = b"\0baseline\xff\n";
-    let pool = DockerPool::create(PoolConfig::new(
+    let pool = SandboxPool::create(PoolConfig::new(
         backend.clone(),
         config,
         1,
@@ -208,7 +208,7 @@ async fn leased_capacity_times_out_and_cancelled_waiter_does_not_steal_refill() 
     let _serial = DOCKER_TEST.lock().await;
     let backend = backend()?;
     let docker = docker(&backend)?;
-    let pool = DockerPool::create(PoolConfig::new(
+    let pool = SandboxPool::create(PoolConfig::new(
         backend,
         config()?,
         1,
@@ -250,7 +250,7 @@ async fn concurrent_leases_are_bounded_and_shutdown_revokes_without_pruning() ->
     let survivor = Sandbox::create(backend.clone(), config.clone()).await?;
     survivor.start().await?;
     let survivor_id = id(&survivor).await?;
-    let pool = DockerPool::create(PoolConfig::new(
+    let pool = SandboxPool::create(PoolConfig::new(
         backend.clone(),
         config,
         2,
@@ -334,7 +334,7 @@ async fn preparation_failure_preserves_source_and_any_cleanup_owner() -> Result 
     let docker = docker(&backend)?;
     let before = owned_ids(&docker).await?;
     // A real container can be created, but its 1024-byte file cap cannot restore this baseline.
-    let outcome = DockerPool::create(PoolConfig::new(
+    let outcome = SandboxPool::create(PoolConfig::new(
         backend.clone(),
         config,
         1,
@@ -394,7 +394,7 @@ async fn lease_ttl_revokes_running_child_and_refills_without_touching_survivor()
     let survivor = Sandbox::create(backend.clone(), config.clone()).await?;
     survivor.start().await?;
     let survivor_id = id(&survivor).await?;
-    let pool = DockerPool::create(PoolConfig::new(
+    let pool = SandboxPool::create(PoolConfig::new(
         backend.clone(),
         config,
         1,

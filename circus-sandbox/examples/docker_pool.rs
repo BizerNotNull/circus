@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use circus_sandbox::{
-    BackendConfig, CommandRequest, DockerPool, IoLimits, IsolationConfig, PoolConfig, PoolError,
-    ResourceLimits, Sandbox, SandboxConfig, SnapshotBudget, Workspace,
+    BackendConfig, CommandRequest, IoLimits, IsolationConfig, PoolConfig, PoolError,
+    ResourceLimits, Sandbox, SandboxConfig, SandboxPool, SnapshotBudget, Workspace,
 };
 
 #[tokio::main]
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cold_cleanup?;
 
     let warmup_start = Instant::now();
-    let pool = match DockerPool::create(PoolConfig::new(
+    let pool = match SandboxPool::create(PoolConfig::new(
         backend,
         config,
         1,

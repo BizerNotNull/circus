@@ -26,7 +26,8 @@ containerd 后端是可选 Cargo feature：`--features containerd`。它引入 `
 ```bash
 cargo build --locked --features containerd
 CIRCUS_CONTAINERD=1 cargo test --locked --features containerd \
-  --test containerd_sandbox --test containerd_snapshot --test containerd_process -- --ignored --test-threads=1
+  --test containerd_sandbox --test containerd_snapshot --test containerd_process \
+  --test containerd_pool -- --ignored --test-threads=1
 ```
 
 ## 配置
@@ -96,27 +97,35 @@ exec 与交互进程通过 runc shim 的 FIFO：
 
 ## 测试
 
-三组集成测试默认忽略，只有显式设置 `CIRCUS_CONTAINERD=1` 才连接真实 daemon：
+四组集成测试默认忽略，只有显式设置 `CIRCUS_CONTAINERD=1` 才连接真实 daemon：
 
 ```bash
 CIRCUS_CONTAINERD=1 \
 CIRCUS_CONTAINERD_SOCKET=/run/containerd/containerd.sock \
 CIRCUS_CONTAINERD_IMAGE=python:3.12-slim \
-cargo test --locked --test containerd_sandbox --test containerd_snapshot --test containerd_process -- --ignored
+cargo test --locked --features containerd --test containerd_sandbox --test containerd_snapshot --test containerd_process --test containerd_pool -- --ignored
 ```
 
 - `containerd_sandbox`：生命周期、exec argv/退出码/共享输出预算、文件写入/读取/删除、pause/resume、缺失镜像类型化错误且新 namespace 无残留、并发创建、只读 status。
 - `containerd_snapshot`：运行中 guest tmpfs 的 capture，并 restore 到新容器；capture 后源容器仍可写。
 - `containerd_process`：交互进程 stdout/stdin/stderr/退出码、取消导致整容器清理、输出超限导致整容器清理。
+- `containerd_pool`：`SandboxPool`（后端中立，Docker 与 containerd 通用）在真实 containerd 上预热容量 2、`status()` 计数、租约写入私有标记后 release 并经 `ctr` 确认容器与 snapshot 均不存在且下一租约看不到标记、容量 1 的 `AcquireTimeout` 后重新获取、短 TTL 撤销等待睡眠 Python 子进程的 exec 并补充全新容器、持有租约时 `shutdown()` 销毁全部槽位且幂等、坏镜像准备失败留下类型化错误且无容器。租约单次使用，release、TTL 与 shutdown 都真实销毁；`ResourceLimits` 仍是每容器限制，不是宿主聚合准入。
 - 每个 teardown 都用 `ctr -n <ns> containers list -q` 与 `ctr -n <ns> snapshots --snapshotter overlayfs list` 确认容器和 snapshot 不存在。
 
-本地实际执行（WSL2，root）：
+本地实际执行（2026-10-25；WSL2 root 运行 Rust 与 containerd，Windows Node 24.18.0 在仓库根运行 QA）：
 
 ```text
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --all-targets --features containerd -- -D warnings
 cargo test --locked
-cargo test --locked --test containerd_sandbox -- --ignored --test-threads=1
-cargo test --locked --test containerd_snapshot -- --ignored --test-threads=1
-cargo test --locked --test containerd_process -- --ignored --test-threads=1
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
+CIRCUS_CONTAINERD=1 CIRCUS_CONTAINERD_SOCKET=/run/containerd/containerd.sock \
+CIRCUS_CONTAINERD_NAMESPACE=default CIRCUS_CONTAINERD_IMAGE=python:3.12-slim \
+  cargo test --locked --features containerd --test containerd_pool -- --ignored
+npm --prefix circus-sandbox/qa run check
+npm --prefix circus-sandbox/qa test
+node circus-sandbox/qa/architecture.mjs
 ```
+
+`containerd_pool` 的实际结果是 `6 passed; 0 failed`（约 13.5 秒）。运行前后 `ctr -n default containers list -q` 均为空；`ctr -n default snapshots --snapshotter overlayfs list` 在运行后只保留镜像的 5 个 committed 层（与运行前计数相同），没有残留 active snapshot。该套件自身用进程内互斥串行化，因此未额外传 `--test-threads=1`。
