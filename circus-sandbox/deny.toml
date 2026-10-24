@@ -28,6 +28,9 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     # unicode-ident 1.0.27 is (MIT OR Apache-2.0) AND Unicode-3.0.
     "Unicode-3.0",
+    # matchit 0.8.4 (through axum) is MIT AND BSD-3-Clause; permissive, OSI and
+    # FSF approved, and required by the only selected HTTP framework.
+    "BSD-3-Clause",
 ]
 exceptions = []
 
