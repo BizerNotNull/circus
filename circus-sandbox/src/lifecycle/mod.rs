@@ -69,6 +69,7 @@ pub struct SandboxStatus {
 pub struct CommandRequest {
     pub argv: Vec<String>,
     pub timeout: Duration,
+    /// Maximum combined stdout and stderr bytes; exactly this many bytes is accepted.
     pub output_limit_bytes: usize,
 }
 

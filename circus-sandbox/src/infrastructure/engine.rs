@@ -110,8 +110,12 @@ struct FileRequest<'a> {
 
 struct ExecIo<'a> {
     stdin: Option<&'a [u8]>,
-    output_limit: usize,
-    stderr_limit: usize,
+    output_limits: OutputLimits,
+}
+
+enum OutputLimits {
+    Aggregate(usize),
+    Separate { stdout: usize, stderr: usize },
 }
 
 impl Engine {
@@ -403,8 +407,12 @@ impl Engine {
                 &argv,
                 ExecIo {
                     stdin: Some(input),
-                    output_limit: max_bytes.saturating_add(1),
-                    stderr_limit: 4096,
+                    output_limits: OutputLimits::Separate {
+                        stdout: max_bytes.checked_add(1).ok_or_else(|| {
+                            file_error(EngineErrorKind::Limit, "file output bound overflow")
+                        })?,
+                        stderr: 4096,
+                    },
                 },
             )
             .await?;
@@ -443,8 +451,7 @@ impl Engine {
             argv,
             ExecIo {
                 stdin: None,
-                output_limit,
-                stderr_limit: output_limit,
+                output_limits: OutputLimits::Aggregate(output_limit),
             },
         )
         .await
@@ -460,8 +467,7 @@ impl Engine {
     ) -> Result<ExecDone, EngineError> {
         let ExecIo {
             stdin,
-            output_limit,
-            stderr_limit,
+            output_limits,
         } = io;
         let created = self
             .docker
@@ -518,10 +524,18 @@ impl Engine {
                 match item.map_err(map_err)? {
                     bollard::container::LogOutput::StdOut { message }
                     | bollard::container::LogOutput::Console { message } => {
-                        push_bounded(&mut stdout, &message, output_limit)?;
+                        let (other_len, limit) = match output_limits {
+                            OutputLimits::Aggregate(limit) => (stderr.len(), limit),
+                            OutputLimits::Separate { stdout, .. } => (0, stdout),
+                        };
+                        push_bounded(&mut stdout, &message, other_len, limit)?;
                     }
                     bollard::container::LogOutput::StdErr { message } => {
-                        push_bounded(&mut stderr, &message, stderr_limit)?;
+                        let (other_len, limit) = match output_limits {
+                            OutputLimits::Aggregate(limit) => (stdout.len(), limit),
+                            OutputLimits::Separate { stderr, .. } => (0, stderr),
+                        };
+                        push_bounded(&mut stderr, &message, other_len, limit)?;
                     }
                     bollard::container::LogOutput::StdIn { .. } => {}
                 }
@@ -700,8 +714,18 @@ fn file_error(kind: EngineErrorKind, message: impl Into<String>) -> EngineError 
     }
 }
 
-fn push_bounded(buf: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<(), EngineError> {
-    if buf.len().saturating_add(chunk.len()) > limit {
+fn push_bounded(
+    buf: &mut Vec<u8>,
+    chunk: &[u8],
+    other_len: usize,
+    limit: usize,
+) -> Result<(), EngineError> {
+    if buf
+        .len()
+        .checked_add(other_len)
+        .and_then(|used| used.checked_add(chunk.len()))
+        .is_none_or(|total| total > limit)
+    {
         return Err(file_error(
             EngineErrorKind::Limit,
             "command output exceeded the byte limit",
