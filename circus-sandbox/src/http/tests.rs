@@ -19,7 +19,7 @@ use crate::api::Sandbox;
 use crate::infrastructure::{
     Backend, Capabilities, CommonSpec, EngineError, EngineErrorKind, ExecDone, HostReport,
     InstanceId, OutputLimit as EngineOutputLimit, OutputPhase as EngineOutputPhase, PrepareError,
-    ProcessSpec, Recovered, UploadEntry,
+    ProcessSpec, Recovered, UploadEntry, WorkspaceEntry,
 };
 
 use super::HttpConfig;
@@ -59,7 +59,7 @@ impl Backend for FakeBackend {
         Capabilities {
             pause_resume: true,
             file_transport: true,
-            workspace_archive: true,
+            workspace_snapshot: true,
         }
     }
 
@@ -172,13 +172,15 @@ impl Backend for FakeBackend {
         async { Ok(HostReport::default()) }
     }
 
-    fn download_workspace_archive(
+    fn list_workspace(
         &self,
         _id: &InstanceId,
+        _user: &str,
         _workspace: &str,
-        _max_archive_bytes: u64,
-    ) -> impl Future<Output = Result<std::fs::File, EngineError>> + Send {
-        async { Err(unused("download_workspace_archive")) }
+        _max_bytes: u64,
+        _max_entries: usize,
+    ) -> impl Future<Output = Result<Vec<WorkspaceEntry>, EngineError>> + Send {
+        async { Err(unused("list_workspace")) }
     }
 }
 

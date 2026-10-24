@@ -208,9 +208,7 @@ fn from_snapshot(error: SnapshotError) -> ApiError {
         | SnapshotError::NotRegular { .. }
         | SnapshotError::NotPortable { .. } => ApiError::invalid_request(),
         SnapshotError::Workspace(error) => from_workspace(error),
-        SnapshotError::ArchiveCleanup { .. } | SnapshotError::RestoreCleanup { .. } => {
-            ApiError::cleanup_required()
-        }
+        SnapshotError::RestoreCleanup { .. } => ApiError::cleanup_required(),
         SnapshotError::Interrupted => ApiError::cancelled(),
     }
 }

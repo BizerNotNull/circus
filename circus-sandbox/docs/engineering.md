@@ -65,13 +65,13 @@ facade           -> api, pool, lifecycle, environment, workspace, runtime, error
 
 ## 主机边界
 
-- 隔离证据必须来自 Linux 上可达的 Docker Engine，并且内存、CPU 与 pids 由显式配置限制。Windows 编译成功不是隔离通过。当前 Docker + runc 适配器代码已交付，但本检出未记录真实 Engine 运行证据。
+- 隔离证据必须来自 Linux 上可达的 Docker Engine，并且内存、CPU 与 pids 由显式配置限制。Windows 编译成功不是隔离通过。当前 Docker + runc 适配器代码已交付；`Sandbox Docker` 工作流会在 GitHub 托管运行器的真实 Engine 上执行忽略套件，但本检出未记录它的实际运行结果，因此仍不能写成已有真实 Engine 证据。
 - 验证只能操作自己创建的容器和卷，禁止全局 prune 或清理无关资源。
 - Rust 1.99.1 是项目基线，不是本机清单。工具链文件、组件和第三方库约束只维护在 [沙箱指南](../AGENTS.md)。rust-analyzer 不是构建依赖。
 
 ## 检查与安全门禁
 
-Paseo CI 与沙箱门禁互不代替。Action 的完整 SHA 以工作流文件为准，不在本文复制第二份清单。本检出包含质量、安全、Rust、架构域和 PR 元数据工作流；三个 CodeQL 配置各自限制分析范围，不宣称覆盖全部仓库。
+Paseo CI 与沙箱门禁互不代替。Action 的完整 SHA 以工作流文件为准，不在本文复制第二份清单。本检出包含质量、安全、Rust、Docker、架构域和 PR 元数据工作流；三个 CodeQL 配置各自限制分析范围，不宣称覆盖全部仓库。
 
 | 路径                                                     | 本检出                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -89,6 +89,8 @@ Paseo CI 与沙箱门禁互不代替。Action 的完整 SHA 以工作流文件�
 
 `.github/workflows/sandbox-architecture.yml`（`Sandbox architecture`）与质量工作流同触发、无路径过滤。`architecture (ubuntu-latest)` 与 `architecture (windows-latest)` 是独立的 OS 检查上下文，超时 20 分钟，只安装 Node 24.18.0、Rust 1.99.1 和 cargo-modules 0.28.0，再用真实 crate 图执行架构域检查；权限仅 `contents: read`，不使用 secrets 或 `pull_request_target`，也不修改既有检查名。矩阵、限制与本地命令见[架构域门禁](#架构域门禁)。
 
+`.github/workflows/sandbox-docker.yml`（`Sandbox Docker`）只在 `pull_request` 与 `workflow_dispatch` 触发，无路径过滤；权限仅 `contents: read`，并发取消同一 ref 的旧运行。job `docker (<suite>)` 在 `ubuntu-latest` 上运行 `fail-fast: false` 的八项矩阵：`docker_sandbox`、`docker_snapshot`、`docker_pool`、`docker_hardening`、`docker_staging`、`docker_environment`、`docker_environment_prep`、`docker_process`，超时 60 分钟。每个 job 依次 checkout、安装 Rust 1.99.1（minimal）、`docker pull python:3.12-slim`、打印 Engine 版本与镜像 ID/RepoDigests，然后以 `CIRCUS_DOCKER_SANDBOX=1`、`CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock`、`CIRCUS_DOCKER_IMAGE=python:3.12-slim`、`CIRCUS_DOCKER_ARCH=amd64` 执行 `cargo test --locked --test <suite> -- --ignored`。它只在 GitHub 托管运行器上提供真实 Engine 证据：不要求本地 Docker，也不运行 Paseo；工作流存在、未运行、取消或失败都不是隔离已通过的声明。未加入 `agent-image` job：`circus-sandbox/images/codex/Dockerfile` 构建需要网络（`apt-get`、`npm ci` 和基础镜像拉取），不能离线构建，该镜像验收仍是显式 `CIRCUS_AGENT_IMAGE` 的手动流程。
+
 `CodeQL QA` 超时 30 分钟。语言是 `javascript-typescript`，`build-mode` 为 none，查询集为 `security-extended`，配置文件是 `.github/codeql/sandbox-qa.yml`。权限是 contents、actions 的 read，以及 `security-events: write`。只分析 QA 源码，不分析 actions 或 Rust，也不扫描 Paseo。分析或上传失败则 job 失败；告警是否阻断合并属于 ruleset，不由分析工作流本身保证。
 
 完整历史密钥扫描的本地入口（仓库根目录）：
@@ -101,7 +103,7 @@ bash .github/scripts/sandbox-gitleaks.sh
 
 根 `.gitattributes` 仅对 `.github/scripts/sandbox-*.sh` 固定 LF，避免 Windows 检出的 CRLF 让 WSL/Bash 把 `pipefail` 等参数末尾的回车当作内容；不改变 Paseo 文件的换行策略。行尾约定不代替脚本的实际运行验证。
 
-Rust fmt、clippy、构建、测试、文档、example、cargo-deny 和 Rust CodeQL 均已配置。Cargo 命令在 `circus-sandbox/` 执行，完整命令表见 [README](../README.md#命令)。`deny.toml` 已配置显式许可证 allow、漏洞、来源与依赖策略，细节见沙箱指南；dependency review 不替代许可证策略。某次实际运行结果只记在对应提交的 PR。
+Rust fmt、clippy、构建、测试、文档、example、cargo-deny、Rust CodeQL 和 `Sandbox Docker` 均已配置。Cargo 命令在 `circus-sandbox/` 执行，完整命令表见 [README](../README.md#命令)。`deny.toml` 已配置显式许可证 allow、漏洞、来源与依赖策略，细节见沙箱指南；dependency review 不替代许可证策略。某次实际运行结果只记在对应提交的 PR。
 
 显式授权源目录的代码副本，在 `circus-sandbox/` 执行 `cargo test --locked --test code_copy` 和 `cargo run --locked --example code_copy`。前者用真实临时源验证内容、预算及拒绝边界，后者读取实际复制字节并显式清理源和目的工作区；都不要求 Git、Docker、沙箱池或运行时，不构成进程隔离证据。Windows 符号链接用例要求开发者模式或 `SeCreateSymbolicLinkPrivilege`，权限不足不得静默跳过。
 

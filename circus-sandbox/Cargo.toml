@@ -26,7 +26,6 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
 tempfile = "3.27.0"
-tar = "0.4.46"
 thiserror = "2.0.21"
 tokio = { version = "1.47", default-features = false, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "process", "signal", "fs"] }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
@@ -39,6 +38,7 @@ rustix = { version = "1.1", default-features = false, features = ["std", "proces
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tokio = { version = "1.47", default-features = false, features = ["process"] }
 
 [[example]]
 name = "http_api"

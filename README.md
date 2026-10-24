@@ -11,7 +11,7 @@ Circus 是面向 AI Agents 的沙箱仓库。当前 Rust 实现在 [circus-sandb
 - `Workspace::capture_code_snapshot` 在显式字节与条目预算内复制普通文件和空目录，恢复总是创建新工作区；拒绝符号链接及特殊节点。这是进程内文件副本，不是进程、内存或容器快照。
 - Kubernetes、containerd、gVisor、Kata、Firecracker 以及容器/VM 运行时快照（进程或客户机内存检查点）仍未实现；OCI 环境准备、Git clone/worktree、工作区文件快照、预启动池与认证 HTTP API 已实现；没有 RPC 或 Paseo 接入。这些仍是完整七领域交付范围，不是因当前 Docker slice 而取消的目标。支持边界与真实后端运行前提见[沙箱说明](circus-sandbox/README.md)。
 - 文档与手写 Rust 规模检查在 `circus-sandbox/qa`，QA 运行时固定 Node.js 24.18.0。实际命令、扫描范围和检查边界见 [工程说明](circus-sandbox/docs/engineering.md)，完整交付目标见 [交付计划](circus-sandbox/docs/delivery-plan.md)。
-- 当前检出同时包含 `PR title`、`Sandbox quality`、`CodeQL QA`、`Gitleaks`、`Dependency review`、`CodeQL (actions)`、`Sandbox Rust`（Windows/Linux 源码检查、cargo-deny 和 Rust CodeQL）和 `Sandbox architecture`（Windows/Linux 语义架构域门禁）。标题元数据检查不安装依赖，也不触发其他工作流的重型检查。这些检查互不代替，也不证明进程或容器隔离。某次运行结果只记在对应 PR；安全扫描约定见 [安全说明](.github/sandbox-security.md)。
+- 当前检出同时包含 `PR title`、`Sandbox quality`、`CodeQL QA`、`Gitleaks`、`Dependency review`、`CodeQL (actions)`、`Sandbox Rust`（Windows/Linux 源码检查、cargo-deny 和 Rust CodeQL）、`Sandbox Docker`（GitHub 托管 Linux 运行器上的真实 Engine 忽略套件）和 `Sandbox architecture`（Windows/Linux 语义架构域门禁）。标题元数据检查不安装依赖，也不触发其他工作流的重型检查。这些检查互不代替，也不证明进程或容器隔离。某次运行结果只记在对应 PR；安全扫描约定见 [安全说明](.github/sandbox-security.md)。
 - 合并通过 PR 完成，不要求非作者批准；获得任务授权后，可在最新 CI 通过、适用审查问题闭环且无冲突时自动 squash merge，不绕过保护。工作流存在不等于已配置为 required status check。
 - Paseo CI 只覆盖 Paseo；沙箱任务不修改该树，Paseo 规则见 [circus-paseo/CLAUDE.md](circus-paseo/CLAUDE.md)。
 

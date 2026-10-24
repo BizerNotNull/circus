@@ -1,3 +1,4 @@
+use std::process::Command;
 use std::time::Duration;
 
 use circus_sandbox::environment::{
@@ -25,6 +26,32 @@ fn platform() -> TestResult<ImagePlatform> {
 
 fn local_image() -> String {
     std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into())
+}
+
+fn host(endpoint: &str) -> String {
+    if endpoint.starts_with('/') {
+        format!("unix://{endpoint}")
+    } else {
+        endpoint.to_string()
+    }
+}
+
+/// Requires the engine to report the exact owned container gone after destroy.
+/// There is no Drop fallback: an unconfirmed removal fails the test.
+fn confirm_absent(host: &str, id: &str) -> TestResult {
+    let inspected = Command::new("docker")
+        .args(["--host", host, "inspect", id])
+        .output()?;
+    if inspected.status.success() {
+        return Err(format!("container {id} still exists after destroy").into());
+    }
+    let stderr = String::from_utf8_lossy(&inspected.stderr);
+    let absent = stderr.to_ascii_lowercase();
+    // The CLI wording varies by version: "No such object" or "no such object".
+    if !(absent.contains("no such") || absent.contains("not found")) {
+        return Err(format!("could not confirm absence of {id}: {stderr}").into());
+    }
+    Ok(())
 }
 
 fn request(reference: String) -> TestResult<ImageRequest> {
@@ -67,11 +94,11 @@ async fn local_image_resolves_immutable_id_and_runs() -> TestResult {
         IoLimits::new(64 * 1024, Duration::from_secs(10))?,
     )?;
     // Sandbox generates a unique owner/name; this test owns exactly this container.
-    let sandbox = Sandbox::create(
-        BackendConfig::docker(endpoint()?, prepared.id(), "runc"),
-        config,
-    )
-    .await?;
+    let endpoint = endpoint()?;
+    let host = host(&endpoint);
+    let backend = BackendConfig::docker(endpoint, prepared.id(), "runc");
+    let sandbox = Sandbox::create(backend, config).await?;
+    let id = sandbox.status().await?.instance_id.ok_or("missing id")?;
     let execution: TestResult<_> = async {
         sandbox.start().await?;
         let output = sandbox
@@ -91,6 +118,7 @@ async fn local_image_resolves_immutable_id_and_runs() -> TestResult {
     // Explicit cleanup runs even when start/exec returns an error, before checking output.
     sandbox.destroy().await?;
     assert_eq!(sandbox.status().await?.phase, SandboxPhase::Destroyed);
+    confirm_absent(&host, &id)?;
     let output = execution?;
     assert_eq!(output.exit_code, 0);
     assert_eq!(output.stdout, b"prepared-image\n");
