@@ -4,6 +4,8 @@ import base64
 import importlib.util
 import io
 import json
+import ssl
+import tomllib
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -76,10 +78,41 @@ class ModelPolicyTests(unittest.TestCase):
                 raise RuntimeError("upstream echoed host-key and task prompt")
         self.controller.provider = FailingProvider()
         sent = []
-        with patch.object(bridge, "send", sent.append):
+        diagnostic = io.StringIO()
+        with patch.object(bridge, "send", sent.append), patch.object(bridge.sys, "stderr", diagnostic):
             self.controller.model_request(self.request())
             self.controller.worker.join(timeout=2)
         self.assertEqual(sent, [{"channel": "http_error", "id": 1}])
+        self.assertIn('"category": "controller"', diagnostic.getvalue())
+        self.assertNotIn("host-key", diagnostic.getvalue())
+        self.assertNotIn("task prompt", diagnostic.getvalue())
+
+    def test_model_failure_categories_are_safe(self):
+        for error, category, status in [
+            (ssl.SSLError("private handshake detail"), "tls", None),
+            (TimeoutError("private timeout detail"), "timeout", None),
+            (OSError("private network detail"), "transport", None),
+            (bridge.ModelFailure("rejected", 403), "rejected", 403),
+            (bridge.ModelFailure("budget"), "budget", None),
+        ]:
+            diagnostic = io.StringIO()
+            with self.subTest(category=category), patch.object(bridge.sys, "stderr", diagnostic):
+                bridge.report_failure(error)
+                self.assertEqual(json.loads(diagnostic.getvalue().split(": ", 1)[1]),
+                                 {"category": category, "status": status})
+                self.assertNotIn("private", diagnostic.getvalue())
+
+    def test_guest_config_keeps_dynamic_port_as_data(self):
+        config = tomllib.loads(bridge.guest_config(12345))
+        self.assertEqual(config["model_provider"], "circus")
+        provider = config["model_providers"]["circus"]
+        self.assertEqual(provider["base_url"], "http://127.0.0.1:12345/v1")
+        self.assertEqual(provider["env_key"], "CIRCUS_TASK_TOKEN")
+        self.assertFalse(provider["supports_websockets"])
+        self.assertEqual(provider["request_max_retries"], 0)
+        for invalid in [0, 65536, True, "12345", '1234";sh']:
+            with self.subTest(port=invalid), self.assertRaises(bridge.BridgeError):
+                bridge.guest_config(invalid)
 
     def test_revocation_prevents_new_model_requests(self):
         self.controller.revoked.set()

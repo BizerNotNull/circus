@@ -30,6 +30,35 @@ class BridgeError(Exception):
     """Only fixed, non-sensitive diagnostics may be exposed to the operator."""
 
 
+class ModelFailure(BridgeError):
+    def __init__(self, category, status=None):
+        super().__init__("model service rejected the request" if category == "rejected"
+                         else "model request or response budget exceeded")
+        self.category, self.status = category, status
+
+
+def report_failure(error):
+    # Never interpolate exception messages: HTTP libraries and providers can
+    # include request headers, credentials or response content in those strings.
+    status = None
+    if isinstance(error, ModelFailure):
+        category = error.category if error.category in ("rejected", "budget") else "protocol"
+        if category == "rejected" and type(error.status) is int and 100 <= error.status <= 599:
+            status = error.status
+    elif isinstance(error, ssl.SSLError):
+        category = "tls"
+    elif isinstance(error, TimeoutError):
+        category = "timeout"
+    elif isinstance(error, (OSError, http.client.HTTPException)):
+        category = "transport"
+    elif isinstance(error, BridgeError):
+        category = "protocol"
+    else:
+        category = "controller"
+    print("model channel failed: " + json.dumps({"category": category, "status": status}),
+          file=sys.stderr, flush=True)
+
+
 def unique_object(pairs):
     result = {}
     for key, value in pairs:
@@ -118,15 +147,15 @@ class ModelEndpoint:
             response = connection.getresponse()
             if response.status != 200:
                 # Never echo upstream errors, headers or redirects into guest logs.
-                raise BridgeError("model service rejected the request")
-            if response.getheader("Content-Type", "").split(";", 1)[0].strip() != "text/event-stream":
+                raise ModelFailure("rejected", response.status)
+            if response.getheader("Content-Type", "").split(";", 1)[0].strip().lower() != "text/event-stream":
                 raise BridgeError("model service must return a Responses event stream")
             emit("http_start", None)
             total = 0
             while chunk := response.read1(CHUNK):
                 total += len(chunk)
                 if total > MAX_RESPONSE:
-                    raise BridgeError("model response exceeded its budget")
+                    raise ModelFailure("budget")
                 emit("http_chunk", chunk)
             emit("http_end", None)
         finally:
@@ -188,15 +217,16 @@ class HostController:
             if chunk is not None:
                 self.total += len(chunk)
                 if self.total > MAX_TOTAL_RESPONSE:
-                    raise BridgeError("task response budget exhausted")
+                    raise ModelFailure("budget")
                 response["body"] = base64.b64encode(chunk).decode("ascii")
             send(response)
 
         def forward():
             try:
                 self.provider.forward(body, emit)
-            except Exception:
+            except Exception as error:
                 if not self.revoked.is_set():
+                    report_failure(error)
                     send({"channel": "http_error", "id": request_id})
 
         self.worker = threading.Thread(target=forward, daemon=True)
@@ -360,24 +390,29 @@ class GuestHandler(BaseHTTPRequestHandler):
             self.server.pending.pop(request_id, None)
 
 
-def main_guest():
-    token = required("CIRCUS_TASK_TOKEN", 256)
-    server = GuestServer(token)
-    port = server.server_address[1]
-    settings = [
+def guest_config(port):
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise BridgeError("invalid loopback port")
+    return "\n".join([
         'model_provider="circus"', 'web_search="disabled"',
         'model_providers.circus={name="Circus task channel",'
         f'base_url="http://127.0.0.1:{port}/v1",'
         'env_key="CIRCUS_TASK_TOKEN",wire_api="responses",requires_openai_auth=false,'
         'supports_websockets=false,request_max_retries=0,stream_max_retries=0}',
-    ]
-    argv = ["codex"]
-    for setting in settings:
-        argv.extend(["-c", setting])
-    argv.extend(["app-server", "--listen", "stdio://"])
-    # argv is built only from fixed settings and the loopback port allocated above;
-    # no shell or caller-supplied command string is involved.
-    with subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    ]) + "\n"
+
+
+def main_guest():
+    token = required("CIRCUS_TASK_TOKEN", 256)
+    server = GuestServer(token)
+    # The fixed image's circus-agent entrypoint creates this fresh CODEX_HOME.
+    # Keep the allocated numeric port in TOML data; executable and argv are fixed.
+    # Exclusive creation refuses an existing config or symlink. No real key is
+    # written here: Codex reads only the per-task token from its environment.
+    with open("/workspace/.circus/home/.codex/config.toml", "x", encoding="utf-8") as config:
+        config.write(guest_config(server.server_address[1]))
+    with subprocess.Popen(["codex", "app-server", "--listen", "stdio://"],
+                          shell=False, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL, cwd="/workspace/project") as process:
         def output():
             try:

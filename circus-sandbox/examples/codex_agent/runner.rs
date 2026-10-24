@@ -4,8 +4,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use circus_sandbox::{
-    DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig, ProcessExit, ProcessOutput,
-    ProcessRequest, ResourceLimits, RuntimeName, SandboxConfig,
+    BackendConfig, IoLimits, IsolationConfig, ProcessExit, ProcessOutput, ProcessRequest,
+    ResourceLimits, Sandbox, SandboxConfig,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -51,29 +51,50 @@ impl Config {
 }
 
 pub async fn run(config: Config, controller: &str) -> Result<Vec<u8>> {
-    let sandbox = DockerSandbox::create(SandboxConfig::new(
-        DockerEndpoint::parse(&config.endpoint)?,
-        &config.image,
-        RuntimeName::runc(),
-        ResourceLimits::new(
-            512 * 1024 * 1024,
-            1000,
-            128,
-            128 * 1024 * 1024,
-            2 * 1024 * 1024,
+    run_observed(config, controller, |id| eprintln!("task sandbox: {id}")).await
+}
+
+// Example-local ownership observation allows tests to inspect only their own
+// instance, including failure paths, without global Docker snapshots.
+pub async fn run_observed(
+    config: Config,
+    controller: &str,
+    on_create: impl FnOnce(&str),
+) -> Result<Vec<u8>> {
+    let sandbox = Sandbox::create(
+        BackendConfig::docker(&config.endpoint, &config.image, "runc"),
+        SandboxConfig::new(
+            ResourceLimits::new(
+                512 * 1024 * 1024,
+                1000,
+                128,
+                128 * 1024 * 1024,
+                2 * 1024 * 1024,
+            )?,
+            IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
+            IoLimits::new(OUTPUT_LIMIT, Duration::from_secs(15))?,
         )?,
-        IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
-        IoLimits::new(OUTPUT_LIMIT, Duration::from_secs(15))?,
-    )?)
+    )
     .await?;
     let exercise = async {
+        let created = sandbox.status().await?;
+        on_create(
+            created
+                .instance_id
+                .as_deref()
+                .ok_or("missing sandbox identity")?,
+        );
         sandbox.create_dir_all("project").await?;
         sandbox
             .write_file("bridge.py", format!("{BRIDGE}\nmain_guest()\n").as_bytes())
             .await?;
         sandbox.start().await?;
         let status = sandbox.status().await?;
-        if status.network_mode != "none" || !status.readonly_root || status.bind_count != 0 {
+        let enforcement = status.enforcement.ok_or("missing isolation evidence")?;
+        if enforcement.network_mode.as_deref() != Some("none")
+            || enforcement.readonly_root != Some(true)
+            || enforcement.bind_count != Some(0)
+        {
             return Err("unexpected sandbox isolation policy".into());
         }
         let token = uuid::Uuid::new_v4().to_string();

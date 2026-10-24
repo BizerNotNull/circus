@@ -24,52 +24,48 @@ fn config() -> Result<Config> {
     })
 }
 
-fn owned_containers(endpoint: &str) -> Result<String> {
+async fn run_verified(config: Config, controller: &str) -> Result<Vec<u8>> {
+    let endpoint = config.endpoint.clone();
+    let mut owned = None;
+    let result = runner::run_observed(config, controller, |id| owned = Some(id.to_owned())).await;
+    let instance = owned.ok_or("task did not report its owned instance")?;
     let output = Command::new("docker")
-        .args([
-            "--host",
-            endpoint,
-            "ps",
-            "-aq",
-            "--filter",
-            "label=circus.sandbox.owner",
-        ])
+        .args(["--host", &endpoint, "inspect", &instance])
         .output()?;
-    if !output.status.success() {
-        return Err("docker ps failed".into());
-    }
-    Ok(String::from_utf8(output.stdout)?)
+    let diagnostic = String::from_utf8(output.stderr)?.to_lowercase();
+    assert!(
+        !output.status.success(),
+        "this task's instance was not removed"
+    );
+    assert!(
+        diagnostic.contains("no such object") || diagnostic.contains("no such container"),
+        "Docker could not confirm this task's instance absence"
+    );
+    result
 }
 
 #[tokio::test]
 #[ignore = "requires a local Codex image, Python 3.11+ on the host, and a real Linux Docker Engine"]
 async fn codex_turn_uses_only_the_scoped_model_channel_and_cleans_up() -> Result {
-    let endpoint = config()?.endpoint;
-    let before = owned_containers(&endpoint)?;
     let controller = format!(
         "{}\n{}",
         runner::BRIDGE,
         include_str!("fixtures/codex_responses.py")
     );
-    let result = runner::run(config()?, &controller).await;
-    assert_eq!(
-        owned_containers(&endpoint)?,
-        before,
-        "successful task leaked a container"
+    // Concurrent runs must never mistake each other's containers for leaks.
+    let (first, second) = tokio::join!(
+        run_verified(config()?, &controller),
+        run_verified(config()?, &controller),
     );
-    assert_eq!(result?, b"42\n");
+    assert_eq!(first?, b"42\n");
+    assert_eq!(second?, b"42\n");
 
     // A failed upstream must produce a failed task and still reclaim the container.
     let rejected = format!(
         "{}\nclass RejectPeer:\n def forward(self, body, emit):\n  raise RuntimeError('upstream-unavailable')\nmain_host(RejectPeer())\n",
         runner::BRIDGE
     );
-    assert!(runner::run(config()?, &rejected).await.is_err());
-    assert_eq!(
-        owned_containers(&endpoint)?,
-        before,
-        "failed task leaked a container"
-    );
+    assert!(run_verified(config()?, &rejected).await.is_err());
 
     // A stuck host driver must be killed/reaped and its container reclaimed.
     let mut limited = config()?;
@@ -80,7 +76,7 @@ async fn codex_turn_uses_only_the_scoped_model_channel_and_cleans_up() -> Result
         started.path().to_str().ok_or("non-UTF-8 test path")?,
     );
     let began = std::time::Instant::now();
-    assert!(runner::run(limited, &driver).await.is_err());
+    assert!(run_verified(limited, &driver).await.is_err());
     let pid: u32 = std::fs::read_to_string(started.path())?.parse()?;
     assert!(pid > 0, "host driver did not start");
     assert!(began.elapsed() >= Duration::from_secs(3));
@@ -91,10 +87,5 @@ async fn codex_turn_uses_only_the_scoped_model_channel_and_cleans_up() -> Result
             .status()?;
         assert!(status.success(), "timed out host controller was not reaped");
     }
-    assert_eq!(
-        owned_containers(&endpoint)?,
-        before,
-        "timed out task leaked a container"
-    );
     Ok(())
 }

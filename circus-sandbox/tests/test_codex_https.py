@@ -37,6 +37,7 @@ class HttpsTests(unittest.TestCase):
         test = self
         self.requests = []
         self.status = 200
+        self.content_type = "text/event-stream"
         self.payload = b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -47,7 +48,7 @@ class HttpsTests(unittest.TestCase):
                 body = self.rfile.read(int(self.headers["Content-Length"]))
                 test.requests.append((self.path, dict(self.headers), body))
                 self.send_response(test.status)
-                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Type", test.content_type)
                 self.send_header("Location", "https://unapproved.invalid/stolen")
                 self.send_header("Content-Length", str(len(test.payload)))
                 self.end_headers()
@@ -69,6 +70,7 @@ class HttpsTests(unittest.TestCase):
         self.assertEqual(self.requests, [])
 
     def test_verified_stream_uses_only_host_route_and_credentials(self):
+        self.content_type = "Text/Event-Stream; charset=utf-8"
         chunks = []
         with patch.object(bridge.ssl, "create_default_context", return_value=self.client_context):
             self.endpoint.forward(b'{"stream":true}', lambda kind, data: chunks.append((kind, data)))

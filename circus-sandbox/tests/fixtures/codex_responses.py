@@ -22,6 +22,13 @@ import errno
 import os
 import socket
 assert 'CIRCUS_MODEL_API_KEY' not in os.environ
+assert not any('host-only-test-sentinel' in value for value in os.environ.values())
+for _, name in socket.if_nameindex():
+    if name != 'lo':
+        flags = int(Path(f'/sys/class/net/{name}/flags').read_text().strip(), 16)
+        assert not flags & 1, f'active external interface: {name}'
+assert all(row.split()[0] == 'lo' for row in Path('/proc/net/route').read_text().splitlines()[1:])
+assert all(row.split()[-1] == 'lo' for row in Path('/proc/net/ipv6_route').read_text().splitlines())
 with socket.socket() as probe:
     probe.settimeout(0.2)
     assert probe.connect_ex(('192.0.2.1', 443)) == errno.ENETUNREACH
