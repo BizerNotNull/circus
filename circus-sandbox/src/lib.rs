@@ -59,7 +59,9 @@ pub use api::{
     SandboxError, SandboxPhase, SandboxStatus,
 };
 #[doc(inline)]
-pub use workspace::{PathRejectReason, Workspace, WorkspaceError};
+pub use workspace::{
+    CodeSnapshot, PathRejectReason, SnapshotBudget, SnapshotError, Workspace, WorkspaceError,
+};
 
 #[doc(inline)]
 pub use runtime::{ResourceLimits, ResourceLimitsError};

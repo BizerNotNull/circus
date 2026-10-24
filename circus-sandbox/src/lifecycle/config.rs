@@ -37,7 +37,7 @@ impl DockerEndpoint {
             });
         }
         if let Some(rest) = value.strip_prefix("npipe://") {
-            if rest.is_empty() {
+            if !rest.starts_with("//./pipe/") || rest.len() == "//./pipe/".len() {
                 return Err(ConfigError::UnsupportedEndpoint {
                     value: value.to_string(),
                 });
