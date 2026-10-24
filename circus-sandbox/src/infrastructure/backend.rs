@@ -16,6 +16,7 @@ use tokio::io::AsyncWrite;
 
 use super::engine::{
     EngineError, ExecDone, HostReport, ProcessChunk, ProcessSpec, Recovered, UploadEntry,
+    WorkspaceEntry,
 };
 
 /// Backend-owned instance identity. Opaque outside the lifecycle owner.
@@ -40,7 +41,8 @@ impl InstanceId {
 pub(crate) struct Capabilities {
     pub pause_resume: bool,
     pub file_transport: bool,
-    pub workspace_archive: bool,
+    /// Enumerates workspace paths and reads their payloads through the guest.
+    pub workspace_snapshot: bool,
 }
 
 /// Backend-neutral values needed for one create request.
@@ -175,11 +177,20 @@ pub(crate) trait Backend: Send + Sync + 'static {
         id: &InstanceId,
     ) -> impl Future<Output = Result<HostReport, EngineError>> + Send;
 
-    /// Downloads only the configured workspace archive into an anonymous file.
-    fn download_workspace_archive(
+    /// Enumerates only the configured workspace, sorted by path, without
+    /// following links and without Docker's archive API.
+    ///
+    /// `max_bytes` bounds the transport encoding of the listing and
+    /// `max_entries` bounds the number of entries; both are enforced by the
+    /// backend before returning. Implementations reject symlinks, non-regular
+    /// nodes, hardlinked files, non-UTF-8 names, and non-portable relative
+    /// names instead of skipping them.
+    fn list_workspace(
         &self,
         id: &InstanceId,
+        user: &str,
         workspace: &str,
-        max_archive_bytes: u64,
-    ) -> impl Future<Output = Result<std::fs::File, EngineError>> + Send;
+        max_bytes: u64,
+        max_entries: usize,
+    ) -> impl Future<Output = Result<Vec<WorkspaceEntry>, EngineError>> + Send;
 }

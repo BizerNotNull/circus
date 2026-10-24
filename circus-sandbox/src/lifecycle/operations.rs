@@ -44,9 +44,9 @@ pub(super) fn require_capabilities<B: Backend>(backend: &B) -> Result<(), Sandbo
             capability: "transfer guest files",
         });
     }
-    if !capabilities.workspace_archive {
+    if !capabilities.workspace_snapshot {
         return Err(SandboxError::UnsupportedCapability {
-            capability: "capture a workspace archive",
+            capability: "capture a workspace snapshot",
         });
     }
     Ok(())
@@ -616,7 +616,7 @@ pub(super) async fn file_result<B: Backend, T>(
             EngineErrorKind::InvalidPath => Err(SandboxError::RelativePath {
                 reason: "guest transport rejected the relative path",
             }),
-            EngineErrorKind::Other | EngineErrorKind::Protocol => {
+            EngineErrorKind::Other | EngineErrorKind::Protocol | EngineErrorKind::EntryLimit => {
                 cleanup_engine_error(state, err).await
             }
         },
@@ -645,6 +645,7 @@ pub(super) fn engine_err(err: EngineError) -> SandboxError {
         | EngineErrorKind::NotFound
         | EngineErrorKind::PermissionDenied
         | EngineErrorKind::Protocol
+        | EngineErrorKind::EntryLimit
         | EngineErrorKind::Other => SandboxError::Backend {
             message: err.message,
         },

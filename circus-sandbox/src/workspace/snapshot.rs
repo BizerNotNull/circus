@@ -11,7 +11,6 @@ use cap_fs_ext::OpenOptionsSyncExt;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
 use cap_std::fs::{Dir, File, OpenOptions};
 
-mod archive;
 use super::{Workspace, WorkspaceError, check_path, lock_poisoned};
 
 /// Why a code-snapshot capture or restore failed.
@@ -20,26 +19,18 @@ use super::{Workspace, WorkspaceError, check_path, lock_poisoned};
 /// capture. [`WorkspaceError`] stays the file-operation error.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
-    /// Archive contained unsupported, malformed, or ambiguous data.
-    #[error("invalid workspace archive: {reason}")]
+    /// Capture metadata contradicted the workspace: an unsupported node,
+    /// malformed manifest, non-portable name, or a payload whose bytes did not
+    /// match its declared size.
+    #[error("invalid workspace capture manifest: {reason}")]
     InvalidArchive {
-        /// Why the archive was rejected, without exposing backend SDK types.
+        /// Why the capture was rejected, without exposing backend SDK types.
         reason: String,
     },
 
-    /// A transport or restore limit was zero.
+    /// A transport, manifest, or restore limit was zero.
     #[error("invalid archive limit")]
     InvalidArchiveLimit,
-
-    /// Archive staging cleanup failed after import.
-    #[error("archive staging cleanup failed: {cleanup}")]
-    ArchiveCleanup {
-        /// Temporary import workspace retained so cleanup can be retried.
-        archive: Box<Workspace>,
-        #[source]
-        /// Why explicit cleanup failed.
-        cleanup: WorkspaceError,
-    },
 
     /// Snapshot operation was interrupted before staging commit.
     #[error("snapshot operation interrupted before staging commit")]
@@ -70,8 +61,8 @@ pub enum SnapshotError {
     /// File bytes, not path lengths, exceeded the capture byte budget.
     ///
     /// `actual` is the detected total: a bounded read's probe byte for direct
-    /// workspace capture, or declared payload lengths checked before archive
-    /// allocation. A file fails first with [`WorkspaceError::LimitExceeded`]
+    /// workspace capture, or the running sum of manifest-declared sizes before
+    /// any payload is read. A file fails first with [`WorkspaceError::LimitExceeded`]
     /// when its per-file cap is tighter.
     #[error("snapshot byte count {actual} exceeds capture budget {limit}")]
     ByteLimit {
@@ -178,7 +169,8 @@ impl SnapshotBudget {
 ///
 /// Bytes live in this process only. Drop frees that memory; it does not delete
 /// a workspace. The value is not a process or memory checkpoint and is not
-/// serialized. Docker's workspace-only API reuses this immutable value.
+/// serialized. The Docker backend builds this value from a guest workspace
+/// enumeration and per-file reads.
 ///
 /// [`Self::restore`] creates a new [`Workspace`]. It does not overwrite the
 /// workspace that was captured.
@@ -210,14 +202,63 @@ enum Body {
     File(Vec<u8>),
 }
 
+/// One backend-neutral node supplied to [`CodeSnapshot::from_entries`].
+///
+/// Paths are workspace-relative and were already validated by the caller.
+pub(crate) struct SnapshotEntry {
+    pub path: PathBuf,
+    pub body: SnapshotBody,
+}
+
+/// Payload of one [`SnapshotEntry`]. Directories carry no payload.
+pub(crate) enum SnapshotBody {
+    Directory,
+    File(Vec<u8>),
+}
+
 impl CodeSnapshot {
-    pub(crate) fn from_workspace_archive(
-        file: std::fs::File,
-        expected_root: &str,
+    /// Builds a snapshot from an already-enumerated, already-budget-checked
+    /// workspace tree.
+    ///
+    /// Entries are stored in the supplied order, which is the sort order of the
+    /// capture manifest. `max_file_bytes` is copied into the snapshot and every
+    /// payload is re-checked against it, so a caller cannot install a snapshot
+    /// that the captured workspace's own file bound would reject. Total bytes
+    /// and entry count are derived from the supplied entries; the root is not
+    /// an entry.
+    pub(crate) fn from_entries(
         max_file_bytes: usize,
-        budget: SnapshotBudget,
+        entries: Vec<SnapshotEntry>,
     ) -> Result<Self, SnapshotError> {
-        archive::from_workspace_archive(file, expected_root, max_file_bytes, budget)
+        let mut total_bytes = 0usize;
+        let mut stored = Vec::new();
+        stored.try_reserve(entries.len()).map_err(reserve_error)?;
+        for SnapshotEntry { path, body } in entries {
+            let body = match body {
+                SnapshotBody::Directory => Body::Dir,
+                SnapshotBody::File(bytes) => {
+                    if bytes.len() > max_file_bytes {
+                        return Err(SnapshotError::Workspace(WorkspaceError::LimitExceeded {
+                            limit: max_file_bytes,
+                            actual: bytes.len(),
+                        }));
+                    }
+                    let Some(total) = total_bytes.checked_add(bytes.len()) else {
+                        return Err(SnapshotError::InvalidArchive {
+                            reason: "snapshot byte total overflowed".to_string(),
+                        });
+                    };
+                    total_bytes = total;
+                    Body::File(bytes)
+                }
+            };
+            stored.push(Entry { path, body });
+        }
+        Ok(Self {
+            max_file_bytes,
+            total_bytes,
+            entries: stored,
+        })
     }
 
     /// Per-file cap copied from the captured workspace.
@@ -334,17 +375,18 @@ impl Workspace {
     ///
     /// The exclusive file lock is taken after the closed check and held for the
     /// whole walk, so this does not interleave with writes on this value. The
-    /// walk uses the cap-std directory handle. It does not follow symlinks, does
-    /// not open non-regular nodes, and does not extract an archive. A symlink,
-    /// FIFO, device, socket, unknown node, or non-portable name fails the
-    /// capture; nothing is returned.
+    /// walk uses the cap-std directory handle. It does not follow symlinks and
+    /// does not open non-regular nodes. A symlink, FIFO, device, socket,
+    /// unknown node, or non-portable name fails the capture; nothing is
+    /// returned.
     ///
     /// Each relative path, and each of its components, uses the same rejection
     /// rules as [`Self::write_file`]. `max_file_bytes` still caps each file.
     /// `budget` caps this call's retained bytes and entry count only.
     ///
     /// Does not modify this workspace. Blocks the calling thread. Docker's
-    /// separate async snapshot API also captures running workspace archives.
+    /// separate async snapshot API enumerates a running workspace through the
+    /// guest and reads each file individually.
     pub fn capture_code_snapshot(
         &self,
         budget: SnapshotBudget,

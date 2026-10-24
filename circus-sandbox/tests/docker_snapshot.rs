@@ -43,8 +43,10 @@ fn config(file_bytes: usize, workspace_bytes: u64) -> Result<SandboxConfig> {
     )?)
 }
 
-// The emergency fallback removes only the exact unique container we created.
-// It neither prunes other users' containers nor deletes any images.
+// The fixture owns exactly one container. Teardown is explicit and has no Drop
+// fallback: `Sandbox::destroy` reports success only after confirmed absence,
+// then the engine must also report the container gone. Unconfirmed removal
+// fails the test instead of being ignored.
 struct Fixture {
     sandbox: Sandbox,
     host: String,
@@ -82,14 +84,19 @@ impl Fixture {
     async fn destroy(&self) -> Result {
         self.sandbox.destroy().await?;
         assert_eq!(self.sandbox.status().await?.phase, SandboxPhase::Destroyed);
+        let inspected = Command::new("docker")
+            .args(["--host", &self.host, "inspect", &self.id])
+            .output()?;
+        if inspected.status.success() {
+            return Err(format!("container {} still exists after destroy", self.id).into());
+        }
+        let stderr = String::from_utf8_lossy(&inspected.stderr);
+        let absent = stderr.to_ascii_lowercase();
+        // The CLI wording varies by version: "No such object" or "no such object".
+        if !(absent.contains("no such") || absent.contains("not found")) {
+            return Err(format!("could not confirm absence of {}: {stderr}", self.id).into());
+        }
         Ok(())
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = Command::new("docker")
-            .args(["--host", &self.host, "rm", "-f", &self.id])
-            .output();
     }
 }
 fn budget() -> SnapshotBudget {
@@ -136,9 +143,20 @@ Path('/workspace/process-marker').write_text('copied bytes, not a continuing pro
     destination.sandbox.start().await?;
     let mut expected: Vec<u8> = (0..=255).collect();
     expected.extend_from_slice(b"\x00guest\xff");
-    assert_eq!(destination.sandbox.read_file("data.bin").await?, expected);
     assert_eq!(
-        destination.sandbox.read_file("process-marker").await?,
+        destination
+            .sandbox
+            .read_file("data.bin")
+            .await
+            .map_err(|error| format!("read restored data.bin: {error:?}"))?,
+        expected
+    );
+    assert_eq!(
+        destination
+            .sandbox
+            .read_file("process-marker")
+            .await
+            .map_err(|error| format!("read restored process-marker: {error:?}"))?,
         b"copied bytes, not a continuing process"
     );
     assert_eq!(
@@ -254,16 +272,20 @@ async fn payload_and_entry_failures_preserve_owned_source() -> Result {
     let source = Fixture::new(4096, 8 * 1024 * 1024).await?;
     source.sandbox.start().await?;
     source.guest("from pathlib import Path; Path('/workspace/a').write_bytes(b'x'*32); Path('/workspace/b').mkdir()").await?;
-    assert!(matches!(
-        source
-            .sandbox
-            .capture_workspace_snapshot(SnapshotBudget::new(31, 128)?, ARCHIVE_CAP)
-            .await,
-        Err(SandboxError::Snapshot(SnapshotError::ByteLimit {
-            limit: 31,
-            ..
-        }))
-    ));
+    let captured = source
+        .sandbox
+        .capture_workspace_snapshot(SnapshotBudget::new(31, 128)?, ARCHIVE_CAP)
+        .await;
+    assert!(
+        matches!(
+            captured,
+            Err(SandboxError::Snapshot(SnapshotError::ByteLimit {
+                limit: 31,
+                ..
+            }))
+        ),
+        "capture over the byte budget returned {captured:?}"
+    );
     assert_eq!(source.sandbox.status().await?.phase, SandboxPhase::Running);
     assert!(matches!(
         source
@@ -282,16 +304,20 @@ async fn payload_and_entry_failures_preserve_owned_source() -> Result {
     ));
     assert_eq!(source.sandbox.read_file("a").await?, vec![b'x'; 32]);
     source.sandbox.pause().await?;
-    assert!(matches!(
-        source
-            .sandbox
-            .capture_workspace_snapshot(SnapshotBudget::new(31, 128)?, ARCHIVE_CAP)
-            .await,
-        Err(SandboxError::Snapshot(SnapshotError::ByteLimit {
-            limit: 31,
-            ..
-        }))
-    ));
+    let captured = source
+        .sandbox
+        .capture_workspace_snapshot(SnapshotBudget::new(31, 128)?, ARCHIVE_CAP)
+        .await;
+    assert!(
+        matches!(
+            captured,
+            Err(SandboxError::Snapshot(SnapshotError::ByteLimit {
+                limit: 31,
+                ..
+            }))
+        ),
+        "capture over the byte budget returned {captured:?}"
+    );
     assert_eq!(source.sandbox.status().await?.phase, SandboxPhase::Paused);
     source.sandbox.resume().await?;
     // Successful retry proves the failed captures left no poisoned staging/capture state.
@@ -322,13 +348,14 @@ async fn unsafe_guest_nodes_fail_closed_and_resume_for_cleanup() -> Result {
         let source = Fixture::new(4096, 8 * 1024 * 1024).await?;
         source.sandbox.start().await?;
         source.guest(node).await?;
-        assert!(matches!(
-            source
-                .sandbox
-                .capture_workspace_snapshot(budget(), ARCHIVE_CAP)
-                .await,
-            Err(SandboxError::Snapshot(_))
-        ));
+        let captured = source
+            .sandbox
+            .capture_workspace_snapshot(budget(), ARCHIVE_CAP)
+            .await;
+        assert!(
+            matches!(captured, Err(SandboxError::Snapshot(_))),
+            "unsafe guest node {node} returned {captured:?}"
+        );
         assert_eq!(source.sandbox.status().await?.phase, SandboxPhase::Running);
         assert_eq!(
             source.guest("print('owned and resumed')").await?,
@@ -363,20 +390,26 @@ async fn restore_checks_target_file_and_workspace_bounds_before_replacing_stagin
             .restore_workspace_snapshot(Arc::clone(&snapshot))
             .await;
         if file_cap == 31 {
-            assert!(matches!(
-                error,
-                Err(SandboxError::Snapshot(SnapshotError::Workspace(
-                    WorkspaceError::LimitExceeded { limit: 31, .. }
-                )))
-            ));
+            assert!(
+                matches!(
+                    error,
+                    Err(SandboxError::Snapshot(SnapshotError::Workspace(
+                        WorkspaceError::LimitExceeded { limit: 31, .. }
+                    )))
+                ),
+                "restore with file cap 31 returned {error:?}"
+            );
         } else {
-            assert!(matches!(
-                error,
-                Err(SandboxError::Snapshot(SnapshotError::ByteLimit {
-                    limit: 63,
-                    ..
-                }))
-            ));
+            assert!(
+                matches!(
+                    error,
+                    Err(SandboxError::Snapshot(SnapshotError::ByteLimit {
+                        limit: 63,
+                        ..
+                    }))
+                ),
+                "restore with total cap 63 returned {error:?}"
+            );
         }
         assert_eq!(
             destination.sandbox.status().await?.phase,
@@ -436,15 +469,19 @@ async fn guest_file_cap_and_nonportable_names_fail_before_snapshot_is_returned()
     source
         .guest("open('/workspace/too-large','wb').write(b'x'*32)")
         .await?;
-    assert!(matches!(
-        source
-            .sandbox
-            .capture_workspace_snapshot(budget(), ARCHIVE_CAP)
-            .await,
-        Err(SandboxError::Snapshot(SnapshotError::Workspace(
-            WorkspaceError::LimitExceeded { limit: 31, .. }
-        )))
-    ));
+    let captured = source
+        .sandbox
+        .capture_workspace_snapshot(budget(), ARCHIVE_CAP)
+        .await;
+    assert!(
+        matches!(
+            captured,
+            Err(SandboxError::Snapshot(SnapshotError::Workspace(
+                WorkspaceError::LimitExceeded { limit: 31, .. }
+            )))
+        ),
+        "capture over the file cap returned {captured:?}"
+    );
     assert_eq!(source.sandbox.status().await?.phase, SandboxPhase::Running);
     source.guest("from pathlib import Path; Path('/workspace/too-large').unlink(); Path('/workspace/C:drive').write_bytes(b'x')").await?;
     assert!(matches!(
