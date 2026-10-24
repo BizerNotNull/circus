@@ -223,8 +223,13 @@ impl Backend for DockerBackend {
         &self,
         name: &str,
         nonce: &str,
-    ) -> impl Future<Output = Result<Recovered, EngineError>> + Send {
-        async move { self.engine.recover_owned(name, nonce).await }
+        retained_id: Option<&InstanceId>,
+    ) -> impl Future<Output = Recovered> + Send {
+        async move {
+            self.engine
+                .recover_owned(name, nonce, retained_id.map(InstanceId::as_str))
+                .await
+        }
     }
 
     fn start(&self, id: &InstanceId) -> impl Future<Output = Result<(), EngineError>> + Send {

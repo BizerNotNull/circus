@@ -76,11 +76,17 @@ pub(crate) trait Backend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<InstanceId, EngineError>> + Send;
 
     /// Force-removes only an instance carrying this exact owner label.
+    ///
+    /// `retained_id` is used for a forced-removal attempt when a transient
+    /// inspection failure prevents confirming the name. The outcome explicitly
+    /// distinguishes confirmed removal/absence from still-present and unknown
+    /// ownership; an unconfirmed name is never removed directly.
     fn recover_owned(
         &self,
         name: &str,
         nonce: &str,
-    ) -> impl Future<Output = Result<Recovered, EngineError>> + Send;
+        retained_id: Option<&InstanceId>,
+    ) -> impl Future<Output = Recovered> + Send;
 
     fn start(&self, id: &InstanceId) -> impl Future<Output = Result<(), EngineError>> + Send;
 

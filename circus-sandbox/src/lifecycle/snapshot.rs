@@ -11,7 +11,7 @@ use crate::workspace::{CodeSnapshot, SnapshotBudget, SnapshotError};
 use super::operations::{
     cleanup_engine_error, destroy_report, need, pause, phase_err, required_id, resume, spawn_block,
 };
-use super::{Op, Sandbox, SandboxError, SandboxPhase, State};
+use super::{Op, Sandbox, SandboxError, SandboxOperation, SandboxPhase, State};
 
 impl Sandbox {
     /// Captures regular workspace files and directories, not processes or memory.
@@ -124,6 +124,7 @@ impl Deadline {
 async fn interrupted<B: Backend, T>(
     state: &mut State<B>,
     cancelled: bool,
+    operation: SandboxOperation,
     snapshot: Option<SnapshotError>,
 ) -> Result<T, SandboxError> {
     let report = destroy_report(state).await;
@@ -131,12 +132,14 @@ async fn interrupted<B: Backend, T>(
         SandboxError::Cancelled {
             instance_id: report.instance_id,
             ownership: report.ownership,
+            operation,
             detail: report.detail,
         }
     } else {
         SandboxError::TimedOut {
             instance_id: report.instance_id,
             ownership: report.ownership,
+            operation,
             detail: report.detail,
         }
     };
@@ -167,7 +170,13 @@ pub(super) async fn capture<B: Backend>(
             })
             .await;
         if let Some(cancelled) = stopped {
-            return interrupted(state, cancelled, result.ok().and_then(Result::err)).await;
+            return interrupted(
+                state,
+                cancelled,
+                SandboxOperation::CaptureWorkspaceSnapshot,
+                result.ok().and_then(Result::err),
+            )
+            .await;
         }
         return Ok(Arc::new(result??));
     }
@@ -178,7 +187,15 @@ pub(super) async fn capture<B: Backend>(
     if resume_after {
         match deadline.network(pause(state)).await {
             Ok(result) => result?,
-            Err(cancelled) => return interrupted(state, cancelled, None).await,
+            Err(cancelled) => {
+                return interrupted(
+                    state,
+                    cancelled,
+                    SandboxOperation::CaptureWorkspaceSnapshot,
+                    None,
+                )
+                .await;
+            }
         }
     }
     let id = required_id(state)?;
@@ -193,7 +210,15 @@ pub(super) async fn capture<B: Backend>(
     {
         Ok(Ok(archive)) => archive,
         Ok(Err(err)) => return cleanup_engine_error(state, err).await,
-        Err(cancelled) => return interrupted(state, cancelled, None).await,
+        Err(cancelled) => {
+            return interrupted(
+                state,
+                cancelled,
+                SandboxOperation::CaptureWorkspaceSnapshot,
+                None,
+            )
+            .await;
+        }
     };
     let root = path.rsplit('/').next().unwrap_or_default().to_owned();
     let max_file = state.config.limits().max_file_bytes();
@@ -201,7 +226,13 @@ pub(super) async fn capture<B: Backend>(
         .blocking(move || CodeSnapshot::from_workspace_archive(archive, &root, max_file, budget))
         .await;
     if let Some(cancelled) = stopped {
-        return interrupted(state, cancelled, result.ok().and_then(Result::err)).await;
+        return interrupted(
+            state,
+            cancelled,
+            SandboxOperation::CaptureWorkspaceSnapshot,
+            result.ok().and_then(Result::err),
+        )
+        .await;
     }
     // Keep a domain error owned until resume has succeeded or failed.
     if resume_after {
@@ -217,7 +248,13 @@ pub(super) async fn capture<B: Backend>(
                 };
             }
             Err(cancelled) => {
-                return interrupted(state, cancelled, result.ok().and_then(Result::err)).await;
+                return interrupted(
+                    state,
+                    cancelled,
+                    SandboxOperation::CaptureWorkspaceSnapshot,
+                    result.ok().and_then(Result::err),
+                )
+                .await;
             }
         }
     }
@@ -242,7 +279,13 @@ pub(super) async fn restore<B: Backend>(
             Ok(Ok(replacement)) => cleanup_replacement(replacement, None).await,
             Err(_) => None,
         };
-        return interrupted(state, cancelled, error).await;
+        return interrupted(
+            state,
+            cancelled,
+            SandboxOperation::RestoreWorkspaceSnapshot,
+            error,
+        )
+        .await;
     }
     let replacement = result??;
     let workspace = Arc::clone(&state.workspace);
@@ -260,7 +303,13 @@ pub(super) async fn restore<B: Backend>(
             .and_then(Result::err)
             .map(SnapshotError::Workspace);
         let error = cleanup_replacement(replacement, cause).await;
-        return interrupted(state, cancelled, error).await;
+        return interrupted(
+            state,
+            cancelled,
+            SandboxOperation::RestoreWorkspaceSnapshot,
+            error,
+        )
+        .await;
     }
     match cleaned {
         Ok(Ok(())) => {}

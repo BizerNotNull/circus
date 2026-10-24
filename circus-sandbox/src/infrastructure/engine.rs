@@ -4,7 +4,19 @@
 mod images;
 pub(crate) use images::ImageInfo;
 
-use std::collections::HashMap;
+#[path = "engine_output.rs"]
+mod output;
+pub(crate) use output::{OutputLimit, OutputPhase};
+
+#[path = "engine_policy.rs"]
+mod policy;
+pub(crate) use policy::{create_body, HostReport, PolicyMismatch, OWNER_LABEL_KEY};
+
+#[path = "engine_recovery.rs"]
+mod recovery;
+pub(crate) use recovery::{OwnerCheck, Recovered, RemovalControl, recover_with};
+
+use std::future::Future;
 
 use futures_util::StreamExt;
 
@@ -33,8 +45,6 @@ pub(crate) enum EngineErrorKind {
 
 const CLIENT_TIMEOUT_SECS: u64 = 90;
 
-pub(crate) const OWNER_LABEL_KEY: &str = "circus.sandbox.owner";
-
 #[derive(Clone, Copy)]
 pub(crate) enum SocketKind {
     Unix,
@@ -53,6 +63,11 @@ pub(crate) struct EngineError {
     pub kind: EngineErrorKind,
     pub create_pending: bool,
     pub create_id: Option<String>,
+    /// Typed output-budget violation when this error was produced while
+    /// collecting stdout/stderr.
+    pub output: Option<OutputLimit>,
+    /// Typed effective-policy mismatch when creation verification failed.
+    pub policy: Option<PolicyMismatch>,
 }
 
 impl EngineError {
@@ -63,14 +78,10 @@ impl EngineError {
             kind: EngineErrorKind::Other,
             create_pending: false,
             create_id: None,
+            output: None,
+            policy: None,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Recovered {
-    Removed,
-    Absent,
 }
 
 pub(crate) struct CreateSpec {
@@ -84,21 +95,6 @@ pub(crate) struct CreateSpec {
     pub guest_uid: u32,
     pub guest_gid: u32,
     pub owner_label: String,
-}
-
-/// Inspected effective configuration. A `None` field means the backend did not
-/// report it; it is never replaced with a default that could look enforced.
-pub(crate) struct HostReport {
-    pub runtime: Option<String>,
-    pub memory_bytes: Option<i64>,
-    pub nano_cpus: Option<i64>,
-    pub pids_limit: Option<i64>,
-    pub readonly_root: Option<bool>,
-    pub network_mode: Option<String>,
-    pub cap_drop: Option<Vec<String>>,
-    pub security_opt: Option<Vec<String>>,
-    pub bind_count: Option<usize>,
-    pub tmpfs_workspace: Option<String>,
 }
 
 pub(crate) struct ExecDone {
@@ -116,8 +112,13 @@ struct FileRequest<'a> {
 
 struct ExecIo<'a> {
     stdin: Option<&'a [u8]>,
-    output_limit: usize,
+    /// Per-stream allowance for stdout.
+    stdout_limit: usize,
+    /// Per-stream allowance for stderr.
     stderr_limit: usize,
+    /// Combined stdout+stderr budget. Always the explicit sum of the two
+    /// allowances, never an accidental doubling.
+    combined_limit: usize,
 }
 
 impl Engine {
@@ -186,7 +187,7 @@ impl Engine {
         {
             return Err(EngineError::new("images declaring VOLUME are unsupported"));
         }
-        let mut body = container_body(name, spec);
+        let mut body = create_body(name, spec);
         body.image = Some(
             image
                 .id
@@ -213,6 +214,8 @@ impl Engine {
                 kind: EngineErrorKind::Other,
                 create_pending: false,
                 create_id: Some(created_id),
+                output: None,
+                policy: None,
             });
         }
         let inspected = self
@@ -223,51 +226,39 @@ impl Engine {
                 create_id: Some(created_id.clone()),
                 ..map_err(err)
             })?;
-        let host = inspected.host_config.ok_or_else(|| EngineError {
-            message: "missing effective host configuration".to_string(),
-            not_found: false,
-            kind: EngineErrorKind::Other,
-            create_pending: false,
-            create_id: Some(created_id.clone()),
-        })?;
-        if host.memory != Some(spec.memory)
-            || host.memory_swap != Some(spec.memory)
-            || host.nano_cpus != Some(spec.nano_cpus)
-            || host.pids_limit != Some(spec.pids)
-            || host.readonly_rootfs != Some(true)
-            || host.init != Some(true)
-        {
+        let Some(host) = inspected.host_config else {
             return Err(EngineError {
-                message: "engine did not preserve required resource limits and isolation"
-                    .to_string(),
-                not_found: false,
-                kind: EngineErrorKind::Other,
-                create_pending: false,
                 create_id: Some(created_id),
+                ..PolicyMismatch {
+                    field: "host_config",
+                    expected: "reported by engine".to_string(),
+                    actual: "not reported".to_string(),
+                }
+                .error()
+            });
+        };
+        let report = policy::report_from(Some(host));
+        if let Err(mismatch) = policy::verify(spec, &report) {
+            return Err(EngineError {
+                create_id: Some(created_id),
+                ..mismatch.error()
             });
         }
         Ok(created_id)
     }
 
+    /// Confirms absence of the owned instance and force-removes it.
+    ///
+    /// Uses the retained identity when a transient inspection failure prevents
+    /// confirming the name, and always attempts forced removal even when the
+    /// best-effort stop call fails. Returns an explicit ownership outcome.
     pub(crate) async fn recover_owned(
         &self,
         name: &str,
         owner_label: &str,
-    ) -> Result<Recovered, EngineError> {
-        match self.confirm_owner(name, owner_label).await {
-            Ok(id) => {
-                self.force_remove(&id).await?;
-                match self.confirm_owner(name, owner_label).await {
-                    Err(err) if err.not_found => Ok(Recovered::Removed),
-                    Ok(_) => Err(EngineError::new(format!(
-                        "container {name} still present after forced removal"
-                    ))),
-                    Err(err) => Err(err),
-                }
-            }
-            Err(err) if err.not_found => Ok(Recovered::Absent),
-            Err(err) => Err(err),
-        }
+        retained_id: Option<&str>,
+    ) -> Recovered {
+        recover_with(self, name, owner_label, retained_id).await
     }
 
     pub(crate) async fn start(&self, id: &str) -> Result<(), EngineError> {
@@ -464,6 +455,11 @@ impl Engine {
             }
             .to_string(),
         ];
+        // The helper contract is explicit: stdout may carry up to
+        // `max_bytes + 1` (the extra byte proves an over-limit file), stderr may
+        // carry at most 4 KiB of diagnostics, and both share exactly their sum.
+        let stdout_limit = max_bytes.saturating_add(1);
+        let stderr_limit = 4096;
         let result = self
             .exec_input(
                 id,
@@ -472,8 +468,9 @@ impl Engine {
                 &argv,
                 ExecIo {
                     stdin: Some(input),
-                    output_limit: max_bytes.saturating_add(1),
-                    stderr_limit: 4096,
+                    stdout_limit,
+                    stderr_limit,
+                    combined_limit: stdout_limit.saturating_add(stderr_limit),
                 },
             )
             .await?;
@@ -512,8 +509,9 @@ impl Engine {
             argv,
             ExecIo {
                 stdin: None,
-                output_limit,
+                stdout_limit: output_limit,
                 stderr_limit: output_limit,
+                combined_limit: output_limit,
             },
         )
         .await
@@ -529,8 +527,9 @@ impl Engine {
     ) -> Result<ExecDone, EngineError> {
         let ExecIo {
             stdin,
-            output_limit,
+            stdout_limit,
             stderr_limit,
+            combined_limit,
         } = io;
         let created = self
             .docker
@@ -581,21 +580,21 @@ impl Engine {
             Ok::<_, EngineError>(result)
         };
         let receive = async {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
+            let mut collector =
+                output::OutputCollector::new(stdout_limit, stderr_limit, combined_limit);
             while let Some(item) = output.next().await {
                 match item.map_err(map_err)? {
                     bollard::container::LogOutput::StdOut { message }
                     | bollard::container::LogOutput::Console { message } => {
-                        push_bounded(&mut stdout, &message, output_limit)?;
+                        collector.push(OutputPhase::Stdout, &message)?;
                     }
                     bollard::container::LogOutput::StdErr { message } => {
-                        push_bounded(&mut stderr, &message, stderr_limit)?;
+                        collector.push(OutputPhase::Stderr, &message)?;
                     }
                     bollard::container::LogOutput::StdIn { .. } => {}
                 }
             }
-            Ok::<_, EngineError>((stdout, stderr))
+            Ok::<_, EngineError>(collector.finish())
         };
         // An output-limit/transport error cancels a blocked stdin writer immediately.
         let (sent, (stdout, stderr)) = tokio::try_join!(send, receive)?;
@@ -621,54 +620,48 @@ impl Engine {
             .inspect_container(id, None)
             .await
             .map_err(map_err)?;
-        let host = inspected.host_config.unwrap_or_default();
-        Ok(HostReport {
-            runtime: host.runtime,
-            memory_bytes: host.memory,
-            nano_cpus: host.nano_cpus,
-            pids_limit: host.pids_limit,
-            readonly_root: host.readonly_rootfs,
-            network_mode: host.network_mode,
-            cap_drop: host.cap_drop,
-            security_opt: host.security_opt,
-            bind_count: host.binds.map(|binds| binds.len()),
-            tmpfs_workspace: host.tmpfs.and_then(|map| map.into_values().next()),
-        })
+        Ok(policy::report_from(inspected.host_config))
     }
 
-    async fn confirm_owner(&self, name: &str, owner_label: &str) -> Result<String, EngineError> {
+    async fn owner_check(&self, name: &str, owner_label: &str) -> OwnerCheck {
         let inspected = match self.docker.inspect_container(name, None).await {
             Ok(value) => value,
-            Err(err) if is_not_found(&err) => {
-                return Err(EngineError {
-                    message: "owned container is absent".to_string(),
-                    not_found: true,
-                    kind: EngineErrorKind::Other,
-                    create_pending: false,
-                    create_id: None,
-                });
+            Err(err) if is_not_found(&err) => return OwnerCheck::Absent,
+            Err(err) => {
+                return OwnerCheck::Unknown {
+                    message: err.to_string(),
+                };
             }
-            Err(err) => return Err(map_err(err)),
         };
         let labels = inspected
             .config
             .and_then(|config| config.labels)
             .unwrap_or_default();
         if labels.get(OWNER_LABEL_KEY).map(String::as_str) != Some(owner_label) {
-            return Err(EngineError {
-                message: format!("container {name} does not carry the owner label"),
-                not_found: false,
-                kind: EngineErrorKind::Other,
-                create_pending: false,
-                create_id: None,
-            });
+            return OwnerCheck::Foreign {
+                name: name.to_string(),
+            };
         }
-        inspected
-            .id
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| EngineError::new("inspect returned no container id"))
+        match inspected.id.filter(|id| !id.is_empty()) {
+            Some(id) => OwnerCheck::Owned(id),
+            None => OwnerCheck::Unknown {
+                message: "inspect returned no container id".to_string(),
+            },
+        }
     }
 
+    async fn stop_best_effort(&self, id: &str) -> Result<(), EngineError> {
+        let options = bollard::query_parameters::StopContainerOptionsBuilder::new()
+            .t(1)
+            .build();
+        self.docker
+            .stop_container(id, Some(options))
+            .await
+            .map_err(map_err)
+    }
+
+    /// Forced removal with dependent anonymous volumes; an already-absent
+    /// instance counts as removed.
     async fn force_remove(&self, id: &str) -> Result<(), EngineError> {
         match self
             .docker
@@ -690,72 +683,21 @@ impl Engine {
     }
 }
 
-fn container_body(name: &str, spec: &CreateSpec) -> bollard::models::ContainerCreateBody {
-    let mut labels = HashMap::new();
-    labels.insert(OWNER_LABEL_KEY.to_string(), spec.owner_label.clone());
-    labels.insert("circus.sandbox.name".to_string(), name.to_string());
-    let mut tmpfs = HashMap::new();
-    tmpfs.insert(
-        spec.workspace_path.clone(),
-        format!(
-            "rw,nosuid,nodev,uid={},gid={},mode=0755,size={}",
-            spec.guest_uid, spec.guest_gid, spec.workspace_bytes
-        ),
-    );
-    bollard::models::ContainerCreateBody {
-        image: Some(spec.image.clone()),
-        user: Some(format!("{}:{}", spec.guest_uid, spec.guest_gid)),
-        tty: Some(false),
-        open_stdin: Some(false),
-        attach_stdin: Some(false),
-        env: Some(Vec::new()),
-        cmd: Some(Vec::new()),
-        entrypoint: Some(vec![
-            "python3".to_string(),
-            "-I".to_string(),
-            "-B".to_string(),
-            "-c".to_string(),
-            "import time; time.sleep(31536000)".to_string(),
-        ]),
-        working_dir: Some(spec.workspace_path.clone()),
-        network_disabled: Some(true),
-        exposed_ports: Some(Vec::new()),
-        volumes: Some(Vec::new()),
-        labels: Some(labels),
-        stop_signal: Some("SIGKILL".to_string()),
-        stop_timeout: Some(1),
-        host_config: Some(bollard::models::HostConfig {
-            memory: Some(spec.memory),
-            memory_swap: Some(spec.memory),
-            nano_cpus: Some(spec.nano_cpus),
-            pids_limit: Some(spec.pids),
-            readonly_rootfs: Some(true),
-            network_mode: Some("none".to_string()),
-            cap_drop: Some(vec!["ALL".to_string()]),
-            cap_add: Some(Vec::new()),
-            security_opt: Some(vec!["no-new-privileges:true".to_string()]),
-            privileged: Some(false),
-            publish_all_ports: Some(false),
-            binds: Some(Vec::new()),
-            mounts: Some(Vec::new()),
-            tmpfs: Some(tmpfs),
-            runtime: Some(spec.runtime.clone()),
-            auto_remove: Some(false),
-            init: Some(true),
-            ipc_mode: Some("private".to_string()),
-            cgroupns_mode: Some(bollard::models::HostConfigCgroupnsModeEnum::PRIVATE),
-            oom_kill_disable: Some(false),
-            shm_size: Some(65_536),
-            restart_policy: Some(bollard::models::RestartPolicy {
-                name: Some(bollard::models::RestartPolicyNameEnum::NO),
-                maximum_retry_count: Some(0),
-            }),
-            devices: Some(Vec::new()),
-            extra_hosts: Some(Vec::new()),
-            dns: Some(Vec::new()),
-            ..Default::default()
-        }),
-        ..Default::default()
+impl RemovalControl for Engine {
+    fn inspect_owner(
+        &self,
+        name: &str,
+        owner_label: &str,
+    ) -> impl Future<Output = OwnerCheck> + Send {
+        async move { Engine::owner_check(self, name, owner_label).await }
+    }
+
+    fn stop(&self, id: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
+        async move { Engine::stop_best_effort(self, id).await }
+    }
+
+    fn remove(&self, id: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
+        async move { Engine::force_remove(self, id).await }
     }
 }
 
@@ -766,18 +708,9 @@ fn file_error(kind: EngineErrorKind, message: impl Into<String>) -> EngineError 
         kind,
         create_pending: false,
         create_id: None,
+        output: None,
+        policy: None,
     }
-}
-
-fn push_bounded(buf: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<(), EngineError> {
-    if buf.len().saturating_add(chunk.len()) > limit {
-        return Err(file_error(
-            EngineErrorKind::Limit,
-            "command output exceeded the byte limit",
-        ));
-    }
-    buf.extend_from_slice(chunk);
-    Ok(())
 }
 
 fn connect_socket(kind: SocketKind, path: &str) -> Result<bollard::Docker, EngineError> {
@@ -828,6 +761,8 @@ fn map_err(err: bollard::errors::Error) -> EngineError {
         message: err.to_string(),
         create_pending: false,
         create_id: None,
+        output: None,
+        policy: None,
     }
 }
 

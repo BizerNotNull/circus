@@ -45,13 +45,12 @@ impl CleanupReceipt {
 
     /// Returns whether the most recently published attempt failed.
     ///
-    /// Before the first attempt this is `false`; an incomplete report with
-    /// ownership confirmed absent is also not classified as a failed attempt.
+    /// Before the first attempt this is `false`. Any attempt that did not reach
+    /// full completion counts as failed, including staging cleanup failure after
+    /// the instance itself was confirmed absent: the worker still owns cleanup.
     pub fn last_attempt_failed(&self) -> bool {
         let progress = self.progress.borrow();
-        progress.attempted
-            && !progress.complete
-            && progress.report.ownership != Ownership::ConfirmedAbsent
+        progress.attempted && !progress.complete
     }
 
     /// Waits until the worker confirms instance absence and staging removal.

@@ -69,9 +69,10 @@ mod workspace;
 
 #[doc(inline)]
 pub use api::{
-    BackendConfig, BackendConfigError, CleanupReceipt, CleanupReport, CommandError, CommandOutput,
-    CommandRequest, ConfigError, DockerBackendConfig, EnforcementReport, IoLimits, IsolationConfig,
-    Ownership, Sandbox, SandboxConfig, SandboxError, SandboxPhase, SandboxStatus, StagingError,
+    BackendConfig, BackendConfigError, CleanupFailure, CleanupReceipt, CleanupReport, CommandError,
+    CommandOutput, CommandRequest, ConfigError, DockerBackendConfig, EnforcementReport, IoLimits,
+    IsolationConfig, OutputPhase, Ownership, Sandbox, SandboxConfig, SandboxError,
+    SandboxOperation, SandboxPhase, SandboxStatus, StagingError,
 };
 #[doc(inline)]
 pub use workspace::{

@@ -153,31 +153,117 @@ impl IsolationConfig {
     }
 }
 
-/// Explicit bounds for captured output and each guest file operation.
+/// Explicit bounds for captured output and operation deadlines.
+///
+/// Every deadline is positive and applies to one operation class. They are not
+/// interchangeable: one value is never silently reused for a different class.
+///
+/// - [`Self::command_timeout`] is the ceiling for one `exec` operation. The
+///   worker applies the smaller of the request deadline and this ceiling; a
+///   command deadline destroys the owned instance because the guest process
+///   may have outlived its result.
+/// - [`Self::file_timeout`] bounds guest file operations (`read_file`,
+///   `write_file`, `create_dir_all`, `remove_file`) and workspace snapshot
+///   capture/restore. Their timeout also destroys the owned instance because an
+///   in-flight transport operation cannot be resumed safely.
+/// - [`Self::lifecycle_timeout`] bounds `start`, `pause`, and `resume`, and
+///   also `status` inspection. A timed-out lifecycle transition destroys the
+///   owned instance because the engine may already have applied the transition.
+///   A timed-out `status` observation does **not** destroy anything: it is a
+///   read-only inspection and leaves the phase, identity, and ownership
+///   retryable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IoLimits {
     output_limit_bytes: usize,
+    command_timeout: Duration,
     file_timeout: Duration,
+    lifecycle_timeout: Duration,
 }
 
 impl IoLimits {
-    /// Rejects a zero/unprobeable output bound or a zero file-operation timeout.
+    /// Validates shared output and file-operation bounds using one deadline for
+    /// all operation classes.
+    ///
+    /// Use [`Self::with_deadlines`] when command, file, and lifecycle/status
+    /// deadlines must differ. This constructor stores the supplied file deadline
+    /// explicitly as the command and lifecycle/status deadline as well; it does
+    /// not leave any class unset.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError::InvalidOutputLimit`] for `0` or `usize::MAX` and
-    /// [`ConfigError::InvalidFileTimeout`] for a zero timeout.
+    /// [`ConfigError::InvalidFileTimeout`] for a zero file deadline.
     pub fn new(output_limit_bytes: usize, file_timeout: Duration) -> Result<Self, ConfigError> {
+        Self::with_deadlines(
+            output_limit_bytes,
+            file_timeout,
+            file_timeout,
+            file_timeout,
+        )
+    }
+
+    /// Validates a distinct positive deadline for each operation class.
+    ///
+    /// `command_timeout` caps one exec, `file_timeout` bounds guest file
+    /// transport and snapshots, and `lifecycle_timeout` bounds state
+    /// transitions plus read-only status inspection. See the type documentation
+    /// for which timeouts destroy the instance and which leave it owned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidOutputLimit`] for `0` or `usize::MAX`,
+    /// [`ConfigError::InvalidFileTimeout`] for a zero file deadline,
+    /// [`ConfigError::InvalidCommandTimeout`] for a zero command deadline, and
+    /// [`ConfigError::InvalidLifecycleTimeout`] for a zero lifecycle/status
+    /// deadline.
+    pub fn with_deadlines(
+        output_limit_bytes: usize,
+        command_timeout: Duration,
+        file_timeout: Duration,
+        lifecycle_timeout: Duration,
+    ) -> Result<Self, ConfigError> {
         if output_limit_bytes == 0 || output_limit_bytes == usize::MAX {
             return Err(ConfigError::InvalidOutputLimit { output_limit_bytes });
         }
         if file_timeout.is_zero() {
             return Err(ConfigError::InvalidFileTimeout);
         }
+        if command_timeout.is_zero() {
+            return Err(ConfigError::InvalidCommandTimeout);
+        }
+        if lifecycle_timeout.is_zero() {
+            return Err(ConfigError::InvalidLifecycleTimeout);
+        }
         Ok(Self {
             output_limit_bytes,
+            command_timeout,
             file_timeout,
+            lifecycle_timeout,
         })
+    }
+
+    /// Shared stdout+stderr byte bound for one exec request.
+    #[must_use]
+    pub fn output_limit_bytes(&self) -> usize {
+        self.output_limit_bytes
+    }
+
+    /// Ceiling applied to every exec operation.
+    #[must_use]
+    pub fn command_timeout(&self) -> Duration {
+        self.command_timeout
+    }
+
+    /// Deadline for guest file operations and workspace snapshots.
+    #[must_use]
+    pub fn file_timeout(&self) -> Duration {
+        self.file_timeout
+    }
+
+    /// Deadline for lifecycle transitions and read-only status inspection.
+    #[must_use]
+    pub fn lifecycle_timeout(&self) -> Duration {
+        self.lifecycle_timeout
     }
 }
 
@@ -236,9 +322,24 @@ impl SandboxConfig {
         self.io_limits.output_limit_bytes
     }
 
+    /// Ceiling for one exec operation; the worker uses the smaller of this
+    /// value and the per-request deadline.
+    #[must_use]
+    pub fn command_timeout(&self) -> Duration {
+        self.io_limits.command_timeout
+    }
+
+    /// Deadline for guest file operations and workspace snapshots.
     #[must_use]
     pub fn file_timeout(&self) -> Duration {
         self.io_limits.file_timeout
+    }
+
+    /// Deadline for lifecycle transitions and read-only status inspection. A
+    /// status timeout does not destroy the instance.
+    #[must_use]
+    pub fn lifecycle_timeout(&self) -> Duration {
+        self.io_limits.lifecycle_timeout
     }
 }
 
@@ -255,6 +356,10 @@ pub enum ConfigError {
     InvalidOutputLimit { output_limit_bytes: usize },
     #[error("file-operation timeout must be non-zero")]
     InvalidFileTimeout,
+    #[error("command timeout must be non-zero")]
+    InvalidCommandTimeout,
+    #[error("lifecycle/status timeout must be non-zero")]
+    InvalidLifecycleTimeout,
     #[error(transparent)]
     Limits(#[from] ResourceLimitsError),
     #[error("relative path rejected: {reason}")]
@@ -345,6 +450,34 @@ mod tests {
         assert_eq!(config.isolation().workspace_path(), "/workspace");
         assert_eq!(config.output_limit_bytes(), 4096);
         assert_eq!(config.file_timeout(), Duration::from_secs(2));
+        assert_eq!(config.command_timeout(), Duration::from_secs(2));
+        assert_eq!(config.lifecycle_timeout(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn separate_operation_deadlines_are_explicit_and_positive() {
+        let io = IoLimits::with_deadlines(
+            4096,
+            Duration::from_secs(4),
+            Duration::from_secs(2),
+            Duration::from_secs(9),
+        )
+        .unwrap();
+        assert_eq!(io.command_timeout(), Duration::from_secs(4));
+        assert_eq!(io.file_timeout(), Duration::from_secs(2));
+        assert_eq!(io.lifecycle_timeout(), Duration::from_secs(9));
+        assert_eq!(
+            IoLimits::with_deadlines(1, Duration::ZERO, Duration::from_secs(1), Duration::from_secs(1)),
+            Err(ConfigError::InvalidCommandTimeout)
+        );
+        assert_eq!(
+            IoLimits::with_deadlines(1, Duration::from_secs(1), Duration::from_secs(1), Duration::ZERO),
+            Err(ConfigError::InvalidLifecycleTimeout)
+        );
+        assert_eq!(
+            IoLimits::new(1, Duration::ZERO),
+            Err(ConfigError::InvalidFileTimeout)
+        );
     }
 
     #[test]

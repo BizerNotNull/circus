@@ -4,14 +4,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::infrastructure::{
-    Backend, CommonSpec, EngineError, EngineErrorKind, InstanceId, StagedBytes,
+    Backend, CommonSpec, EngineError, EngineErrorKind, InstanceId, OutputPhase as EngineOutputPhase,
+    Recovered, StagedBytes,
 };
 use crate::runtime::{check_relative, SandboxConfig};
 use crate::workspace::{StagedNode, WorkspaceError};
 
 use super::{
-    CleanupReport, CommandOutput, CommandRequest, EnforcementReport, Ownership, SandboxError,
-    SandboxPhase, SandboxStatus, State,
+    CleanupFailure, CleanupReport, CommandOutput, CommandRequest, EnforcementReport, OutputPhase,
+    Ownership, SandboxError, SandboxOperation, SandboxPhase, SandboxStatus, State,
 };
 
 /// Builds backend-neutral create values once per sandbox.
@@ -101,14 +102,29 @@ pub(super) async fn cleanup_engine_error<B: Backend, T>(
     let report = destroy_report(state).await;
     if state.phase == SandboxPhase::CleanupRequired {
         return Err(SandboxError::CleanupRequired {
-            instance_id: state.id.as_ref().map_or_else(
-                || state.name.clone(),
-                |id| id.as_str().to_string(),
-            ),
+            instance_id: report.instance_id.unwrap_or_else(|| state.name.clone()),
+            ownership: report.ownership,
             detail: format!("{}; {}", err.message, report.detail),
+            failure: CleanupFailure::Backend {
+                message: err.message,
+            },
         });
     }
     Err(engine_err(err))
+}
+
+fn cleanup_required(
+    instance_id: String,
+    ownership: Ownership,
+    detail: String,
+    failure: CleanupFailure,
+) -> SandboxError {
+    SandboxError::CleanupRequired {
+        instance_id,
+        ownership,
+        detail,
+        failure,
+    }
 }
 
 pub(super) async fn destroy_state<B: Backend>(state: &mut State<B>) -> Result<(), SandboxError> {
@@ -116,40 +132,84 @@ pub(super) async fn destroy_state<B: Backend>(state: &mut State<B>) -> Result<()
         return Ok(());
     }
     state.phase = SandboxPhase::CleanupRequired;
-    let recovery = state.backend.recover_owned(&state.name, &state.nonce).await;
+    let retained = state.id.clone();
+    let instance_id = retained
+        .as_ref()
+        .map_or_else(|| state.name.clone(), |id| id.as_str().to_string());
+    let recovery = state
+        .backend
+        .recover_owned(&state.name, &state.nonce, retained.as_ref())
+        .await;
     match recovery {
-        Ok(crate::infrastructure::Recovered::Removed) => {}
-        Ok(crate::infrastructure::Recovered::Absent) if state.create_unsettled => {
-            return Err(SandboxError::CleanupRequired {
-                instance_id: state.name.clone(),
-                detail: "create response is unresolved; owned instance may materialize later"
-                    .to_string(),
-            });
+        Recovered::Removed => {}
+        Recovered::Absent if state.create_unsettled => {
+            return Err(cleanup_required(
+                state.name.clone(),
+                Ownership::Unknown,
+                "create response is unresolved; owned instance may materialize later".to_string(),
+                CleanupFailure::UnresolvedCreate {
+                    instance_id: state.name.clone(),
+                },
+            ));
         }
-        Ok(crate::infrastructure::Recovered::Absent) => {}
-        Err(err) => {
-            return Err(SandboxError::CleanupRequired {
-                instance_id: state.id.as_ref().map_or_else(
-                    || state.name.clone(),
-                    |id| id.as_str().to_string(),
-                ),
-                detail: err.message,
-            });
+        Recovered::Absent => {}
+        Recovered::StillPresent { detail } => {
+            return Err(cleanup_required(
+                instance_id.clone(),
+                Ownership::StillPresent,
+                detail.clone(),
+                CleanupFailure::StillPresent {
+                    instance_id,
+                    detail,
+                },
+            ));
+        }
+        Recovered::Unknown { detail } => {
+            return Err(cleanup_required(
+                instance_id,
+                Ownership::Unknown,
+                detail.clone(),
+                CleanupFailure::Unknown { detail },
+            ));
         }
     }
     state.create_unsettled = false;
     let workspace = Arc::clone(&state.workspace);
     // Do not clear the owned identity or discard staging on a failed cleanup.
-    spawn_block(move || {
+    let staged = spawn_block(move || {
         workspace
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .cleanup()
     })
-    .await??;
-    state.id = None;
-    state.phase = SandboxPhase::Destroyed;
-    Ok(())
+    .await;
+    match staged {
+        Ok(Ok(())) => {
+            state.id = None;
+            state.phase = SandboxPhase::Destroyed;
+            Ok(())
+        }
+        Ok(Err(err)) => {
+            let detail = format!("staging cleanup failed: {err}");
+            Err(cleanup_required(
+                state.name.clone(),
+                Ownership::ConfirmedAbsent,
+                detail,
+                CleanupFailure::Staging(err),
+            ))
+        }
+        Err(err) => {
+            let detail = format!("staging cleanup task failed: {err}");
+            Err(cleanup_required(
+                state.name.clone(),
+                Ownership::ConfirmedAbsent,
+                detail,
+                CleanupFailure::Backend {
+                    message: err.to_string(),
+                },
+            ))
+        }
+    }
 }
 
 pub(super) async fn write_file<B: Backend>(
@@ -302,6 +362,7 @@ pub(super) async fn exec<B: Backend>(
     if request.output_limit_bytes > state.config.output_limit_bytes() {
         return Err(SandboxError::OutputLimit {
             limit: state.config.output_limit_bytes(),
+            phase: OutputPhase::NotStarted,
             ownership: Ownership::StillPresent,
             detail: "request exceeds configured output limit".to_string(),
         });
@@ -324,9 +385,19 @@ pub(super) async fn exec<B: Backend>(
             stderr: done.stderr,
         }),
         Err(err) if err.kind == EngineErrorKind::Limit => {
+            // stdout and stderr shared the request budget; report which stream
+            // crossed it and reclaim the whole instance. Cleanup failure keeps
+            // ownership reported rather than turning the error into success.
+            let phase = match err.output.map(|output| output.phase) {
+                Some(EngineOutputPhase::Stderr) => OutputPhase::Stderr,
+                // An engine Limit without stream metadata is defensive only:
+                // command output limits always originate in the collector.
+                Some(EngineOutputPhase::Stdout) | None => OutputPhase::Stdout,
+            };
             let report = destroy_report(state).await;
             Err(SandboxError::OutputLimit {
                 limit: request.output_limit_bytes,
+                phase,
                 ownership: report.ownership,
                 detail: report.detail,
             })
@@ -337,28 +408,45 @@ pub(super) async fn exec<B: Backend>(
 
 pub(super) async fn destroy_for_cancel<B: Backend, T>(
     state: &mut State<B>,
+    operation: SandboxOperation,
     detail: &str,
 ) -> Result<T, SandboxError> {
     let report = destroy_report(state).await;
     Err(SandboxError::Cancelled {
         instance_id: report.instance_id,
         ownership: report.ownership,
+        operation,
         detail: format!("{detail}; {}", report.detail),
     })
 }
 
-pub(super) async fn destroy_report<B: Backend>(state: &mut State<B>) -> CleanupReport {
-    let id = state.id.as_ref().map(|id| id.as_str().to_string());
-    let report = match destroy_state(state).await {
-        Ok(()) => CleanupReport {
-            instance_id: None,
-            ownership: Ownership::ConfirmedAbsent,
-            detail: "owned instance confirmed absent".to_string(),
+/// One cleanup attempt with both its observation and the caller-visible typed
+/// failure, so explicit `destroy` can preserve the source chain.
+pub(super) async fn destroy_attempt<B: Backend>(
+    state: &mut State<B>,
+) -> (CleanupReport, Option<SandboxError>) {
+    let fallback_id = state.id.as_ref().map(|id| id.as_str().to_string());
+    let error = destroy_state(state).await.err();
+    let report = match &error {
+        Some(SandboxError::CleanupRequired {
+            instance_id,
+            ownership,
+            detail,
+            ..
+        }) => CleanupReport {
+            instance_id: Some(instance_id.clone()),
+            ownership: *ownership,
+            detail: detail.clone(),
         },
-        Err(err) => CleanupReport {
-            instance_id: id.or_else(|| Some(state.name.clone())),
+        Some(err) => CleanupReport {
+            instance_id: fallback_id.or_else(|| Some(state.name.clone())),
             ownership: Ownership::Unknown,
             detail: err.to_string(),
+        },
+        None => CleanupReport {
+            instance_id: None,
+            ownership: Ownership::ConfirmedAbsent,
+            detail: "owned instance confirmed absent and staging removed".to_string(),
         },
     };
     state.cleanup.send_replace(super::cleanup::Progress {
@@ -366,7 +454,11 @@ pub(super) async fn destroy_report<B: Backend>(state: &mut State<B>) -> CleanupR
         complete: state.phase == SandboxPhase::Destroyed,
         attempted: true,
     });
-    report
+    (report, error)
+}
+
+pub(super) async fn destroy_report<B: Backend>(state: &mut State<B>) -> CleanupReport {
+    destroy_attempt(state).await.0
 }
 
 pub(super) async fn status<B: Backend>(
@@ -393,7 +485,10 @@ pub(super) async fn status<B: Backend>(
             cap_drop: report.cap_drop,
             security_opt: report.security_opt,
             bind_count: report.bind_count,
-            tmpfs_workspace: report.tmpfs_workspace,
+            tmpfs_workspace: report
+                .tmpfs
+                .as_ref()
+                .and_then(|tmpfs| tmpfs.values().next().cloned()),
         }),
     })
 }
@@ -472,7 +567,11 @@ pub(super) fn required_id<B: Backend>(state: &State<B>) -> Result<InstanceId, Sa
         .clone()
         .ok_or_else(|| SandboxError::CleanupRequired {
             instance_id: state.name.clone(),
+            ownership: Ownership::Unknown,
             detail: "instance id is not retained".to_string(),
+            failure: CleanupFailure::Unknown {
+                detail: "instance id is not retained".to_string(),
+            },
         })
 }
 
@@ -495,11 +594,18 @@ pub(super) async fn file_result<B: Backend, T>(
             EngineErrorKind::UnsafeFile => {
                 Err(WorkspaceError::NotRegularFile { path: path.into() }.into())
             }
-            EngineErrorKind::Limit => Err(WorkspaceError::LimitExceeded {
-                limit: state.config.limits().max_file_bytes(),
-                actual: state.config.limits().max_file_bytes().saturating_add(1),
-            }
-            .into()),
+            EngineErrorKind::Limit => match err.output.map(|output| output.phase) {
+                // stdout exceeding `max_bytes + 1` proves the guest file itself
+                // is over the configured per-file bound.
+                Some(EngineOutputPhase::Stdout) | None => Err(WorkspaceError::LimitExceeded {
+                    limit: state.config.limits().max_file_bytes(),
+                    actual: state.config.limits().max_file_bytes().saturating_add(1),
+                }
+                .into()),
+                // The helper's separate 4 KiB stderr allowance is a transport
+                // failure, not a file-size result: reclaim the instance.
+                Some(EngineOutputPhase::Stderr) => cleanup_engine_error(state, err).await,
+            },
             EngineErrorKind::NotFound => Err(WorkspaceError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 err.message,
@@ -524,6 +630,17 @@ pub(super) async fn file_result<B: Backend, T>(
 }
 
 pub(super) fn engine_err(err: EngineError) -> SandboxError {
+    if let Some(mismatch) = err.policy {
+        return SandboxError::PolicyMismatch {
+            field: mismatch.field.to_string(),
+            expected: mismatch.expected,
+            actual: mismatch.actual,
+        };
+    }
+    // Output budget violations are mapped by `exec` (which knows the request
+    // budget and observed ownership) and by `file_result` (where stdout means a
+    // file-size result). Reaching this generic mapper with one is defensive;
+    // its message still names the stream and limit.
     match err.kind {
         EngineErrorKind::InvalidPath => SandboxError::RelativePath {
             reason: "guest transport rejected the relative path",

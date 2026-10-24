@@ -9,8 +9,8 @@ mod snapshot;
 pub use cleanup::CleanupReceipt;
 pub use input::{CommandError, StagingError};
 pub use model::{
-    CleanupReport, CommandOutput, CommandRequest, EnforcementReport, Ownership, SandboxError,
-    SandboxPhase, SandboxStatus,
+    CleanupFailure, CleanupReport, CommandOutput, CommandRequest, EnforcementReport, OutputPhase,
+    Ownership, SandboxError, SandboxOperation, SandboxPhase, SandboxStatus,
 };
 
 use std::path::Path;
@@ -123,8 +123,11 @@ impl Sandbox {
     /// [`SandboxError::Config`] for invalid neutral configuration,
     /// [`SandboxError::UnsupportedCapability`] for an unsupported operation set,
     /// [`SandboxError::BackendImageUnavailable`] when the local image is absent,
-    /// and [`SandboxError::Backend`] or [`SandboxError::Workspace`] for other
-    /// preparation failures. If creation leaves cleanup outstanding,
+    /// [`SandboxError::Backend`] or [`SandboxError::Workspace`] for other
+    /// preparation failures, and [`SandboxError::PolicyMismatch`] when the
+    /// engine's inspected effective policy differs from the constructed policy.
+    /// A mismatch always initiates destruction and is never reported as
+    /// success. If creation leaves cleanup outstanding,
     /// [`SandboxError::CreationCleanupRequired`] carries the original error and
     /// a receipt for instance and staging cleanup. Its worker retries
     /// independently of the receipt or this future's lifetime.
@@ -200,24 +203,51 @@ impl Sandbox {
     /// [`SandboxError::Staging`] leaves the instance in `Created`, with its
     /// files and ownership retained. Remove or shrink files and retry, or
     /// explicitly [`destroy`](Self::destroy) it.
+    ///
+    /// Uses the configured lifecycle deadline for the whole transition. A
+    /// timeout or cancellation destroys the owned instance because the engine
+    /// may already have accepted the start; the returned error reports observed
+    /// ownership.
     pub async fn start(&self) -> Result<(), SandboxError> {
         self.call(Op::Start).await?
     }
 
+    /// Uses the configured lifecycle deadline. A timeout or cancellation
+    /// destroys the owned instance because the transition may already have been
+    /// applied.
     pub async fn pause(&self) -> Result<(), SandboxError> {
         self.call(Op::Pause).await?
     }
 
+    /// Uses the configured lifecycle deadline. A timeout or cancellation
+    /// destroys the owned instance because the transition may already have been
+    /// applied.
     pub async fn resume(&self) -> Result<(), SandboxError> {
         self.call(Op::Resume).await?
     }
 
-    /// Force-removes the owned instance. Repeat calls after confirmed absence
-    /// return `Ok` and do not call the backend again. Failure keeps the id.
+    /// Force-removes the owned instance and its staging.
+    ///
+    /// This operation has no caller deadline and is never cancelled by dropping
+    /// the future: losing the caller cannot relinquish ownership. Repeat and
+    /// concurrent calls are serialized by the worker; after confirmed absence
+    /// they return `Ok` without contacting the backend again.
+    ///
+    /// Failure returns [`SandboxError::CleanupRequired`] with the observed
+    /// [`Ownership`] (`StillPresent` or `Unknown`) and a typed
+    /// [`CleanupFailure`] source. The handle retains its instance identity and
+    /// staging, and calling `destroy` again retries cleanup. Success is never
+    /// reported while ownership is unconfirmed.
     pub async fn destroy(&self) -> Result<(), SandboxError> {
         self.call(Op::Destroy).await?
     }
 
+    /// Stages bytes in `Created` or uploads to the guest in `Running`.
+    ///
+    /// Uses the configured file deadline. A timeout or cancellation destroys
+    /// the owned instance because the transport may have partially applied the
+    /// write; cleanup failure is reported through the error and remains
+    /// retryable via [`destroy`](Self::destroy).
     pub async fn write_file(
         &self,
         path: impl AsRef<Path>,
@@ -239,18 +269,28 @@ impl Sandbox {
         .await?
     }
 
+    /// Reads from host staging in `Created` or the guest workspace in `Running`.
+    ///
+    /// Uses the configured file deadline; a timeout or cancellation destroys
+    /// the owned instance.
     pub async fn read_file(&self, path: impl AsRef<Path>) -> Result<Vec<u8>, SandboxError> {
         let path = path_text(path.as_ref())?;
         self.call(|reply| Op::Read { path, reply }).await?
     }
 
+    /// Creates a directory in staging or the guest workspace.
+    ///
+    /// Uses the configured file deadline; a timeout or cancellation destroys
+    /// the owned instance.
     pub async fn create_dir_all(&self, path: impl AsRef<Path>) -> Result<(), SandboxError> {
         let path = path_text(path.as_ref())?;
         self.call(|reply| Op::Mkdir { path, reply }).await?
     }
 
     /// Unlinks a file using the confined guest transport when running.
-    /// Cancelling an in-flight operation destroys the owned instance.
+    ///
+    /// Uses the configured file deadline; a timeout or cancellation destroys
+    /// the owned instance.
     pub async fn remove_file(&self, path: impl AsRef<Path>) -> Result<(), SandboxError> {
         let path = path_text(path.as_ref())?;
         self.call(|reply| Op::Unlink { path, reply }).await?
@@ -262,12 +302,22 @@ impl Sandbox {
     /// destroys the owned instance. A pending response is not treated as
     /// "not accepted". Timeout and observed output overflow do the same.
     ///
+    /// stdout and stderr share the request's single `output_limit_bytes`
+    /// budget. Exactly-at-limit output is accepted; the first byte over is
+    /// [`SandboxError::OutputLimit`] naming the stream, and the worker reclaims
+    /// the container and its descendants. A failed reclamation is reported
+    /// through `ownership`, never rewritten as success.
+    ///
+    /// The effective command deadline is the smaller of `request.timeout` and
+    /// the configured [`crate::runtime::IoLimits::command_timeout`] ceiling.
+    ///
     /// # Errors
     ///
     /// [`SandboxError::Command`] rejects empty argv, zero timeout, and zero
     /// output bound before queueing, without changing phase or ownership.
     /// A request above the configured output bound returns
-    /// [`SandboxError::OutputLimit`] with `StillPresent` without executing.
+    /// [`SandboxError::OutputLimit`] with phase `NotStarted` and `StillPresent`
+    /// without executing.
     pub async fn exec(&self, request: CommandRequest) -> Result<CommandOutput, SandboxError> {
         if request.argv.is_empty() {
             return Err(CommandError::EmptyArgv.into());
@@ -289,6 +339,12 @@ impl Sandbox {
 
     /// Returns the phase, retained instance identity, and inspected enforcement
     /// evidence. Requested limits are never reported as enforced.
+    ///
+    /// Status uses the configured lifecycle/status deadline but is read-only:
+    /// a timeout or cancellation returns [`SandboxError::TimedOut`] or
+    /// [`SandboxError::Cancelled`] with [`SandboxOperation::Status`] and leaves
+    /// the phase, identity, and ownership intact. Retry `status`; nothing is
+    /// destroyed. Other timed-out operations destroy the instance instead.
     pub async fn status(&self) -> Result<SandboxStatus, SandboxError> {
         self.call(Op::Status).await?
     }
@@ -431,9 +487,12 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
     let Message { op, cancel } = message;
     let shutdown = state.shutdown.clone();
     let file_timeout = state.config.file_timeout();
-    // Drop an outstanding backend future before attempting instance removal.
+    let lifecycle_timeout = state.config.lifecycle_timeout();
+    // Owned transitions and transports destroy the instance on cancellation or
+    // timeout because the engine may already have applied the operation. Drop
+    // the outstanding backend future before attempting removal.
     macro_rules! run {
-        ($future:expr, $timeout:expr) => {{
+        ($future:expr, $timeout:expr, $operation:expr) => {{
             let outcome = {
                 let call = $future;
                 tokio::pin!(call);
@@ -450,6 +509,7 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
                 Err(true) => {
                     operations::destroy_for_cancel(
                         state,
+                        $operation,
                         "operation cancelled while acceptance was uncertain",
                     )
                     .await
@@ -459,7 +519,53 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
                     Err(SandboxError::TimedOut {
                         instance_id: report.instance_id,
                         ownership: report.ownership,
+                        operation: $operation,
                         detail: report.detail,
+                    })
+                }
+            }
+        }};
+    }
+    // Read-only status inspection: a deadline or cancellation never destroys the
+    // instance; phase and ownership stay retryable.
+    macro_rules! observe {
+        ($future:expr, $timeout:expr) => {{
+            let outcome = {
+                let call = $future;
+                tokio::pin!(call);
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => Err(true),
+                    () = shutdown.cancelled() => Err(true),
+                    () = tokio::time::sleep($timeout) => Err(false),
+                    result = &mut call => Ok(result),
+                }
+            };
+            match outcome {
+                Ok(result) => result,
+                Err(cancelled) => {
+                    let instance_id = state.id.as_ref().map(|id| id.as_str().to_string());
+                    let ownership = if instance_id.is_some() {
+                        Ownership::StillPresent
+                    } else {
+                        Ownership::Unknown
+                    };
+                    Err(if cancelled {
+                        SandboxError::Cancelled {
+                            instance_id,
+                            ownership,
+                            operation: SandboxOperation::Status,
+                            detail: "status observation cancelled; phase and ownership retained"
+                                .to_string(),
+                        }
+                    } else {
+                        SandboxError::TimedOut {
+                            instance_id,
+                            ownership,
+                            operation: SandboxOperation::Status,
+                            detail: "status deadline elapsed; phase and ownership retained"
+                                .to_string(),
+                        }
                     })
                 }
             }
@@ -467,56 +573,92 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
     }
     match op {
         Op::Start(reply) => {
-            let result = run!(operations::start(state), file_timeout);
+            let result = run!(
+                operations::start(state),
+                lifecycle_timeout,
+                SandboxOperation::Start
+            );
             let _ = reply.send(result);
         }
         Op::Pause(reply) => {
-            let result = run!(operations::pause(state), file_timeout);
+            let result = run!(
+                operations::pause(state),
+                lifecycle_timeout,
+                SandboxOperation::Pause
+            );
             let _ = reply.send(result);
         }
         Op::Resume(reply) => {
-            let result = run!(operations::resume(state), file_timeout);
+            let result = run!(
+                operations::resume(state),
+                lifecycle_timeout,
+                SandboxOperation::Resume
+            );
             let _ = reply.send(result);
         }
         // Never cancel cleanup itself: a lost caller cannot relinquish ownership.
         Op::Destroy(reply) => {
-            let report = destroy_report(state).await;
+            let (_, error) = operations::destroy_attempt(state).await;
             let result = if state.phase == SandboxPhase::Destroyed {
                 Ok(())
             } else {
-                Err(SandboxError::CleanupRequired {
+                // `destroy_state` always reports a typed CleanupRequired here;
+                // preserve it instead of synthesizing a weaker error.
+                Err(error.unwrap_or_else(|| SandboxError::CleanupRequired {
                     instance_id: state
                         .id
                         .as_ref()
                         .map_or_else(|| state.name.clone(), |id| id.as_str().to_string()),
-                    detail: report.detail,
-                })
+                    ownership: Ownership::Unknown,
+                    detail: "destroy did not confirm owned cleanup".to_string(),
+                    failure: CleanupFailure::Unknown {
+                        detail: "destroy did not confirm owned cleanup".to_string(),
+                    },
+                }))
             };
             let _ = reply.send(result);
         }
         Op::Write { path, bytes, reply } => {
-            let result = run!(operations::write_file(state, &path, bytes), file_timeout);
+            let result = run!(
+                operations::write_file(state, &path, bytes),
+                file_timeout,
+                SandboxOperation::WriteFile
+            );
             let _ = reply.send(result);
         }
         Op::Read { path, reply } => {
-            let result = run!(operations::read_file(state, &path), file_timeout);
+            let result = run!(
+                operations::read_file(state, &path),
+                file_timeout,
+                SandboxOperation::ReadFile
+            );
             let _ = reply.send(result);
         }
         Op::Mkdir { path, reply } => {
-            let result = run!(operations::mkdir(state, &path), file_timeout);
+            let result = run!(
+                operations::mkdir(state, &path),
+                file_timeout,
+                SandboxOperation::CreateDirAll
+            );
             let _ = reply.send(result);
         }
         Op::Unlink { path, reply } => {
-            let result = run!(operations::unlink(state, &path), file_timeout);
+            let result = run!(
+                operations::unlink(state, &path),
+                file_timeout,
+                SandboxOperation::RemoveFile
+            );
             let _ = reply.send(result);
         }
         Op::Exec { request, reply } => {
-            let timeout = request.timeout;
-            let result = run!(operations::exec(state, request), timeout);
+            // The configured command timeout is an operator ceiling; a request
+            // may ask for a shorter deadline but never a longer one.
+            let timeout = request.timeout.min(state.config.command_timeout());
+            let result = run!(operations::exec(state, request), timeout, SandboxOperation::Exec);
             let _ = reply.send(result);
         }
         Op::Status(reply) => {
-            let result = run!(operations::status(state), file_timeout);
+            let result = observe!(operations::status(state), lifecycle_timeout);
             let _ = reply.send(result);
         }
         Op::CaptureSnapshot {
@@ -535,78 +677,5 @@ async fn dispatch<B: Backend>(state: &mut State<B>, message: Message) {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::time::Duration;
+mod tests;
 
-    use super::*;
-
-    async fn rejected_without_worker(request: CommandRequest, expected: CommandError) {
-        let (tx, mut rx) = mpsc::channel(QUEUE);
-        let sandbox = Sandbox {
-            tx,
-            shutdown: CancellationToken::new(),
-            cleanup: cleanup::channel("unused-test-instance".to_string()).1,
-            max_file_bytes: 1024,
-        };
-        let err = tokio::time::timeout(Duration::from_secs(1), sandbox.exec(request))
-            .await
-            .expect("invalid command must not wait for a worker")
-            .unwrap_err();
-        assert!(
-            !matches!(err, SandboxError::RelativePath { .. }),
-            "invalid command was classified as a path failure: {err:?}"
-        );
-        assert!(matches!(&err, SandboxError::Command(actual) if actual == &expected));
-        assert_eq!(
-            std::error::Error::source(&err)
-                .and_then(|source| source.downcast_ref::<CommandError>()),
-            Some(&expected)
-        );
-        assert!(matches!(
-            rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
-        assert!(!sandbox.shutdown.is_cancelled());
-    }
-
-    fn request() -> CommandRequest {
-        CommandRequest {
-            argv: vec!["/bin/true".into()],
-            timeout: Duration::from_secs(1),
-            output_limit_bytes: 1024,
-        }
-    }
-
-    #[tokio::test]
-    async fn empty_command_is_not_a_path_error() {
-        let mut request = request();
-        request.argv.clear();
-        rejected_without_worker(request, CommandError::EmptyArgv).await;
-    }
-
-    #[tokio::test]
-    async fn zero_command_timeout_is_not_a_path_error() {
-        let mut request = request();
-        request.timeout = Duration::ZERO;
-        rejected_without_worker(
-            request,
-            CommandError::InvalidTimeout {
-                timeout: Duration::ZERO,
-            },
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn zero_command_output_limit_is_not_a_path_error() {
-        let mut request = request();
-        request.output_limit_bytes = 0;
-        rejected_without_worker(
-            request,
-            CommandError::InvalidOutputLimit {
-                output_limit_bytes: 0,
-            },
-        )
-        .await;
-    }
-}

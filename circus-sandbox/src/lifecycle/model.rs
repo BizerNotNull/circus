@@ -25,10 +25,97 @@ pub enum Ownership {
     Unknown,
 }
 
+/// Operation a caller-visible deadline or cancellation is attributed to.
+///
+/// This distinguishes which configured deadline fired. See
+/// [`crate::runtime::IoLimits`] for which classes destroy the owned instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxOperation {
+    Start,
+    Pause,
+    Resume,
+    Status,
+    WriteFile,
+    ReadFile,
+    CreateDirAll,
+    RemoveFile,
+    Exec,
+    CaptureWorkspaceSnapshot,
+    RestoreWorkspaceSnapshot,
+}
+
+impl std::fmt::Display for SandboxOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Start => "start",
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+            Self::Status => "status",
+            Self::WriteFile => "write_file",
+            Self::ReadFile => "read_file",
+            Self::CreateDirAll => "create_dir_all",
+            Self::RemoveFile => "remove_file",
+            Self::Exec => "exec",
+            Self::CaptureWorkspaceSnapshot => "capture_workspace_snapshot",
+            Self::RestoreWorkspaceSnapshot => "restore_workspace_snapshot",
+        };
+        f.write_str(name)
+    }
+}
+
+/// Stream whose next chunk would exceed the shared stdout+stderr budget.
+///
+/// `NotStarted` means the request was rejected before execution because its
+/// declared output bound exceeds the configured bound; no byte was collected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputPhase {
+    NotStarted,
+    Stdout,
+    Stderr,
+}
+
+impl std::fmt::Display for OutputPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::NotStarted => "not started",
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        };
+        f.write_str(name)
+    }
+}
+
+/// Why owned cleanup could not confirm absence.
+///
+/// This is the standard error source of [`SandboxError::CleanupRequired`] and
+/// contains no backend SDK type. A retry can succeed after any of these.
+#[derive(Debug, thiserror::Error)]
+pub enum CleanupFailure {
+    /// A backend operation failed before either absence or presence could be
+    /// confirmed. The retained instance identity and staging are still owned.
+    #[error("backend removal failed: {message}")]
+    Backend { message: String },
+    /// Forced removal was attempted, but inspection still confirms the instance.
+    #[error("instance {instance_id} is still present: {detail}")]
+    StillPresent { instance_id: String, detail: String },
+    /// Neither absence nor presence could be confirmed.
+    #[error("instance ownership is unknown: {detail}")]
+    Unknown { detail: String },
+    /// Creation never settled, so confirmed absence now cannot rule out a late
+    /// instance. Owned cleanup continues.
+    #[error("creation of instance {instance_id} is unresolved; absence is not final")]
+    UnresolvedCreate { instance_id: String },
+    /// The instance is gone but local staging could not be removed. Staging is
+    /// still owned and retryable.
+    #[error("staging cleanup failed: {0}")]
+    Staging(#[from] WorkspaceError),
+}
+
 /// Cleanup outcome. Success is never implied when ownership is not confirmed absent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanupReport {
-    /// Backend instance identity while it may still exist.
+    /// Backend instance identity retained for retry. `None` only when the
+    /// instance is confirmed absent and staging cleanup completed.
     pub instance_id: Option<String>,
     pub ownership: Ownership,
     pub detail: String,
@@ -69,9 +156,12 @@ pub struct SandboxStatus {
 pub struct CommandRequest {
     /// Separate arguments; must include at least the executable.
     pub argv: Vec<String>,
-    /// Non-zero command deadline.
+    /// Requested non-zero command deadline. The worker also applies the
+    /// configured [`crate::runtime::IoLimits::command_timeout`] ceiling and
+    /// enforces whichever deadline is shorter.
     pub timeout: Duration,
-    /// Non-zero captured stdout/stderr byte bound.
+    /// Non-zero captured stdout+stderr byte bound. Both streams share this
+    /// single budget; exactly-at-limit output is allowed.
     pub output_limit_bytes: usize,
 }
 
@@ -124,23 +214,39 @@ pub enum SandboxError {
     /// type is exposed.
     #[error("backend operation failed: {message}")]
     Backend { message: String },
-    #[error("command timed out; instance ownership is {ownership:?}: {detail}")]
+    #[error("{operation} timed out; instance ownership is {ownership:?}: {detail}")]
     TimedOut {
         instance_id: Option<String>,
         ownership: Ownership,
+        /// Operation whose deadline fired. `Status` never destroys the instance.
+        operation: SandboxOperation,
         detail: String,
     },
-    #[error("command cancelled; instance ownership is {ownership:?}: {detail}")]
+    #[error("{operation} cancelled; instance ownership is {ownership:?}: {detail}")]
     Cancelled {
         instance_id: Option<String>,
         ownership: Ownership,
+        operation: SandboxOperation,
         detail: String,
     },
-    #[error("output exceeded {limit} bytes; instance ownership is {ownership:?}")]
+    #[error("output exceeded {limit} bytes on {phase}; instance ownership is {ownership:?}")]
     OutputLimit {
+        /// The request's shared stdout+stderr budget, in bytes.
         limit: usize,
+        /// Stream that would have exceeded the shared budget, or `NotStarted`
+        /// when the request was rejected before execution.
+        phase: OutputPhase,
         ownership: Ownership,
         detail: String,
+    },
+    /// Creation completed but the inspected effective policy differs from the
+    /// requested policy. The container was destroyed, or cleanup ownership is
+    /// retained through [`Self::CreationCleanupRequired`].
+    #[error("effective policy mismatch for {field}: expected {expected}, got {actual}")]
+    PolicyMismatch {
+        field: String,
+        expected: String,
+        actual: String,
     },
     /// Creation failed without returning a sandbox handle. The worker retains
     /// instance and staging ownership; await `cleanup.wait()` before reusing
@@ -152,8 +258,17 @@ pub enum SandboxError {
         source: Box<SandboxError>,
         cleanup: CleanupReceipt,
     },
-    #[error("cleanup failed; instance {instance_id} is still owned: {detail}")]
-    CleanupRequired { instance_id: String, detail: String },
+    /// Cleanup did not confirm both instance absence and staging removal. The
+    /// sandbox handle keeps the retained identity and staging; call `destroy`
+    /// again. `ownership` is the last observed instance state.
+    #[error("cleanup failed; instance {instance_id} is {ownership:?}: {detail}")]
+    CleanupRequired {
+        instance_id: String,
+        ownership: Ownership,
+        detail: String,
+        #[source]
+        failure: CleanupFailure,
+    },
     #[error("sandbox worker is gone: {detail}")]
     WorkerGone { detail: String },
     #[error("relative path rejected: {reason}")]
