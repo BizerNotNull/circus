@@ -381,6 +381,7 @@ mod tests {
 
     #[test]
     fn ownership_requires_both_labels() {
+        let owner = uuid::Uuid::new_v4().to_string();
         let mut pod = Pod {
             metadata: ObjectMeta {
                 name: Some("name".to_string()),
@@ -388,17 +389,17 @@ mod tests {
             },
             ..Pod::default()
         };
-        assert!(!owned_by(&pod, "name", "nonce"));
+        assert!(!owned_by(&pod, "name", &owner));
         pod.metadata.labels = Some(
             [
-                (OWNER_LABEL_KEY.to_string(), "nonce".to_string()),
+                (OWNER_LABEL_KEY.to_string(), owner.clone()),
                 ("circus.sandbox.name".to_string(), "name".to_string()),
             ]
             .into_iter()
             .collect(),
         );
-        assert!(owned_by(&pod, "name", "nonce"));
-        assert!(!owned_by(&pod, "other", "nonce"));
+        assert!(owned_by(&pod, "name", &owner));
+        assert!(!owned_by(&pod, "other", &owner));
         assert!(!owned_by(&pod, "name", "other"));
     }
 }

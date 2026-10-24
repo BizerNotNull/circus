@@ -181,7 +181,7 @@ async fn completion_observation_pins_leader_until_group_kill() {
     let pid = child.id().unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if leader_exited(pid).unwrap() {
+            if observe_leader(pid).unwrap().is_some() {
                 break;
             }
             signal.recv().await;
@@ -191,11 +191,12 @@ async fn completion_observation_pins_leader_until_group_kill() {
     .unwrap();
     // Repeated observation must leave the leader waitable: this is the identity
     // gate, not a probabilistic attempt to force actual kernel PID reuse.
-    assert!(leader_exited(pid).unwrap());
-    assert!(leader_exited(pid).unwrap());
+    assert!(observe_leader(pid).unwrap().is_some());
+    assert!(observe_leader(pid).unwrap().is_some());
     let mut may_signal = true;
+    let observed = observe_leader(pid).unwrap();
     assert!(
-        terminate(&mut *child, &mut may_signal, pid)
+        terminate(&mut *child, &mut may_signal, pid, observed)
             .await
             .unwrap()
             .success()

@@ -344,7 +344,7 @@ async fn terminate(
         if let Some(status) = try_status(child)? {
             return Ok(status);
         }
-        return Err(io::Error::other("leader exit status is unavailable"));
+        Err(io::Error::other("leader exit status is unavailable"))
     }
     #[cfg(not(target_os = "linux"))]
     {

@@ -497,9 +497,10 @@ mod tests {
     #[test]
     fn built_pod_is_recognized_by_verification_and_report() {
         let spec = spec();
+        let owner = uuid::Uuid::new_v4().to_string();
         let pod = build(
             "circus-sandbox-test",
-            "nonce",
+            &owner,
             &spec,
             "python:3.12-slim",
             None,
@@ -507,7 +508,7 @@ mod tests {
         verify(
             &pod,
             "circus-sandbox-test",
-            "nonce",
+            &owner,
             &spec,
             "python:3.12-slim",
         )
@@ -524,9 +525,10 @@ mod tests {
     #[test]
     fn verification_rejects_foreign_labels_and_host_paths() {
         let spec = spec();
+        let owner = uuid::Uuid::new_v4().to_string();
         let pod = build(
             "circus-sandbox-test",
-            "nonce",
+            &owner,
             &spec,
             "python:3.12-slim",
             None,
@@ -554,7 +556,7 @@ mod tests {
             verify(
                 &mutated,
                 "circus-sandbox-test",
-                "nonce",
+                &owner,
                 &spec,
                 "python:3.12-slim"
             )
