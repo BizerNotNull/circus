@@ -9,7 +9,9 @@
 - 安全基线 [PR #3](https://github.com/BizerNotNull/circus/pull/3) 与质量基线 [PR #4](https://github.com/BizerNotNull/circus/pull/4) 已合并并集成；具体提交和检查证据见对应 PR，不在计划中预填通过。
 - Workspace 实现与 Rust 门禁的交付记录见 [PR #5](https://github.com/BizerNotNull/circus/pull/5)。当前检出已有真实 Rust 1.99.1、edition 2024 crate、同步文件 API、example、测试、Apache-2.0 许可证和 cargo-deny 策略；该 PR 是合并状态与 CI 结果的权威入口，不在本文预填结果。
 - 安全文档与最小权限跟进见 [PR #7](https://github.com/BizerNotNull/circus/pull/7)，以该 PR 的实际合并状态和证据为准。安全扫描约定统一见 [安全说明](../../.github/sandbox-security.md)。
-- 其余进程内统一 API、生命周期、命令执行、真实进程/容器隔离、environment、Git、HTTP、认证、部署、指标、池和快照仍未实现。下列完整目标保留，不因文件库已存在而缩小验收。
+- 资源请求值模型 [PR #9](https://github.com/BizerNotNull/circus/pull/9) 已合并，合并提交 `0460618479e1a97273a8e165cef65c95ae7b9282`。当前检出有 `runtime::ResourceLimits`、类型化错误、测试和 `examples/resource_policy.rs`。它尚未接入 `Workspace` 或执行后端，也不构成资源强制、聚合准入、内核配额或 Docker 适配。检查证据留在该 PR，本文不转写通过。
+- 声明依赖架构域门禁 [PR #10](https://github.com/BizerNotNull/circus/pull/10) 已合并，合并提交 `7dd0f3649c7dc9b65a330406d6355bc726f3ee2e`，该提交已在 `origin/main` 上。当前检出有 `.github/workflows/sandbox-architecture.yml` 与 `circus-sandbox/qa/architecture.mjs`。这不是 Docker、容器或进程隔离实现。检查证据留在该 PR，本文不转写通过。
+- 其余进程内统一 API、生命周期、命令执行、真实进程/容器隔离、environment、Git、HTTP、认证、部署、指标、池和快照仍未实现。下列完整目标保留，不因文件库、资源值模型或架构门禁已存在而缩小验收。不要把未实现的 Docker 工作写成已有。
 
 ## 非目标
 
@@ -61,7 +63,7 @@
 - 已合并的安全基线提供 PR-only dependency review，新增依赖须经过该提交上的实际审查；不能将 `merge_group` 的跳过当作已审查。
 - 当前检出已有 Cargo 锁文件、`deny.toml` 和 cargo-deny 工作流。许可证策略的交付记录见 PR #5；新增依赖按显式 allow 验证，不能把 dependency review 写成许可证策略，也不能将本地实现当作合并证据。
 - 改到的文档落在 QA 白名单内，由已合并质量基线的 `npm --prefix circus-sandbox/qa run check` 覆盖；保留现有 checker 和锁文件。检查结果必须来自当前提交。
-- `main` 不要求非作者批准；获得任务授权后可在最新 CI 通过、审查问题闭环且无冲突时自动合并 PR，不绕过保护。工作流存在不等于 required status check。本地或 CI 变绿本身不是合并完成。
+- `main` 不要求非作者批准。获得任务授权后，最新必需 CI 通过且无冲突即可立即自动合并，不等待 Sourcery；Sourcery 可以忽略，不是合并门禁。安全、隔离、生命周期及资源回收问题仍然阻断。不绕过保护。工作流存在不等于 required status check。本地或 CI 变绿本身不是合并完成。
 
 ### 1. 质量基线（已合并 PR #4）
 
@@ -77,11 +79,13 @@ QA 运行时固定 Node.js 24.18.0，与 `circus-sandbox/qa/.node-version` 一�
 
 分支：`ci/sandbox-security-baseline`，已合并为 `97a3d1261aa3ee6e4cb76462c490c1bf5afb1889`；本分支已集成。
 
-实际范围：全历史 Gitleaks、只在 PR 上运行的 dependency review、仅分析 `.github/workflows/sandbox-security.yml` 的 actions CodeQL，以及每周 `github-actions` Dependabot。密钥扫描脚本、两条精确 fingerprint 例外和工作流均已在本检出。它不分析 QA JavaScript 或 Rust，分别由质量工作流和 Rust 工作流负责。dependency review 不作为 `merge_group` 的实际审查覆盖。
+PR #3 当时的范围：全历史 Gitleaks、只在 PR 上运行的 dependency review、仅分析 `.github/workflows/sandbox-security.yml` 的 actions CodeQL，以及每周 `github-actions` Dependabot。密钥扫描脚本、两条精确 fingerprint 例外和工作流均已在本检出。它不分析 QA JavaScript 或 Rust，分别由质量工作流和 Rust 工作流负责。dependency review 不作为 `merge_group` 的实际审查覆盖。
 
 结果与例外依据留在该 PR；本计划不代填扫描通过。安全政策文档与最小权限跟进的实际状态见 PR #7；扫描约定统一见安全说明，PR 合并流程见根指南。
 
-Dependabot 目前没有 QA npm 或 Cargo 配置；后续需要时在已有文件追加，不另建重复配置。不因此改变现有 QA checker、锁文件或 Node 24.18.0。
+当前 `.github/dependabot.yml` 已经配置每周更新：`/` 的 `github-actions`、`/circus-sandbox/qa` 的 npm，以及 `/circus-sandbox` 的 Cargo。QA npm 与 Cargo 两项由已合并的 [PR #8](https://github.com/BizerNotNull/circus/pull/8)（`2fc903f0c8f4e8f9f9168770997bee84366ce69e`）追加到同一文件，不另建重复配置，也不批准或合并。`commit-message` 的 prefix 分别是 Actions `ci`、npm `chore`、Cargo `chore`，均设置 `include: scope`。这不改变现有 QA checker、锁文件或 Node 24.18.0，也不表示某次依赖更新 PR 已经通过或已经合并。
+
+Actions CodeQL 的当前路径是 `.github/codeql/sandbox.yml` 中的 `.github/workflows/sandbox-*.yml`，包括质量、安全、元数据、Rust 和架构工作流。PR #3 当时只分析安全工作流；不要把当时范围写成当前检出的全部范围，也不要把路径扩展写成隔离通过。
 
 ### 2. 独立能力：cap-std 临时工作区
 
@@ -205,12 +209,12 @@ Dependabot 目前没有 QA npm 或 Cargo 配置；后续需要时在已有文件
 
 暖池干净检出语义：
 
-- 暖实例只能在检出干净后租出。干净指代码、Git 状态、文件和凭据都不含上一租户残留。
+- 计划只预热全新实例，一次性租出，释放时销毁。不把用过的实例还回空闲池，也不提供用后重置再租出。这是当前计划，不是已实现的 Docker 池。
+- 暖实例只能在检出干净后租出。干净指代码、Git 状态、文件和凭据都不含上一租户残留。释放即销毁满足这条；不能用未证明的重置代替销毁。
 - 不能证明干净检出时不得租出，必须通过同一生命周期回收或销毁。
-- 冷启动与复用都要测量；复用测试必须证明跨租户不泄露。
+- 冷启动与尚未租出的预热实例都要测量。既有“复用必须证明跨租户不泄露”仍然有效；它不授权用后归还。当前计划不实现脏归还，因此没有一条用后复用路径可以勾成已支持。
 - 池不建立第二套状态机，也不绕过销毁和取消的回收路径。
-
-现在不为这两项命名端点或配置键。
+- 已读上游 [`pool.go`](https://github.com/opensandbox-group/OpenSandbox/blob/f3f4a7f419e526de4c3deb250d72fc034986fc28/sdks/sandbox/go/pool.go) 的 `Acquire` 会取走空闲实例。该文件没有证明代码、Git、文件或凭据的干净复用，也不能写成 circus 已支持暖池。
 
 ### 文档边界复核
 
@@ -224,7 +228,7 @@ Dependabot 目前没有 QA npm 或 Cargo 配置；后续需要时在已有文件
 
 依赖：所声称的能力都有对应 PR 的证据。
 
-范围：发布说明只列已合并且有证据的能力。合并不要求非作者批准，但必须完成最新 CI 与适用审查问题闭环，不绕过保护。工作流还不是 required status check 时，发布说明不能写成 `main` 已强制执行该检查。
+范围：发布说明只列已合并且有证据的能力。合并不要求非作者批准。授权后最新必需 CI 通过且无冲突即可合并，不等待 Sourcery；Sourcery 可以忽略。安全、隔离、生命周期及资源回收问题仍然阻断，不绕过保护。工作流还不是 required status check 时，发布说明不能写成 `main` 已强制执行该检查。
 
 最终报告必须逐项填写下面 13 项。没有证据就留空，不能勾选。未运行、未实现、未合并都等于不能勾选。本文不预填任何一项的通过。
 
@@ -247,14 +251,38 @@ Dependabot 目前没有 QA npm 或 Cargo 配置；后续需要时在已有文件
 某次依赖审计的失败、修复和告警数量只记在对应 PR 或报告，不写进本文。沙箱 QA 的 npm audit 不覆盖 Paseo。未修复的 advisory 不能在该提交的报告里勾成通过；修复合并后，以新提交的审计证据为准。把沙箱 QA audit 写成整个仓库漏洞已解决，不能勾选。
 
 验收：发布说明、文档边界和已合并 PR 一致。缺证据的能力保持未支持。十三项报告没有用空勾代替证据。
+所报告提交若包含 `Sandbox architecture`，CI 字段还要附上 `architecture (ubuntu-latest)` 与 `architecture (windows-latest)` 的运行链接。资源模型与架构门禁的交付记录是 PR #9 与 PR #10。工作流存在，以及本文记录的合并提交，都不是该提交检查通过。
 
 ### 其他后端
 
 没有依赖顺序，因为它们不是完成定义的一部分。只有明确选择某一后端后才单独立项，并重复真实运行、明确拒绝和不降级的验收。
 
+## MVP 与完整版本交付顺序
+
+下表是上文验收的执行索引，不替代或缩小任何具体要求。每项独立能力使用独立分支和 PR，同步交付代码、测试、文档；只有合并并验证 `main` 后才完成。不等待 Sourcery，不绕过最新必需检查或已知安全阻断项。
+
+工程基线已覆盖质量、安全、Rust、许可证、依赖更新和声明依赖架构检查，交付入口见 PR #3、#4、#5、#7、#8、#9、#10。工作流存在与合并记录都不等于当前提交的检查通过。
+
+| 阶段     | 聚焦 PR                   | 依赖与验收入口                                                                                                                                      |
+| -------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MVP      | 进程内领域 API 与生命周期 | 先消费 workspace 契约；见[领域 API](#3-进程内领域-api-与生命周期)。真实适配与生命周期需要原子交付时，可使用一个可运行的垂直切片，不能交付空适配器。 |
+| MVP      | 显式配置                  | 依赖领域类型；见[显式配置](#显式配置)。                                                                                                             |
+| MVP      | 首个真实适配              | 依赖 workspace、生命周期和配置；见[Docker Linux + runc](#5-首个真实适配docker-linux--runc)。                                                        |
+| MVP      | 健康与日志                | 依赖生命周期；见[健康与日志](#健康与日志)。                                                                                                         |
+| MVP      | environment 与 Git        | 依赖 workspace，后端环境准备使用真实适配；见[环境与工作区](#4-environment-与-git-工作区)。                                                          |
+| MVP      | 部署边界                  | 依赖真实适配；见[部署边界](#部署边界)。                                                                                                             |
+| 完整版本 | 文件系统快照              | 依赖真实适配；见[文件系统快照](#文件系统快照)，不承诺内存检查点。                                                                                   |
+| 完整版本 | 运行指标                  | 依赖真实运行证据；见[运行指标](#运行指标)。                                                                                                         |
+| 完整版本 | 认证 HTTP 与 OpenAPI      | 依赖领域类型；[HTTP](#6-http-传输)与[认证和契约](#http-认证与-openapi)可原子交付，禁止先暴露匿名管理面。                                            |
+| 完整版本 | 代码快照                  | 复用 workspace 契约；容器快照接入另依赖真实适配，见[快照与暖池](#代码快照与暖池干净检出)。                                                          |
+| 完整版本 | 干净暖池                  | 依赖真实适配和快照；只预热全新实例、一次性租出、释放即销毁，见[快照与暖池](#代码快照与暖池干净检出)。                                               |
+| 最终验收 | 文档复核与发布准备        | 逐项核对[文档边界](#文档边界复核)和[十三项报告](#发布就绪)，只报告已合并且有当前证据的能力。                                                        |
+
+其他后端仍是候选，不是上述完成定义的一部分，见[其他后端](#其他后端)。
+
 ## 上游参考
 
-固定提交：[`f3f4a7f419e526de4c3deb250d72fc034986fc28`](https://github.com/opensandbox-group/OpenSandbox/tree/f3f4a7f419e526de4c3deb250d72fc034986fc28)（`opensandbox-group/OpenSandbox`）。已核对下表所列源码；未运行上游测试；Apache-2.0。若复制代码而不是只借鉴行为，须再按文件核对版权与 NOTICE。
+固定提交：[`f3f4a7f419e526de4c3deb250d72fc034986fc28`](https://github.com/opensandbox-group/OpenSandbox/tree/f3f4a7f419e526de4c3deb250d72fc034986fc28)（`opensandbox-group/OpenSandbox`）。已核对下表所列源码，以及同提交的 [`sdks/sandbox/go/pool.go`](https://github.com/opensandbox-group/OpenSandbox/blob/f3f4a7f419e526de4c3deb250d72fc034986fc28/sdks/sandbox/go/pool.go)；未运行上游测试；Apache-2.0。若复制代码而不是只借鉴行为，须再按文件核对版权与 NOTICE。未读的文件仍然不是已证实行为。
 
 Docker 快照是 `container.commit` 的文件系统视图，镜像仓库名为 `opensandbox-snapshots`，不是客户机内存或进程检查点。`_ensure_gvisor_snapshot_safe` 在 gVisor/runsc 没有 `--overlay2=none` 时抛出 `SnapshotRuntimeUnsupportedError`，因为默认 `root:self` overlay 会让 commit 丢掉写入。`_reject_gvisor_filestore_only_diff` 在 diff API 不可用、容器 ID 缺失、diff 检查失败，或可见 diff 只有 `/.gvisor.filestore*` 时拒绝继续 commit。结果是 `SnapshotState.FAILED`，原因 `snapshot_runtime_unsupported`，不是 READY。
 
@@ -266,4 +294,4 @@ Docker 快照是 `container.commit` 的文件系统视图，镜像仓库名为 `
 | [command.go](https://github.com/opensandbox-group/OpenSandbox/blob/f3f4a7f419e526de4c3deb250d72fc034986fc28/components/execd/pkg/runtime/command.go)                                | 命令使用独立进程组；取消向整组发送 SIGKILL，并用完成门避免复用已回收的进程组 ID；等待进程后再汇合输出                                | 取消和超时沿用该回收语义。不引入 execd，也不复制其 HTTP 控制器                                     |
 | [filesystem.go](https://github.com/opensandbox-group/OpenSandbox/blob/f3f4a7f419e526de4c3deb250d72fc034986fc28/components/execd/pkg/web/controller/filesystem.go)                   | 列目录对根做 Lstat 并拒绝符号链接根；其余文件处理依赖进程或容器内的环境路径，不是能力式沙箱                                          | 宿主侧文件访问使用指南选定的 cap-std。容器内路径策略属于运行时适配器，不能用检查字符串后再打开代替 |
 
-下表没有暖池或干净检出的源码，因此不把任何上游池 API 写成已证实行为。circus 的池语义以上文验收为准。
+`pool.go` 已按该固定链接读过，范围只限这一文件。`SandboxPool` 有 `Start`、`Acquire`、`ReleaseAllIdle`、`Resize`、`Snapshot`、`SnapshotIdleEntries` 和 `Shutdown`，没有把用过的实例还回空闲池或重置租户状态的方法。`Start` 写入 max idle 与 idle TTL，并启动 reconcile；本文件的 reconcile tick 调用 `createOneSandbox`。预热通过 `SandboxCreator` 或 `CreateSandbox` 创建新沙箱，带 warmup ready timeout 与 health-check 选项；`finalizeWarmup` 运行 `WarmupSandboxPreparer`，再 `Renew(IdleTimeout)`，然后关闭连接、只返回 ID。`Acquire` 用 `TryTakeIdle` 或 `TryTakeIdleWithMinTTL` 取走空闲候选，连接时做 readiness/health（除非 `SkipHealthCheck`），可选 `Renew`，并做 namespace fence 检查；`RetryNextIdle` 变体按 `MaxAcquireRetries` 有界重试，其余策略只试一次。`Shutdown` 的注释写释放空闲沙箱，实现只停止循环、等待、释放 primary lock，graceful 时再等待 in-flight；它不调用 `ReleaseAllIdle`。空闲清空只在显式的 `ReleaseAllIdle` / `ReleaseAllIdleParallel`。这里不把该差异写成漏洞审计。该文件没有检查代码、Git 状态、文件或凭据是否无上一租户残留，因此不证明干净复用。circus 的池计划是预热全新实例并在释放时销毁，不实现脏归还。

@@ -105,7 +105,7 @@ Rust fmt、clippy、构建、测试、文档、example、cargo-deny 和 Rust Cod
 
 `npm --prefix circus-sandbox/qa audit` 只审计 `circus-sandbox/qa` 的锁文件。它不审计 `circus-paseo/`，也不审计仓库里其它 npm 树。这次审计通过、CodeQL QA 通过，或安全基线合并，都不等于整个仓库的漏洞告警已经解决。告警数量只记在对应 PR 或报告，不写进本文。
 
-secret scanning 与 push protection 是 GitHub 平台设置，不是工作流的替代品。工作流存在也不等于它已设为 `main` 的 required status check。当前不要求非作者批准；任务授权后的自动 squash merge 仍须经过 PR、最新 CI、适用审查问题闭环且无冲突，不绕过保护或强推。提交流程见根指南，安全扫描范围见安全说明。
+secret scanning 与 push protection 是 GitHub 平台设置，不是工作流的替代品。工作流存在也不等于它已设为 `main` 的 required status check。当前不要求非作者批准。任务授权后，最新必需 CI 通过且无冲突即可立即自动 squash merge；Sourcery 可以忽略，不是合并门禁。安全、隔离、生命周期及资源回收问题仍然阻断，不绕过保护或强推。提交流程见根指南，安全扫描范围见安全说明。
 
 质量门禁不覆盖 Cargo、Rust CodeQL 或隔离；安全门禁的 actions CodeQL 和 actionlint 覆盖全部 `.github/workflows/sandbox-*.yml`，shellcheck 覆盖全部 `.github/scripts/sandbox-*.sh`，不覆盖 Paseo 工作流或任意其它脚本。Rust 源码由独立 Rust 工作流分析。PR 标题门禁不证明代码安全。这些门禁都不证明沙箱进程隔离、Paseo 依赖审计、分支保护配置或全仓库漏洞清零。
 
