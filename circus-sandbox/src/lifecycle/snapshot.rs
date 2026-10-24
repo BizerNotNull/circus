@@ -1,24 +1,34 @@
 //! Serialized workspace-only capture and staging replacement.
 
-use super::*;
+use std::future::Future;
+use std::sync::Arc;
+
+use tokio_util::sync::CancellationToken;
+
+use crate::infrastructure::Backend;
 use crate::workspace::{CodeSnapshot, SnapshotBudget, SnapshotError};
 
-impl DockerSandbox {
+use super::operations::{
+    cleanup_engine_error, destroy_report, need, pause, phase_err, required_id, resume, spawn_block,
+};
+use super::{Op, Sandbox, SandboxError, SandboxPhase, State};
+
+impl Sandbox {
     /// Captures regular workspace files and directories, not processes or memory.
     ///
     /// In `Created`, captures host staging. In `Running`, the lifecycle worker
-    /// pauses the guest, downloads only the configured tmpfs workspace through
-    /// Docker's archive API, validates it, and resumes before returning (also on
-    /// archive validation failure). An already `Paused` guest stays paused.
-    /// Other phases return [`SandboxError::InvalidPhase`].
+    /// pauses the guest, downloads only the configured workspace archive through
+    /// the backend's archive operation, validates it, and resumes before
+    /// returning (also on archive validation failure). An already `Paused`
+    /// guest stays paused. Other phases return [`SandboxError::InvalidPhase`].
     ///
     /// `budget` bounds retained file payload and entries. `max_archive_bytes`
     /// must be positive and separately bounds archive transport, including tar
     /// overhead. A zero archive bound fails before queueing. All operations are
     /// serialized with other sandbox mutations. The configured file timeout
     /// covers pause, download, parsing and resume together. Cancellation or
-    /// timeout uses whole-container cleanup; failed cleanup retains ownership.
-    /// Engine pause, download or resume failures also trigger owned cleanup.
+    /// timeout uses whole-instance cleanup; failed cleanup retains ownership.
+    /// Backend pause, download or resume failures also trigger owned cleanup.
     /// Archive/domain failures are matchable as [`SandboxError::Snapshot`],
     /// including any temporary workspace whose explicit cleanup failed.
     /// A deadline initiates cancellation, not a bound on cleanup completion:
@@ -55,7 +65,7 @@ impl DockerSandbox {
     /// cleanup also fails, the nested [`SnapshotError::RestoreCleanup`] owns it
     /// for retry. Successful replacement commits only after old cleanup succeeds.
     /// Uses the configured file timeout and serialized worker; cancellation or
-    /// timeout cleans the whole owned container and staging, retaining ownership
+    /// timeout cleans the whole owned instance and staging, retaining ownership
     /// when cleanup cannot be confirmed. Already-started filesystem work is
     /// drained before cleanup; completion may exceed the deadline. Staging
     /// installation is worker-owned and never occurs after interruption.
@@ -75,7 +85,7 @@ struct Deadline {
 }
 
 impl Deadline {
-    fn new(state: &State, cancel: &CancellationToken) -> Self {
+    fn new<B: Backend>(state: &State<B>, cancel: &CancellationToken) -> Self {
         Self {
             cancel: cancel.clone(),
             shutdown: state.shutdown.clone(),
@@ -111,21 +121,21 @@ impl Deadline {
     }
 }
 
-async fn interrupted<T>(
-    state: &mut State,
+async fn interrupted<B: Backend, T>(
+    state: &mut State<B>,
     cancelled: bool,
     snapshot: Option<SnapshotError>,
 ) -> Result<T, SandboxError> {
     let report = destroy_report(state).await;
     let interruption = if cancelled {
         SandboxError::Cancelled {
-            container_id: report.container_id,
+            instance_id: report.instance_id,
             ownership: report.ownership,
             detail: report.detail,
         }
     } else {
         SandboxError::TimedOut {
-            container_id: report.container_id,
+            instance_id: report.instance_id,
             ownership: report.ownership,
             detail: report.detail,
         }
@@ -139,8 +149,8 @@ async fn interrupted<T>(
     })
 }
 
-pub(super) async fn capture(
-    state: &mut State,
+pub(super) async fn capture<B: Backend>(
+    state: &mut State<B>,
     budget: SnapshotBudget,
     max_archive_bytes: u64,
     cancel: &CancellationToken,
@@ -176,7 +186,7 @@ pub(super) async fn capture(
     let archive = match deadline
         .network(
             state
-                .engine
+                .backend
                 .download_workspace_archive(&id, &path, max_archive_bytes),
         )
         .await
@@ -214,8 +224,8 @@ pub(super) async fn capture(
     Ok(Arc::new(result??))
 }
 
-pub(super) async fn restore(
-    state: &mut State,
+pub(super) async fn restore<B: Backend>(
+    state: &mut State<B>,
     snapshot: Arc<CodeSnapshot>,
     cancel: &CancellationToken,
 ) -> Result<(), SandboxError> {
@@ -277,7 +287,7 @@ pub(super) async fn restore(
 }
 
 async fn cleanup_replacement(
-    mut replacement: Workspace,
+    mut replacement: crate::workspace::Workspace,
     cause: Option<SnapshotError>,
 ) -> Option<SnapshotError> {
     match spawn_block(move || match replacement.cleanup() {

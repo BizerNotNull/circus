@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
 license = "Apache-2.0"
-description = "Linux Docker sandbox with capability-scoped workspace staging. Not Kubernetes, HTTP, or a snapshot service."
+description = "Backend-neutral sandbox API with one local Linux Docker + runc backend, capability-scoped workspace, and image resolution. Not Kubernetes, HTTP, or a snapshot service."
 
 [dependencies]
 bollard = { version = "0.21.1", default-features = false, features = ["pipe"] }

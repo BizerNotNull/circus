@@ -1,7 +1,10 @@
 //! Docker deployment adapter. Not a public SDK surface.
 
+mod backend;
+mod docker;
 mod engine;
 pub(crate) mod git_process;
-pub(crate) use engine::{
-    CreateSpec, Engine, EngineError, EngineErrorKind, Recovered, SocketKind, StagedBytes,
-};
+
+pub(crate) use backend::{Backend, CommonSpec, InstanceId, PrepareError};
+pub(crate) use docker::{DockerBackend, DockerConfig, DockerConfigError, DockerEndpoint};
+pub(crate) use engine::{Engine, EngineError, EngineErrorKind, ImageInfo, Recovered, StagedBytes};

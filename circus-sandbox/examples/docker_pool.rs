@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use circus_sandbox::{
-    CommandRequest, DockerEndpoint, DockerPool, DockerSandbox, IoLimits, IsolationConfig,
-    PoolConfig, PoolError, ResourceLimits, RuntimeName, SandboxConfig, SnapshotBudget, Workspace,
+    BackendConfig, CommandRequest, DockerPool, IoLimits, IsolationConfig, PoolConfig, PoolError,
+    ResourceLimits, Sandbox, SandboxConfig, SnapshotBudget, Workspace,
 };
 
 #[tokio::main]
@@ -11,10 +11,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("CIRCUS_DOCKER_SANDBOX").as_deref() != Ok("1") {
         return Err("set CIRCUS_DOCKER_SANDBOX=1 to run the real Docker example".into());
     }
-    let config = SandboxConfig::new(
-        DockerEndpoint::parse(&std::env::var("CIRCUS_DOCKER_ENDPOINT")?)?,
+    let backend = BackendConfig::docker(
+        std::env::var("CIRCUS_DOCKER_ENDPOINT")?,
         std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
-        RuntimeName::runc(),
+        "runc",
+    );
+    let config = SandboxConfig::new(
         ResourceLimits::new(64 * 1024 * 1024, 100, 32, 8 * 1024 * 1024, 1024 * 1024)?,
         IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
         IoLimits::new(64 * 1024, Duration::from_secs(10))?,
@@ -28,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     source.cleanup()?;
 
     let cold_start = Instant::now();
-    let cold = DockerSandbox::create(config.clone()).await?;
+    let cold = Sandbox::create(backend.clone(), config.clone()).await?;
     let cold_result = async {
         cold.restore_workspace_snapshot(Arc::clone(&baseline)).await?;
         cold.start().await?;
@@ -40,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cold_cleanup?;
 
     let warmup_start = Instant::now();
-    let pool = match DockerPool::create(PoolConfig::new(config, 1, Some(baseline), Duration::from_secs(120))?).await {
+    let pool = match DockerPool::create(PoolConfig::new(backend, config, 1, Some(baseline), Duration::from_secs(120))?).await {
         Ok(pool) => pool,
         Err(PoolError::CleanupRequired { pool, source, .. }) => {
             eprintln!("pool preparation failed; retrying retained cleanup: {source}");

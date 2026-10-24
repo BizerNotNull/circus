@@ -1,0 +1,139 @@
+//! Private backend boundary used by the lifecycle owner.
+//!
+//! No SDK type crosses this module. Futures are RPITIT and dispatched
+//! statically through `State<B>`; there is no boxed future or trait object on
+//! the lifecycle path. A backend owns connection details and translates the
+//! shared [`CommonSpec`] into its own create request.
+
+use std::future::Future;
+
+use super::engine::{EngineError, ExecDone, HostReport, Recovered, StagedBytes};
+
+/// Backend-owned instance identity. Opaque outside the lifecycle owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InstanceId(String);
+
+impl InstanceId {
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Operations the lifecycle owner requires of every backend.
+///
+/// A backend that cannot honor an operation must report it here so creation can
+/// reject the configuration before allocating an instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Capabilities {
+    pub pause_resume: bool,
+    pub file_transport: bool,
+    pub workspace_archive: bool,
+}
+
+/// Backend-neutral values needed for one create request.
+///
+/// Backend-specific image, runtime, endpoint, and owner label stay inside the
+/// backend implementation. All values were validated by `SandboxConfig`.
+pub(crate) struct CommonSpec {
+    pub memory: i64,
+    pub nano_cpus: i64,
+    pub pids: i64,
+    pub workspace_path: String,
+    pub workspace_bytes: u64,
+    pub guest_uid: u32,
+    pub guest_gid: u32,
+}
+
+/// Preparation failed either because the image is absent locally or for another
+/// engine reason. The image is explicit so the lifecycle owner can report it
+/// without reaching into backend configuration.
+#[derive(Debug)]
+pub(crate) enum PrepareError {
+    ImageUnavailable { image: String },
+    Engine(EngineError),
+}
+
+/// Deployment adapter with static dispatch.
+pub(crate) trait Backend: Send + Sync + 'static {
+    /// Operations this backend can actually perform.
+    fn capabilities(&self) -> Capabilities;
+
+    /// Verifies the backend environment and that the requested image exists
+    /// locally. Must not allocate an instance or pull anything.
+    fn prepare(&self) -> impl Future<Output = Result<(), PrepareError>> + Send;
+
+    /// Creates one owned instance. Partial-failure ownership is reported through
+    /// [`EngineError::create_pending`] and [`EngineError::create_id`].
+    fn create_owned(
+        &self,
+        name: &str,
+        spec: &CommonSpec,
+        nonce: &str,
+    ) -> impl Future<Output = Result<InstanceId, EngineError>> + Send;
+
+    /// Force-removes only an instance carrying this exact owner label.
+    fn recover_owned(
+        &self,
+        name: &str,
+        nonce: &str,
+    ) -> impl Future<Output = Result<Recovered, EngineError>> + Send;
+
+    fn start(&self, id: &InstanceId) -> impl Future<Output = Result<(), EngineError>> + Send;
+
+    fn pause(&self, id: &InstanceId) -> impl Future<Output = Result<(), EngineError>> + Send;
+
+    fn resume(&self, id: &InstanceId) -> impl Future<Output = Result<(), EngineError>> + Send;
+
+    fn upload(
+        &self,
+        id: &InstanceId,
+        user: &str,
+        workspace: &str,
+        entries: &[StagedBytes],
+        max_bytes: u64,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send;
+
+    fn download_file(
+        &self,
+        id: &InstanceId,
+        user: &str,
+        workspace: &str,
+        relative: &str,
+        max_bytes: usize,
+    ) -> impl Future<Output = Result<Vec<u8>, EngineError>> + Send;
+
+    fn remove_file(
+        &self,
+        id: &InstanceId,
+        user: &str,
+        workspace: &str,
+        relative: &str,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send;
+
+    fn exec(
+        &self,
+        id: &InstanceId,
+        user: &str,
+        workdir: &str,
+        argv: &[String],
+        output_limit: usize,
+    ) -> impl Future<Output = Result<ExecDone, EngineError>> + Send;
+
+    /// Inspected effective configuration, with absent fields left absent.
+    fn host_report(
+        &self,
+        id: &InstanceId,
+    ) -> impl Future<Output = Result<HostReport, EngineError>> + Send;
+
+    /// Downloads only the configured workspace archive into an anonymous file.
+    fn download_workspace_archive(
+        &self,
+        id: &InstanceId,
+        workspace: &str,
+        max_archive_bytes: u64,
+    ) -> impl Future<Output = Result<std::fs::File, EngineError>> + Send;
+}

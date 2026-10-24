@@ -16,12 +16,13 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::{CodeSnapshot, SandboxConfig, SandboxError, SandboxPhase};
+use crate::{BackendConfig, CodeSnapshot, SandboxConfig, SandboxError, SandboxPhase};
 pub use lease::PoolLease;
 
 /// Immutable recipe used for every fresh container in a pool.
 #[derive(Clone)]
 pub struct PoolConfig {
+    backend: BackendConfig,
     sandbox: SandboxConfig,
     capacity: usize,
     baseline: Option<Arc<CodeSnapshot>>,
@@ -29,11 +30,16 @@ pub struct PoolConfig {
 }
 
 impl PoolConfig {
-    /// Validates positive capacity and a positive, representable lease TTL.
+    /// Validates a positive capacity and a positive, representable lease TTL.
     /// TTL starts at handoff, is not extended by activity, and revokes even an
     /// in-flight command at expiry. Baselines are authorized shared payload
     /// restored before start, never captured from a lease.
+    ///
+    /// `backend` is the same explicit backend descriptor used by
+    /// [`crate::Sandbox::create`]; `sandbox` carries backend-neutral limits,
+    /// isolation requirements, and I/O bounds.
     pub fn new(
+        backend: BackendConfig,
         sandbox: SandboxConfig,
         capacity: usize,
         baseline: Option<Arc<CodeSnapshot>>,
@@ -45,7 +51,7 @@ impl PoolConfig {
         if lease_ttl.is_zero() || tokio::time::Instant::now().checked_add(lease_ttl).is_none() {
             return Err(PoolError::InvalidLeaseTtl);
         }
-        Ok(Self { sandbox, capacity, baseline, lease_ttl })
+        Ok(Self { backend, sandbox, capacity, baseline, lease_ttl })
     }
 }
 

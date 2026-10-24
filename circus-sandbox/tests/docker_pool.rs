@@ -4,34 +4,45 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use circus_sandbox::{
-    CodeSnapshot, CommandRequest, DockerEndpoint, DockerPool, DockerSandbox, IoLimits,
-    IsolationConfig, PoolConfig, PoolError, PoolStatus, ResourceLimits, RuntimeName,
-    SandboxConfig, SandboxPhase, SnapshotBudget, Workspace,
+    BackendConfig, CodeSnapshot, CommandRequest, DockerPool, IoLimits, IsolationConfig, PoolConfig,
+    PoolError, PoolStatus, ResourceLimits, Sandbox, SandboxConfig, SandboxPhase, SnapshotBudget,
+    Workspace,
 };
 
 type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
 const WAIT: Duration = Duration::from_secs(60);
+const OWNER_LABEL_KEY: &str = "circus.sandbox.owner";
 // Serialize this binary's before/after owner inventories.
 static DOCKER_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn config() -> Result<SandboxConfig> {
+fn backend() -> Result<BackendConfig> {
     assert_eq!(std::env::var("CIRCUS_DOCKER_SANDBOX").as_deref(), Ok("1"),
         "set CIRCUS_DOCKER_SANDBOX=1 to opt into the real backend tests");
-    Ok(SandboxConfig::new(
-        DockerEndpoint::parse(&std::env::var("CIRCUS_DOCKER_ENDPOINT")?)?,
+    Ok(BackendConfig::docker(
+        std::env::var("CIRCUS_DOCKER_ENDPOINT")?,
         std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
-        RuntimeName::runc(),
+        "runc",
+    ))
+}
+
+fn config() -> Result<SandboxConfig> {
+    Ok(SandboxConfig::new(
         ResourceLimits::new(64 * 1024 * 1024, 100, 32, 8 * 1024 * 1024, 1024)?,
         IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
         IoLimits::new(64 * 1024, Duration::from_secs(10))?,
     )?)
 }
 
-fn docker(config: &SandboxConfig) -> Result<bollard::Docker> {
-    let path = match config.endpoint() {
-        DockerEndpoint::UnixSocket { path } | DockerEndpoint::NamedPipe { path } => path,
+fn docker(backend: &BackendConfig) -> Result<bollard::Docker> {
+    let endpoint = match backend {
+        BackendConfig::Docker(descriptor) => descriptor.endpoint(),
     };
-    Ok(bollard::Docker::connect_with_socket(path, 30, bollard::API_DEFAULT_VERSION)?)
+    let path = if endpoint.starts_with('/') {
+        format!("unix://{endpoint}")
+    } else {
+        endpoint.to_string()
+    };
+    Ok(bollard::Docker::connect_with_socket(&path, 30, bollard::API_DEFAULT_VERSION)?)
 }
 
 async fn absent(docker: &bollard::Docker, id: &str) -> Result {
@@ -45,7 +56,7 @@ async fn absent(docker: &bollard::Docker, id: &str) -> Result {
 async fn owned_ids(docker: &bollard::Docker) -> Result<HashSet<String>> {
     let containers = docker.list_containers(Some(bollard::query_parameters::ListContainersOptions {
         all: true,
-        filters: Some(HashMap::from([("label".into(), vec![circus_sandbox::OWNER_LABEL_KEY.into()])])),
+        filters: Some(HashMap::from([("label".into(), vec![OWNER_LABEL_KEY.into()])])),
         ..Default::default()
     })).await?;
     Ok(containers.into_iter().filter_map(|container| container.id).collect())
@@ -63,10 +74,10 @@ async fn eventually_absent(docker: &bollard::Docker, id: &str) -> Result {
     }).await?
 }
 
-async fn id(sandbox: &DockerSandbox) -> Result<String> {
+async fn id(sandbox: &Sandbox) -> Result<String> {
     let status = sandbox.status().await?;
     assert_eq!(status.phase, SandboxPhase::Running);
-    Ok(status.container_id.ok_or("running sandbox has no container ID")?)
+    Ok(status.instance_id.ok_or("running sandbox has no container ID")?)
 }
 
 fn accounted(status: &PoolStatus) {
@@ -109,10 +120,11 @@ fn command(code: &str) -> CommandRequest {
 #[ignore = "requires an explicit real Linux Docker Engine"]
 async fn baseline_single_use_release_and_drop_are_real() -> Result {
     let _serial = DOCKER_TEST.lock().await;
+    let backend = backend()?;
     let config = config()?;
-    let docker = docker(&config)?;
+    let docker = docker(&backend)?;
     let bytes = b"\0baseline\xff\n";
-    let pool = DockerPool::create(PoolConfig::new(config, 1, Some(baseline(bytes)?), Duration::from_secs(120))?).await?;
+    let pool = DockerPool::create(PoolConfig::new(backend.clone(), config, 1, Some(baseline(bytes)?), Duration::from_secs(120))?).await?;
     let initial = pool.status().await?;
     assert_eq!(initial.ready, 1);
     assert_eq!(initial.creating + initial.leased + initial.retiring + initial.cleanup_required, 0);
@@ -153,7 +165,7 @@ async fn baseline_single_use_release_and_drop_are_real() -> Result {
 #[ignore = "requires an explicit real Linux Docker Engine"]
 async fn leased_capacity_times_out_and_cancelled_waiter_does_not_steal_refill() -> Result {
     let _serial = DOCKER_TEST.lock().await;
-    let pool = DockerPool::create(PoolConfig::new(config()?, 1, None, Duration::from_secs(120))?).await?;
+    let pool = DockerPool::create(PoolConfig::new(backend()?, config()?, 1, None, Duration::from_secs(120))?).await?;
     let lease = pool.acquire(WAIT).await?;
     assert!(matches!(pool.acquire(Duration::from_millis(100)).await, Err(PoolError::AcquireTimeout)));
     let mut cancelled = Box::pin(pool.acquire(WAIT));
@@ -175,12 +187,13 @@ async fn leased_capacity_times_out_and_cancelled_waiter_does_not_steal_refill() 
 #[ignore = "requires an explicit real Linux Docker Engine"]
 async fn concurrent_leases_are_bounded_and_shutdown_revokes_without_pruning() -> Result {
     let _serial = DOCKER_TEST.lock().await;
+    let backend = backend()?;
     let config = config()?;
-    let docker = docker(&config)?;
-    let survivor = DockerSandbox::create(config.clone()).await?;
+    let docker = docker(&backend)?;
+    let survivor = Sandbox::create(backend.clone(), config.clone()).await?;
     survivor.start().await?;
     let survivor_id = id(&survivor).await?;
-    let pool = DockerPool::create(PoolConfig::new(config, 2, None, Duration::from_secs(120))?).await?;
+    let pool = DockerPool::create(PoolConfig::new(backend.clone(), config, 2, None, Duration::from_secs(120))?).await?;
     let (first, second) = tokio::join!(pool.acquire(WAIT), pool.acquire(WAIT));
     let first = first?;
     let second = second?;
@@ -224,11 +237,12 @@ async fn concurrent_leases_are_bounded_and_shutdown_revokes_without_pruning() ->
 #[ignore = "requires an explicit real Linux Docker Engine"]
 async fn preparation_failure_preserves_source_and_any_cleanup_owner() -> Result {
     let _serial = DOCKER_TEST.lock().await;
+    let backend = backend()?;
     let config = config()?;
-    let docker = docker(&config)?;
+    let docker = docker(&backend)?;
     let before = owned_ids(&docker).await?;
     // A real container can be created, but its 1024-byte file cap cannot restore this baseline.
-    let outcome = DockerPool::create(PoolConfig::new(config, 1, Some(baseline(&[7; 2048])?), Duration::from_secs(120))?).await;
+    let outcome = DockerPool::create(PoolConfig::new(backend.clone(), config, 1, Some(baseline(&[7; 2048])?), Duration::from_secs(120))?).await;
     let error = match outcome {
         Ok(pool) => {
             pool.shutdown().await?;
@@ -262,12 +276,13 @@ async fn preparation_failure_preserves_source_and_any_cleanup_owner() -> Result 
 #[ignore = "requires an explicit real Linux Docker Engine"]
 async fn lease_ttl_revokes_running_child_and_refills_without_touching_survivor() -> Result {
     let _serial = DOCKER_TEST.lock().await;
+    let backend = backend()?;
     let config = config()?;
-    let docker = docker(&config)?;
-    let survivor = DockerSandbox::create(config.clone()).await?;
+    let docker = docker(&backend)?;
+    let survivor = Sandbox::create(backend.clone(), config.clone()).await?;
     survivor.start().await?;
     let survivor_id = id(&survivor).await?;
-    let pool = DockerPool::create(PoolConfig::new(config, 1, None, Duration::from_secs(5))?).await?;
+    let pool = DockerPool::create(PoolConfig::new(backend.clone(), config, 1, None, Duration::from_secs(5))?).await?;
     let expired = pool.acquire(WAIT).await?;
     let expired_id = id(expired.sandbox()).await?;
     expired.sandbox().write_file("private", b"expired tenant").await?;

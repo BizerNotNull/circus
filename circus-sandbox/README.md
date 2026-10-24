@@ -1,8 +1,8 @@
 # circus-sandbox
 
-Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace 文件能力、受预算约束的进程内代码快照、`runtime::ResourceLimits` 请求校验，以及显式配置的本地 Linux Docker Engine + `runc` 异步容器后端。workspace 文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；容器后端通过私有 lifecycle/infrastructure 模块运行 Linux 容器。
+Rust 库，包名 `circus-sandbox`。当前提供 capability-scoped workspace 文件能力、受预算约束的进程内代码快照、`runtime::ResourceLimits` 请求校验、本地 OCI 镜像解析，以及后端中立的 `Sandbox::create(BackendConfig, SandboxConfig)` API。该 API 目前只有一个已实现后端：显式本地 Linux Docker Engine + `runc`。workspace 文件操作在 tempfile 新建的临时目录里，通过 cap-std 目录句柄做相对路径的同步读写；容器后端通过私有 lifecycle/infrastructure 模块运行 Linux 容器，`BackendConfig::Docker` 只是公开的后端选择描述，不暴露 bollard 或 Engine 类型。
 
-容器后端不是通用进程沙箱：它只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。Kubernetes、containerd、gVisor、Kata、Firecracker、OCI 环境准备、HTTP/RPC 仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker + runc slice 当作全部七领域交付。
+容器后端不是通用进程沙箱：`BackendConfig::Docker` 只接受本地 Unix socket 或 Windows named pipe，要求调用方提供已存在且包含 Python 3 的 Linux 镜像，拒绝拉取镜像。`environment::prepare_docker_image` 只做本地镜像 inspect，把显式 reference 解析成不可变 image ID 并检查平台；它不会访问 registry，也不会读取凭据。Kubernetes、containerd、gVisor、Kata、Firecracker、registry pull/认证、HTTP/RPC 仍未实现；没有 Paseo 接入。这些仍属于[完整交付目标](docs/delivery-plan.md)，不能把当前 Docker + runc slice 当作全部七领域交付。
 
 workspace API 本身不是进程隔离，也不隔离 CPU、网络、系统调用或进程；它不接受调用方传入的宿主目录，公开 API 也不返回工作区根路径。Docker 后端不改变 workspace API 的同步语义。资源请求校验不等于资源预留、聚合准入或内核强制；Docker 设置的实际效果需要真实 Linux Engine 验证，独立 workspace 仍没有总字节或宿主磁盘配额执行机制。`CodeSource::open` 仅供可信库调用方显式授予源目录读取能力，再复制到新建的 `Workspace`，不是挂载或直接接管源目录。`GitCheckout` 用受控宿主 Git 进程准备固定提交，属于可信准备流程，不是对抗性进程沙箱。
 
@@ -95,6 +95,19 @@ Git preparation is trusted host-side work, not an OS process or filesystem isola
 
 Call `GitCheckout::cleanup().await` for observable, idempotent removal. `GitError::CleanupRequired { source, cleanup }` preserves the initiating error and an opaque `GitCleanup` receipt: `cleanup.wait().await` succeeds only after process termination and directory removal are confirmed. Cleanup retries retain directory identity and continue independently of receipt cancellation/drop. A failed ordinary copy can retain its partial destination in `CodeCopyError::CopyCleanup`; explicitly clean that destination. These are library ownership guarantees, not crash recovery or disk quota enforcement. Git behavior depends on the configured trusted binary.
 
+## 后端选择与创建
+
+公开创建入口是 `Sandbox::create(BackendConfig, SandboxConfig).await`：
+
+- `runtime::SandboxConfig::new(limits, isolation, io_limits)` 只承载所有后端共有的要求：`ResourceLimits` 请求、`IsolationConfig` 隔离要求（no-new-privileges、drop all capabilities、read-only root、disabled network 必须全部为真）和 `IoLimits`。它不包含 endpoint、image 或 runtime。
+- `runtime::BackendConfig` 是后端选择枚举，当前只有一个已实现变体 `BackendConfig::Docker(DockerBackendConfig)`。该描述包含显式本地 endpoint、已存在的 image reference 和 OCI runtime 名称；构造它不连接 Docker。
+- Docker endpoint/image/runtime 的解析、仅 runc、以及 Docker 特有的 PID 下限等校验都在私有 `infrastructure::DockerConfig` 中完成。`Sandbox::create` 在分配任何容器之前返回 `SandboxError::BackendConfig(BackendConfigError)`；本地镜像不存在时返回 `SandboxError::BackendImageUnavailable { image }`；其他后端失败是 `SandboxError::Backend { message }`，不泄露 SDK 类型。真实 Engine 的 restrict/limit 结果由 create 时的 inspect 校验，不匹配会清理已创建容器，而不是降级。
+- `Sandbox::create` 还会在连接前检查后端是否声明支持 pause/resume、guest 文件传输和 workspace archive 捕获；不支持时返回 `SandboxError::UnsupportedCapability`。这些检查不表示其他后端已实现。
+
+`SandboxStatus` 只报告当前 phase、`instance_id: Option<String>` 和 `enforcement: Option<EnforcementReport>`。`EnforcementReport` 的每个字段都是 inspect 到的证据，类型为 `Option`；`None` 表示后端没有报告该项。请求值不会复制成“已强制”的值。
+
+示例：`examples/sandbox_config.rs` 构造中立配置、展示 `BackendConfig::Docker` 描述，并观察无效 endpoint 与 Docker PID 下限在分配前被类型化拒绝；`examples/image_environment.rs` 解析本地不可变镜像 ID。两者都不需要连接成功，也不代表容器隔离已验证。
+
 ## 资源请求值模型
 
 通过 `circus_sandbox::runtime::{ResourceLimits, ResourceLimitsError}` 使用。`ResourceLimits::new(memory_bytes, cpu_millis, pids, workspace_bytes, max_file_bytes)` 返回 `Result`；字段私有，提供同名 getter，支持 `Clone`、`Copy`、`Debug`、`PartialEq`、`Eq`，没有 `Default`。
@@ -125,9 +138,21 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
 
 测试使用 `python:3.12-slim`，可用 `CIRCUS_DOCKER_IMAGE` 指定另一个包含 Python 3 的本地 Linux 镜像。实际运行环境、命令、结果和限制应记录在对应 PR；不要把编译、忽略测试或 CI 通过写成隔离验证。
 
+本地镜像解析测试同样默认忽略，且需要 `CIRCUS_DOCKER_ARCH` 指定 Docker 架构名（例如 `amd64` 或 `arm64`）：
+
+```bash
+CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
+CIRCUS_DOCKER_ARCH=amd64 \
+  cargo test --locked --test docker_environment -- --ignored
+CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock CIRCUS_DOCKER_ARCH=amd64 \
+  cargo run --locked --example image_environment
+```
+
+`prepare_docker_image` 只 inspect 本地镜像并返回不可变 ID；缺失镜像是 `EnvironmentError::ImageNotFound`，不会触发拉取，也不读取任何 registry 凭据。
+
 ### 预启动 Docker 池
 
-`PoolConfig::new(sandbox, capacity, baseline, lease_ttl: Duration)` 要求正容量和显式正 TTL；`DockerPool::create(config).await` 在所有槽位完成实际 create、可选基线恢复、start 和 Running 检查后才成功。TTL 从租约分配时开始，不从预热或排队开始；到期请求撤销并中断仍在执行的命令，实际销毁是异步的，必须等待清理确认，不能把到期当作容器已不存在。`acquire(Duration)` 必须给出正超时；超时为 `PoolError::AcquireTimeout`，存活等待者 FIFO，取消等待不会占用租约。`PoolLease::sandbox()` 借用真实后端；租约不可克隆。每次租约只使用一次，`release().await`、Drop 或到期都销毁容器，确认不存在后才按不可变配置补充全新容器，绝不 reset 或跨租用复用脏容器。
+`PoolConfig::new(backend: BackendConfig, sandbox: SandboxConfig, capacity, baseline, lease_ttl: Duration)` 要求正容量和显式正 TTL；`DockerPool::create(config).await` 在所有槽位完成实际 create、可选基线恢复、start 和 Running 检查后才成功。TTL 从租约分配时开始，不从预热或排队开始；到期请求撤销并中断仍在执行的命令，实际销毁是异步的，必须等待清理确认，不能把到期当作容器已不存在。`acquire(Duration)` 必须给出正超时；超时为 `PoolError::AcquireTimeout`，存活等待者 FIFO，取消等待不会占用租约。`PoolLease::sandbox()` 借用真实后端；租约不可克隆。每次租约只使用一次，`release().await`、Drop 或到期都销毁容器，确认不存在后才按不可变配置补充全新容器，绝不 reset 或跨租用复用脏容器。
 
 基线 `Option<Arc<CodeSnapshot>>` 只能包含调用者明确授权共享的输入；它不是凭据扫描器，也不是进程/内存检查点。容量约束包含 ready、creating、leased、retiring 和 cleanup_required；`status().await` 的这些互斥计数连同关闭后的 absent 合计为 capacity。`ResourceLimits` 是每容器限制，不是宿主聚合资源预留。
 
@@ -156,6 +181,8 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
 | 文档              | `RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`                                         |
 | 运行示例          | `cargo run --locked --example workspace`                                                        |
 | 资源请求示例      | `cargo run --locked --example resource_policy`                                                  |
+| 镜像解析示例      | `cargo run --locked --example image_environment`                                                |
+| 镜像解析测试      | `cargo test --locked --test docker_environment -- --ignored`                                    |
 | 代码副本测试      | `cargo test --locked --test code_copy`                                                          |
 | 代码副本示例      | `cargo run --locked --example code_copy`                                                        |
 | 依赖策略          | 先 `cargo install --locked --version 0.20.2 cargo-deny`，再在本目录 `cargo deny --locked check` |
@@ -213,6 +240,13 @@ npm --prefix circus-sandbox/qa run architecture
 
 ## 变更
 
+### 未发布：后端中立的创建 API 与本地镜像解析
+
+- 公开创建入口改为 `Sandbox::create(BackendConfig, SandboxConfig)`；`SandboxConfig` 只保留 limits、isolation 与 I/O 上限，Docker endpoint/image/runtime 与 Docker 专用校验移入私有 infrastructure。旧的容器 sandbox 公共类型名和 Docker 专用配置/endpoint 公共名称已移除，没有别名。
+- `SandboxStatus` 改为 `phase`、`instance_id` 与 inspected `enforcement` 证据；未报告的字段是 `None`，请求值不再显示为已强制。`SandboxError` 保留可匹配含义：`BackendConfig`、`BackendImageUnavailable { image }`、`Backend { message }`，以及原有的阶段、staging、snapshot 与清理归属错误。
+- 新增私有 `Backend` trait、`DockerBackend` 和静态泛型 `State<B>`；lifecycle 仍独占状态转换、取消、清理回执与 create 未决归属。`Sandbox::create` 在分配前检查后端能力并拒绝不支持的组合。
+- 新增 `environment`：`prepare_docker_image(ImageRequest)` 只 inspect 本地镜像，返回不可变 ID、repo digests 与平台；不拉取、不访问 registry、不读取凭据。平台不匹配和本地缺失都是类型化错误。示例 `image_environment`、真实集成测试 `docker_environment` 与单元测试均不声明 registry pull 或认证能力。
+
 ### 未发布：Docker 工作区文件快照
 
 - 新增 `capture_workspace_snapshot` 和 `restore_workspace_snapshot`：使用 Docker archive API 捕获运行中 tmpfs 的普通文件/目录，并替换新建 sandbox 的启动暂存区；复用 `Arc<CodeSnapshot>`，不复制队列中的快照载荷。
@@ -229,7 +263,7 @@ npm --prefix circus-sandbox/qa run architecture
 ### 未发布：预启动 Docker 租约池
 
 - 新增 `DockerPool`/`PoolLease`：固定容量内预启动新鲜容器，租约单次使用，释放、Drop、TTL 到期或 shutdown 都走真实销毁与确认回收。
-- 新增 `PoolConfig::new(sandbox, capacity, baseline, lease_ttl)`、显式 acquire 超时、FIFO 等待者、容量统计与 `CleanupReceipt` 归属观察；不代表聚合宿主资源预留或进程检查点。
+- 新增 `PoolConfig::new(backend, sandbox, capacity, baseline, lease_ttl)`、显式 acquire 超时、FIFO 等待者、容量统计与 `CleanupReceipt` 归属观察；不代表聚合宿主资源预留或进程检查点。
 
 ### 未发布：声明依赖架构门禁
 

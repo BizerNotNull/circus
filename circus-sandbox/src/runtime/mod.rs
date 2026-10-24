@@ -1,11 +1,22 @@
-//! Backend-neutral resource request validation.
+//! Backend-neutral resource, isolation, and I/O request configuration.
 //!
 //! A valid [`ResourceLimits`] value is not evidence that resources are enforced,
 //! that execution is isolated, or that aggregate admission across requests has
 //! succeeded. Backend enforcement and admission control are separate concerns;
-//! this module does not start or configure a runtime.
+//! this module does not start or configure a runtime. [`SandboxConfig`] carries
+//! backend-neutral requirements; [`BackendConfig`] selects the backend and
+//! carries its own descriptor.
+
+mod config;
 
 use thiserror::Error;
+
+pub use config::{
+    BackendConfig, BackendConfigError, ConfigError, DockerBackendConfig, IoLimits, IsolationConfig,
+    SandboxConfig,
+};
+
+pub(crate) use config::check_relative;
 
 /// Failure of a privately owned preparation process, independent of its SDK.
 #[derive(Debug, Error)]
