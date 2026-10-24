@@ -30,13 +30,19 @@ use containerd_client::types::Mount;
 use containerd_client::with_namespace;
 use futures_util::{Stream, StreamExt, stream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
 use super::backend::CommonSpec;
 use super::containerd_grpc::{
     connect_error, local_error, map_status, with_ownership, without_ownership,
 };
 use super::containerd_image::ensure_rootfs;
+// containerd mutates one shared snapshot chain for every sandbox created from
+// the same image. Container creation and ownership-checked recovery therefore
+// serialize per process so a recovery cannot remove a snapshot while another
+// sandbox is mounting or initializing its rootfs.
+static SNAPSHOT_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
+
 use super::containerd_io::{
     CloseIo, FifoDir, FifoWriter, open_reader_async, open_writer, unblock_readers,
 };
@@ -106,6 +112,7 @@ impl ContainerdEngine {
         spec: &CommonSpec,
         nonce: &str,
     ) -> Result<String, EngineError> {
+        let _snapshot = SNAPSHOT_LOCK.lock().await;
         let parent = ensure_rootfs(
             &self.channel,
             &self.namespace,
@@ -707,6 +714,7 @@ impl ContainerdEngine {
         nonce: &str,
         retained_id: Option<&str>,
     ) -> Recovered {
+        let _snapshot = SNAPSHOT_LOCK.lock().await;
         let container = self.container_check(name, nonce).await;
         let snapshot = self.snapshot_check(name, nonce).await;
         if matches!(container, OwnerCheck::Foreign) || matches!(snapshot, OwnerCheck::Foreign) {

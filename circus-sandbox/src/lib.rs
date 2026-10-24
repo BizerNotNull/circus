@@ -128,7 +128,7 @@ pub use workspace::{
 pub use runtime::{ResourceLimits, ResourceLimitsError};
 
 #[doc(inline)]
-pub use pool::{DockerPool, PoolConfig, PoolError, PoolFailure, PoolLease, PoolStatus};
+pub use pool::{PoolConfig, PoolError, PoolFailure, PoolLease, PoolStatus, SandboxPool};
 
 #[doc(inline)]
 pub use observability::{

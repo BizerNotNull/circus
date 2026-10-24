@@ -182,9 +182,9 @@ CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock CIRCUS_DOCKER_ARCH=amd64 \
 
 真实测试覆盖固定步骤的精确输出、失败步骤的 index/exit code 与容器清理、执行中取消后的清理、未固定输入在分配前被拒绝，以及标识稳定性/敏感性和 Debug/Display 不泄露输入。示例打印观察到的 image ID、步骤输出和 identity hex；`execute` 返回即表示已确认清理。示例的 pinned version 可用 `CIRCUS_PYTHON_VERSION`（默认 `3`）覆盖，tenant domain 可用 `CIRCUS_TENANT`（默认 `example-tenant`）覆盖。身份派生测试不需要 Docker，可直接随 `cargo test --locked` 运行。真实 Docker 用例保持 `#[ignore]`；本检出没有可用的 Docker Engine，因此代码存在不等于已运行验证。
 
-### 预启动 Docker 池
+### 预启动沙箱池（Docker 与 containerd）
 
-`PoolConfig::new(backend: BackendConfig, sandbox: SandboxConfig, capacity, baseline, lease_ttl: Duration)` 要求正容量和显式正 TTL；`DockerPool::create(config).await` 在所有槽位完成实际 create、可选基线恢复、start 和 Running 检查后才成功。TTL 从租约分配时开始，不从预热或排队开始；到期请求撤销并中断仍在执行的命令，实际销毁是异步的，必须等待清理确认，不能把到期当作容器已不存在。`acquire(Duration)` 必须给出正超时；超时为 `PoolError::AcquireTimeout`，存活等待者 FIFO，取消等待不会占用租约。`PoolLease::sandbox()` 借用真实后端；租约不可克隆。每次租约只使用一次，`release().await`、Drop 或到期都销毁容器，确认不存在后才按不可变配置补充全新容器，绝不 reset 或跨租用复用脏容器。
+`PoolConfig::new(backend: BackendConfig, sandbox: SandboxConfig, capacity, baseline, lease_ttl: Duration)` 要求正容量和显式正 TTL；`SandboxPool::create(config).await` 在所有槽位完成实际 create、可选基线恢复、start 和 Running 检查后才成功。池本身与后端无关，可传 Docker 或 containerd 的 `BackendConfig`，语义一致。TTL 从租约分配时开始，不从预热或排队开始；到期请求撤销并中断仍在执行的命令，实际销毁是异步的，必须等待清理确认，不能把到期当作容器已不存在。`acquire(Duration)` 必须给出正超时；超时为 `PoolError::AcquireTimeout`，存活等待者 FIFO，取消等待不会占用租约。`PoolLease::sandbox()` 借用真实后端；租约不可克隆。每次租约只使用一次，`release().await`、Drop、TTL 到期或 shutdown 都销毁容器，确认不存在后才按不可变配置补充全新容器，绝不 reset 或跨租用复用脏容器。
 
 基线 `Option<Arc<CodeSnapshot>>` 只能包含调用者明确授权共享的输入；它不是凭据扫描器，也不是进程/内存检查点。容量约束包含 ready、creating、leased、retiring 和 cleanup_required；`status().await` 的这些互斥计数连同关闭后的 absent 合计为 capacity。`ResourceLimits` 是每容器限制，不是宿主聚合资源预留。
 
@@ -195,6 +195,9 @@ CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
   cargo test --locked --test docker_pool -- --ignored
 CIRCUS_DOCKER_SANDBOX=1 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
   cargo run --locked --example docker_pool
+CIRCUS_CONTAINERD=1 CIRCUS_CONTAINERD_SOCKET=/run/containerd/containerd.sock \
+CIRCUS_CONTAINERD_NAMESPACE=default CIRCUS_CONTAINERD_IMAGE=python:3.12-slim \
+  cargo test --locked --features containerd --test containerd_pool -- --ignored
 ```
 
 示例分别观察 cold create + restore + start、完整预热和 warm acquire 的 Instant 耗时，并执行基线字节、显式 release/shutdown；不是承诺加速比。Windows 端点可设为 `npipe:////./pipe/dockerDesktopLinuxEngine`；环境变量由所用 shell 显式设置。
@@ -344,10 +347,11 @@ npm --prefix circus-sandbox/qa run architecture
 - 新增 `GitCheckout::create_worktree` 与独立 `GitWorktree`：固定提交的 detached worktree、代码-only 复制、并发 worktree 与幂等清理；`--force` 删除脏 worktree 会丢弃其未提交修改，不删除源仓库、主检出或其他 worktree，也不声明进程/磁盘隔离。
 - 新增真实临时目录公开 API 测试和 `code_copy`、`git_clone`、`git_worktree` 示例；不声明 Git 进程隔离、池、运行时隔离、一致快照或未来写入总配额。
 
-### 未发布：预启动 Docker 租约池
+### 未发布：预启动沙箱租约池
 
-- 新增 `DockerPool`/`PoolLease`：固定容量内预启动新鲜容器，租约单次使用，释放、Drop、TTL 到期或 shutdown 都走真实销毁与确认回收。
-- 新增 `PoolConfig::new(backend, sandbox, capacity, baseline, lease_ttl)`、显式 acquire 超时、FIFO 等待者、容量统计与 `CleanupReceipt` 归属观察；不代表聚合宿主资源预留或进程检查点。
+- 新增后端中立的 `SandboxPool`/`PoolLease`（Docker 与 containerd 通用）：固定容量内预启动新鲜容器，租约单次使用，释放、Drop、TTL 到期或 shutdown 都走真实销毁与确认回收。
+- 新增 `PoolConfig::new(backend, sandbox, capacity, baseline, lease_ttl)`、显式 acquire 超时、FIFO 等待者、容量统计与 `CleanupReceipt` 归属观察；`ResourceLimits` 仍是每容器限制，不代表宿主聚合准入或进程检查点。
+- 新增真实忽略套件 `containerd_pool`（`CIRCUS_CONTAINERD=1`）并加入 containerd CI 矩阵，覆盖预热容量、单次租约、`AcquireTimeout`、TTL 撤销、shutdown 与准备失败。
 
 ### 未发布：声明依赖架构门禁
 
