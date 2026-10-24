@@ -4,12 +4,8 @@ use std::future::Future;
 
 use super::backend::{Backend, BackendProcess, Capabilities, CommonSpec, InstanceId, PrepareError};
 use super::engine::{
-<<<<<<< HEAD
     CreateSpec, Engine, EngineError, EngineProcess, ExecDone, HostReport, ProcessSpec, Recovered,
-    SocketKind, StagedBytes,
-=======
-    CreateSpec, Engine, EngineError, ExecDone, HostReport, Recovered, SocketKind, UploadEntry,
->>>>>>> feat/staging-transfer
+    SocketKind, UploadEntry,
 };
 
 /// Local Docker Engine endpoint. TCP, HTTP, and SSH are rejected.
