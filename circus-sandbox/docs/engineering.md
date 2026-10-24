@@ -4,7 +4,7 @@
 
 ## 当前工程
 
-当前检出已有真实 Rust library crate：`Cargo.toml`、Cargo 生成的 `Cargo.lock`、`rust-toolchain.toml`、Apache-2.0 `LICENSE`、`deny.toml`、`src/lib.rs`、`src/workspace/` 与 `src/runtime/`、真实 example 和测试。Rust 1.99.1 / edition 2024；公开入口为同步 `Workspace` 文件 API 和后端中立的 `runtime::ResourceLimits` 值校验，不是进程沙箱、容器或服务。
+当前检出已有真实 Rust library crate：`Cargo.toml`、Cargo 生成的 `Cargo.lock`、`rust-toolchain.toml`、Apache-2.0 `LICENSE`、`deny.toml`、`src/lib.rs`、Workspace 与 Docker 后端源码、真实 example 和测试。Rust 1.99.1 / edition 2024；公开入口包括同步 `Workspace` 文件 API、后端中立的 `runtime::ResourceLimits` 值校验和本地 Linux Docker Engine + runc 异步适配器，不包含 HTTP/RPC 服务。
 
 本文按当前检出描述工程范围，不以文件存在代替合并、发布或最新提交的检查。交付记录入口见 [交付计划](delivery-plan.md)，安全扫描约定见 [安全说明](../../.github/sandbox-security.md)。
 
@@ -89,6 +89,8 @@ Paseo CI 与沙箱门禁互不代替。Action 的完整 SHA 以工作流文件�
 
 `.github/workflows/sandbox-architecture.yml`（`Sandbox architecture`）与质量工作流同触发、无路径过滤。`architecture (ubuntu-latest)` 与 `architecture (windows-latest)` 是独立的 OS 检查上下文，超时 20 分钟，只安装 Node 24.18.0、Rust 1.99.1 和 cargo-modules 0.28.0，再用真实 crate 图执行架构域检查；权限仅 `contents: read`，不使用 secrets 或 `pull_request_target`，也不修改既有检查名。矩阵、限制与本地命令见[架构域门禁](#架构域门禁)。
 
+`Sandbox Rust` 另有独立的 `docker-integration` job，在 `ubuntu-latest` 使用 Rust 1.99.1 和本地 Linux Docker Engine，要求 cgroup v2 与 runc。它显式设置 `CIRCUS_DOCKER_SANDBOX=1`、`CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock`、`CIRCUS_DOCKER_IMAGE=python:3.12-slim`，先拉取镜像，再执行 `cargo test --locked --test docker_sandbox -- --ignored` 与 `cargo run --locked --example docker_sandbox`；失败使 job 失败，不使用 mock 或 `continue-on-error`。普通 Linux/Windows `rust` job 不启用真实 Engine 测试，不能替代此门禁。运行前提与本地复现命令见 [Docker + runc 文档](docker-linux-runc.md#real-engine-gate-and-local-reproduction)。这里描述配置，不宣称任何一次运行已通过，也不新增 required status check 的平台配置声明。
+
 `CodeQL QA` 超时 30 分钟。语言是 `javascript-typescript`，`build-mode` 为 none，查询集为 `security-extended`，配置文件是 `.github/codeql/sandbox-qa.yml`。权限是 contents、actions 的 read，以及 `security-events: write`。只分析 QA 源码，不分析 actions 或 Rust，也不扫描 Paseo。分析或上传失败则 job 失败；告警是否阻断合并属于 ruleset，不由分析工作流本身保证。
 
 完整历史密钥扫描的本地入口（仓库根目录）：
@@ -107,7 +109,7 @@ Rust fmt、clippy、构建、测试、文档、example、cargo-deny 和 Rust Cod
 
 secret scanning 与 push protection 是 GitHub 平台设置，不是工作流的替代品。工作流存在也不等于它已设为 `main` 的 required status check。当前不要求非作者批准；任务授权后的自动 squash merge 仍须经过 PR、最新 CI、适用审查问题闭环且无冲突，不绕过保护或强推。提交流程见根指南，安全扫描范围见安全说明。
 
-质量门禁不覆盖 Cargo、Rust CodeQL 或隔离；安全门禁的 actions CodeQL 和 actionlint 覆盖全部 `.github/workflows/sandbox-*.yml`，shellcheck 覆盖全部 `.github/scripts/sandbox-*.sh`，不覆盖 Paseo 工作流或任意其它脚本。Rust 源码由独立 Rust 工作流分析。PR 标题门禁不证明代码安全。这些门禁都不证明沙箱进程隔离、Paseo 依赖审计、分支保护配置或全仓库漏洞清零。
+质量门禁不覆盖 Cargo、Rust CodeQL 或隔离；安全门禁的 actions CodeQL 和 actionlint 覆盖全部 `.github/workflows/sandbox-*.yml`，shellcheck 覆盖全部 `.github/scripts/sandbox-*.sh`，不覆盖 Paseo 工作流或任意其它脚本。Rust 源码由独立 Rust 工作流分析；真实 Docker + runc 行为由 `docker-integration` 单独执行，证据范围限于实际测试与示例。PR 标题门禁不证明代码安全。这些门禁不证明其他隔离后端、Paseo 依赖审计、分支保护配置或全仓库漏洞清零。
 
 ## 当前 Workspace 与后续真实后端
 
