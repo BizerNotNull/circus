@@ -4,7 +4,7 @@ This checkout implements one real backend: an explicit local Docker Engine endpo
 
 The adapter sets memory and swap, milli-CPU to nano-CPU, pids, a bounded tmpfs workspace, read-only root, `none` networking, `no-new-privileges`, and `ALL` capability drop. It creates no host binds, volumes, credentials, or ports. Workspace files are staged from the existing capability-scoped `Workspace`. The guest file transport requires Python 3 and rejects symlinks during running-phase file operations.
 
-`CommandRequest` uses argv form, bounded stdout and stderr, and a required timeout. Timeout, output overflow, and cancellation destroy the entire owned container so descendants cannot survive. Dropping the create future retains the generated name and owner label and recovers only a matching container. Cleanup errors retain ownership and are returned; retry `destroy` is required. Start and lifecycle operations also use the configured I/O timeout and may destroy the container when the engine call cannot be accepted safely.
+`CommandRequest` uses argv form, bounded stdout and stderr, and a required timeout. Timeout, output overflow, and cancellation destroy the entire owned container so descendants cannot survive. Dropping the create future retains the generated name and owner label and recovers only a matching container. Operation cleanup errors retain ownership in the existing sandbox handle; retry `destroy` is required. Failed creation instead exposes the background cleanup receipt described below. Start and lifecycle operations also use the configured I/O timeout and may destroy the container when the engine call cannot be accepted safely.
 
 The requested PID limit is enforced as supplied; the adapter does not silently increase it. Its budget includes the sandbox init, supervisor, commands, and any runtime/helper tasks charged to the container's PID cgroup, including temporary OCI exec startup tasks. Configuration validation requires at least 3 PIDs as a structural init/supervisor/command floor, not a guarantee that arbitrary commands or guest file operations can launch under every Docker/runc version. A low limit can therefore pass validation yet cause Docker to reject an exec. Such failures remain subject to the existing lifecycle safety cleanup described above; callers must handle reported errors and retained ownership.
 
@@ -17,6 +17,34 @@ Invalid command inputs are distinct from path failures: `SandboxError::Command(C
 A staging validation failure leaves the sandbox `Created`, retains its container identity and files, and allows removing or shrinking staged files before retrying `start`, or explicitly calling `destroy`. This payload check is not a host disk quota or a guarantee that tmpfs has room: filesystem metadata and allocation overhead can still cause a later upload to fail under the separately enforced tmpfs bound.
 
 The ignored integration test requires `CIRCUS_DOCKER_SANDBOX=1` and `CIRCUS_DOCKER_ENDPOINT`; it must run against a real Linux Docker Engine with cgroup v2. `CIRCUS_DOCKER_IMAGE` optionally overrides the default `python:3.12-slim` image and must refer to a local Linux image containing Python 3. The example is `docker_sandbox` and also requires an endpoint. Run it with `cargo test --locked --test docker_sandbox -- --ignored`.
+
+## Failed creation and cleanup receipts
+
+`DockerSandbox::create` can return `SandboxError::CreationCleanupRequired { container_id, source, cleanup }` when creation fails without returning a sandbox handle. The boxed `source` preserves the original `SandboxError` and its standard error chain. `cleanup` is a cloneable, debug-printable `CleanupReceipt`, exported from both `api` and the crate root. This differs from operation-level `CleanupRequired`, where the caller already owns a sandbox on which it can retry `destroy`.
+
+The detached lifecycle worker retains both container identity and staging, and retries real cleanup with backoff from 100 ms to 30 seconds. Every retry updates the receipt. Dropping the create future, ready receiver, receipt, or a pending `wait()` does not stop that worker. A single not-found response while creation is unresolved is still not proof of absence: a late container could materialize. No receipt exposes the ownership nonce or permits adopting an arbitrary container ID.
+
+`cleanup.status()` returns the latest actual cleanup report. `cleanup.wait().await` returns `Ok(report)` only after the worker reaches `Destroyed`, which requires both confirmed container removal/absence and successful staging cleanup. Do not refill pool capacity based merely on container absence or receipt delivery. Concurrent cloned receipts and cancelled/restarted waits are supported. If the worker disappears without confirmed completion, waiting returns `SandboxError::WorkerGone`; it must not be treated as safe capacity. Cleanup can remain pending indefinitely when the engine is unavailable or creation remains unresolved. These guarantees require the process and Tokio runtime to remain alive.
+
+The same worker-owned progress channel is initialized before container creation and also tracks ordinary destruction and internal revocation. Before any cleanup attempt its report is conservatively `Unknown`. Internal pool revocation cancels the sandbox shutdown token, interrupting already-running operations, and returns a receipt without queueing behind those operations. The receipt confirms completion only after container and staging cleanup, including any retries.
+
+```rust,no_run
+use circus_sandbox::{DockerSandbox, SandboxConfig, SandboxError};
+
+async fn create_with_cleanup(config: SandboxConfig) -> Result<DockerSandbox, SandboxError> {
+    match DockerSandbox::create(config).await {
+        Err(SandboxError::CreationCleanupRequired { source, cleanup, .. }) => {
+            // Keep capacity reserved until both container and staging are gone.
+            cleanup.wait().await?;
+            // Cleanup succeeded; creation still failed with its original cause.
+            Err(*source)
+        }
+        result => result,
+    }
+}
+```
+
+Pre-create connection/image failures and settled creation failures whose cleanup is already confirmed keep their original error. Real Docker create-response-loss and staging-cleanup failure scenarios have not been exercised for this receipt change; the currently unavailable Docker environment is not evidence of successful cleanup. No simulated backend is used as a substitute for that integration proof.
 
 ## Workspace file snapshots
 

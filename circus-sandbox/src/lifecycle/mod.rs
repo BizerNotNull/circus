@@ -2,9 +2,12 @@
 
 mod config;
 mod input;
+mod cleanup;
 mod snapshot;
 
 pub use input::{CommandError, StagingError};
+pub use cleanup::CleanupReceipt;
+use cleanup::{cleanup_until_done, failed_creation};
 
 pub use config::{
     ConfigError, DockerEndpoint, IoLimits, IsolationConfig, OWNER_LABEL_KEY, RuntimeName,
@@ -139,6 +142,16 @@ pub enum SandboxError {
         ownership: Ownership,
         detail: String,
     },
+    /// Creation failed without returning a sandbox handle. The worker retains
+    /// container and staging ownership; await `cleanup.wait()` before reusing
+    /// capacity. Dropping the receipt does not stop cleanup.
+    #[error("creation failed; cleanup for container {container_id} continues: {source}")]
+    CreationCleanupRequired {
+        container_id: String,
+        #[source]
+        source: Box<SandboxError>,
+        cleanup: CleanupReceipt,
+    },
     #[error("cleanup failed; container {container_id} is still owned: {detail}")]
     CleanupRequired {
         container_id: String,
@@ -210,10 +223,17 @@ struct Message {
 pub struct DockerSandbox {
     tx: mpsc::Sender<Message>,
     shutdown: CancellationToken,
+    cleanup: CleanupReceipt,
     max_file_bytes: usize,
 }
 
 impl DockerSandbox {
+    /// Interrupts queued or running operations and observes full owned cleanup.
+    pub(crate) fn revoke(&self) -> CleanupReceipt {
+        self.shutdown.cancel();
+        self.cleanup.clone()
+    }
+
     /// Connects, checks the local linux image, and creates one labelled container.
     ///
     /// The owner label and container name are fixed before the create request.
@@ -223,9 +243,10 @@ impl DockerSandbox {
     ///
     /// # Errors
     ///
-    /// Connection, image, runtime, and create failures are returned. A create
-    /// that fails after a container may exist keeps the name for retry via the
-    /// worker until absence is confirmed or [`SandboxError::CleanupRequired`].
+    /// Connection, image, runtime, and create failures are returned. If creation
+    /// leaves cleanup outstanding, [`SandboxError::CreationCleanupRequired`]
+    /// carries the original error and a receipt for container and staging cleanup.
+    /// Its worker retries independently of the receipt or this future's lifetime.
     pub async fn create(config: SandboxConfig) -> Result<Self, SandboxError> {
         let nonce = uuid::Uuid::new_v4().to_string();
         let name = format!("circus-sandbox-{nonce}");
@@ -252,6 +273,7 @@ impl DockerSandbox {
         let (tx, rx) = mpsc::channel(QUEUE);
         let shutdown = CancellationToken::new();
         let (ready_tx, ready_rx) = oneshot::channel();
+        let (cleanup_tx, cleanup) = cleanup::channel(name.clone());
         let state = State {
             engine,
             workspace: Arc::new(Mutex::new(workspace)),
@@ -267,6 +289,7 @@ impl DockerSandbox {
             phase: SandboxPhase::Created,
             shutdown: shutdown.clone(),
             create_unsettled: true,
+            cleanup: cleanup_tx,
         };
         tokio::spawn(worker(state, rx, ready_tx));
         let mut guard = CommandGuard {
@@ -281,6 +304,7 @@ impl DockerSandbox {
         Ok(Self {
             tx,
             shutdown,
+            cleanup,
             max_file_bytes: max_file,
         })
     }
@@ -422,6 +446,7 @@ struct State {
     phase: SandboxPhase,
     shutdown: CancellationToken,
     create_unsettled: bool,
+    cleanup: tokio::sync::watch::Sender<cleanup::Progress>,
 }
 
 async fn worker(
@@ -446,25 +471,16 @@ async fn worker(
                 state.create_unsettled = false;
             }
             if err.create_pending {
-                let _ = ready.send(Err(SandboxError::CleanupRequired {
-                    container_id: state.id.clone().unwrap_or_else(|| state.name.clone()),
-                    detail: err.message.clone(),
-                }));
-                cleanup_until_done(&mut state).await;
+                failed_creation(&mut state, ready, engine_err(err), None).await;
                 return;
             }
             state.create_unsettled = false;
             let report = destroy_report(&mut state).await;
-            let error = if report.ownership == Ownership::ConfirmedAbsent {
-                engine_err(err)
+            if state.phase == SandboxPhase::Destroyed {
+                let _ = ready.send(Err(engine_err(err)));
             } else {
-                SandboxError::CleanupRequired {
-                    container_id: state.name.clone(),
-                    detail: format!("{}; {}", err.message, report.detail),
-                }
-            };
-            let _ = ready.send(Err(error));
-            cleanup_until_done(&mut state).await;
+                failed_creation(&mut state, ready, engine_err(err), Some(report)).await;
+            }
             return;
         }
     }
@@ -483,15 +499,6 @@ async fn worker(
             continue;
         }
         dispatch(&mut state, message).await;
-    }
-}
-
-async fn cleanup_until_done(state: &mut State) {
-    let mut delay = Duration::from_millis(100);
-    while destroy_state(state).await.is_err() {
-        // Keep ownership and the workspace alive until cleanup really succeeds.
-        tokio::time::sleep(delay).await;
-        delay = (delay * 2).min(Duration::from_secs(30));
     }
 }
 
@@ -545,7 +552,16 @@ async fn dispatch(state: &mut State, message: Message) {
         }
         // Never cancel cleanup itself: a lost caller cannot relinquish ownership.
         Op::Destroy(reply) => {
-            let _ = reply.send(destroy_state(state).await);
+            let report = destroy_report(state).await;
+            let result = if state.phase == SandboxPhase::Destroyed {
+                Ok(())
+            } else {
+                Err(SandboxError::CleanupRequired {
+                    container_id: state.id.clone().unwrap_or_else(|| state.name.clone()),
+                    detail: report.detail,
+                })
+            };
+            let _ = reply.send(result);
         }
         Op::Write { path, bytes, reply } => {
             let result = run!(write_file(state, &path, bytes), file_timeout);
@@ -859,7 +875,7 @@ async fn destroy_for_cancel<T>(state: &mut State, detail: &str) -> Result<T, San
 
 async fn destroy_report(state: &mut State) -> CleanupReport {
     let id = state.id.clone();
-    match destroy_state(state).await {
+    let report = match destroy_state(state).await {
         Ok(()) => CleanupReport {
             container_id: None,
             ownership: Ownership::ConfirmedAbsent,
@@ -870,7 +886,13 @@ async fn destroy_report(state: &mut State) -> CleanupReport {
             ownership: Ownership::Unknown,
             detail: err.to_string(),
         },
-    }
+    };
+    state.cleanup.send_replace(cleanup::Progress {
+        report: report.clone(),
+        complete: state.phase == SandboxPhase::Destroyed,
+        attempted: true,
+    });
+    report
 }
 
 async fn status(state: &State) -> Result<SandboxStatus, SandboxError> {
@@ -1075,6 +1097,7 @@ mod tests {
         let sandbox = DockerSandbox {
             tx,
             shutdown: CancellationToken::new(),
+            cleanup: cleanup::channel("unused-test-container".to_string()).1,
             max_file_bytes: 1024,
         };
         let err = tokio::time::timeout(Duration::from_secs(1), sandbox.exec(request))
