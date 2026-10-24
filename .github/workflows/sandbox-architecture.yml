@@ -1,0 +1,111 @@
+name: Sandbox architecture
+
+# Semantic domain gate for circus-sandbox. It runs the real analyzer on both
+# supported hosts; it does not run application or behavioral tests.
+#
+# No path filters. A required check that is skipped stays pending.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+# Do not cancel a merge-queue run; a cancelled required check does not pass.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
+permissions:
+  contents: read
+
+env:
+  NO_COLOR: "1"
+
+jobs:
+  architecture:
+    name: architecture (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: circus-sandbox
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: circus-sandbox/qa/.node-version
+          cache: npm
+          cache-dependency-path: circus-sandbox/qa/package-lock.json
+
+      - name: Install Rust 1.99.1 (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
+          sh "$RUNNER_TEMP/rustup-init.sh" -y \
+            --default-toolchain 1.99.1 \
+            --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust 1.99.1 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ProgressPreference = 'SilentlyContinue'
+          $init = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
+          Invoke-WebRequest -Uri https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe -OutFile $init
+          & $init -y --default-toolchain 1.99.1 --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw "rustup-init exited $LASTEXITCODE" }
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:USERPROFILE '.cargo\bin')
+
+      - name: Require Rust 1.99.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="$(rustc --version)"
+          printf '%s\n' "$ver"
+          case "$ver" in
+            *" 1.99.1 "*) ;;
+            *) echo "expected rustc 1.99.1, got: $ver" >&2; exit 1 ;;
+          esac
+
+      - name: Install cargo-modules 0.28.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install --locked --version 0.28.0 cargo-modules
+          ver="$(cargo modules --version | tr -d '\r')"
+          printf '%s\n' "$ver"
+          case "$ver" in
+            "cargo-modules 0.28.0") ;;
+            *) echo "expected cargo-modules 0.28.0, got: $ver" >&2; exit 1 ;;
+          esac
+
+      - name: Install QA dependencies
+        shell: bash
+        run: npm --prefix qa ci
+
+      - name: Check architecture tool formatting
+        shell: bash
+        run: |
+          node qa/node_modules/prettier/bin/prettier.cjs --check --end-of-line auto \
+            qa/architecture.mjs qa/architecture.test.mjs \
+            ../.github/workflows/sandbox-architecture.yml
+
+      - name: Check architecture domains
+        shell: bash
+        run: npm --prefix qa run architecture

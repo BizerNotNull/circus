@@ -103,7 +103,7 @@
 
 ## Runtime, Commands & QA
 
-- Rust 核心使用上述 Cargo 工具链，不继承 Paseo 的工具链版本。服务入口尚未配置。`.github/workflows/sandbox-rust.yml` 显示名为 `Sandbox Rust`，检查名为 `rust (ubuntu-latest)`、`rust (windows-latest)`、`dependencies` 和 `codeql`。没有路径过滤，不调用 Paseo CI；`main` push、PR 的 `opened`/`reopened`/`synchronize`、merge queue 和 `workflow_dispatch` 都会启动。结果只记在对应 PR，不在本文声称当前提交已通过。命令在 `circus-sandbox/` 执行，rustup 读取本目录 `rust-toolchain.toml`。工作流存在不是服务可运行、隔离通过或分支保护已配置。
+- Rust 核心使用上述 Cargo 工具链，不继承 Paseo 的工具链版本。服务入口尚未配置。`.github/workflows/sandbox-rust.yml` 显示名为 `Sandbox Rust`，检查名为 `rust (ubuntu-latest)`、`rust (windows-latest)`、`dependencies` 和 `codeql`。没有路径过滤，不调用 Paseo CI；`main` push、PR 的 `opened`/`reopened`/`synchronize`、merge queue 和 `workflow_dispatch` 都会启动。结果只记在对应 PR，不在本文声称当前提交已通过。命令在 `circus-sandbox/` 执行，rustup 读取本目录 `rust-toolchain.toml`。工作流存在不是服务可运行、隔离通过或分支保护已配置。`.github/workflows/sandbox-architecture.yml` 使用同一组触发条件，检查名为 `architecture (ubuntu-latest)` 与 `architecture (windows-latest)`。
 - 本 crate 不允许 unsafe。库只导出已实现的 `Workspace` 文件 API 和 `runtime` 资源值模型，不预建其他空模块，也不创建空壳二进制来假装后端可用。
 - 格式检查：`cargo fmt --check`（写回用 `cargo fmt`）。
 - Clippy：`cargo clippy --locked --all-targets -- -D warnings`。
@@ -112,9 +112,11 @@
 - 文档：`RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`。与 CI 的文档检查一致。
 - 文件示例：`cargo run --locked --example workspace`，必须实际写、读、删除并 `cleanup`，打印读到的字节，不能打印与 `Result` 无关的成功字样。资源示例：`cargo run --locked --example resource_policy`，构造合法请求、标明单位，再观察冲突请求的类型化拒绝；它不是后端 smoke。
 - 单元测试与模块共置，可覆盖符号链接逃逸、大于上限的已有文件读取，以及清理失败后的重试。读取超限时 `LimitExceeded.actual` 是探测到的 `limit + 1`，不是未知总长。公开 API 不能制造超限文件，所以 `tests/` 只验证写上限、恰好等于上限的读取、非法路径、嵌套目录/删除、重复 `cleanup` 与 `Closed`。符号链接用例的必要前提是进程能创建符号链接。Windows 需要开发者模式，或持有 `SeCreateSymbolicLinkPrivilege`。缺少该权限时对应用例必须失败，不能把 `PermissionDenied` 当成跳过并静默返回成功。不要修改宿主安全设置、组策略或开发者模式来让测试通过。需要容器或虚拟化的测试应显式标注环境要求并隔离资源；当前没有这类测试。
+- 架构域门禁：先安装 `cargo-modules` 0.28.0，再在仓库根目录执行 `npm --prefix circus-sandbox/qa ci` 和 `npm --prefix circus-sandbox/qa run architecture`。脚本必须用真实的 `cargo modules dependencies --lib --all-features --no-externs --no-owns` DOT，验证工具精确为 0.28.0，按语义 ID 和声明 kind 投影到顶层域，接受同域 getter/impl 递归，拒绝固定矩阵之外的跨域 `uses` 边。不得用 `--acyclic`、`--no-fns`/`--no-types`、手写 Rust 源码解析或忽略 analyzer 失败来绕过。矩阵、根门面规则和限制只在[工程说明](docs/engineering.md#架构域门禁)维护，不在本文件复制第二份。
+- 架构门禁只证明当前 crate 的跨域 `uses` 边满足 allowlist DAG；它不证明外部 SDK 暴露面，也不检查域内循环。`cargo-modules` 是 MPL-2.0 开发期 CLI 工具，`dotparser` 1.1.1 是 MIT 的 QA 依赖，都不是 crate 的运行时依赖。
 - 启动优化必须测量冷启动与复用路径，并验证复用不泄露状态。没有覆盖率百分比门槛。实际后端行为必须有运行证据，不能仅靠 mock；workspace 文件测试使用真实临时目录。Windows 编译成功不能当成隔离或 Linux 后端通过，也不能把缺少符号链接权限时的静默跳过当成符号链接约束已验证。
 - 质量门禁继续使用 `circus-sandbox/qa` 的现有 checker 与锁文件，Node.js 固定 24.18.0。手写 `.rs` 单文件不超过 1200 行（含 1200）。文档白名单、QA 回归测试、npm audit、actionlint、`CodeQL QA` 和安全门禁的精确范围统一见工程说明；不重新引入 markdownlint-cli2/braces，不把 QA 当作 Rust 或隔离测试。
-- `sandbox-metadata.yml` 的 `PR title` 独立检查标题格式；只监听 PR 的 `opened`、`reopened`、`synchronize`、`edited`，不安装依赖，标题经环境变量传给 CLI 且不回显。仅编辑标题不启动其他沙箱工作流的重型检查。标题语法与提交流程见根指南；QA 测试入口同时覆盖 checker 和标题验证器。
+- `sandbox-metadata.yml` 的 `PR title` 独立检查标题格式；只监听 PR 的 `opened`、`reopened`、`synchronize`、`edited`，不安装依赖，标题经环境变量传给 CLI 且不回显。仅编辑标题不启动其他沙箱工作流的重型检查。标题语法与提交流程见根指南；QA 测试入口同时覆盖 checker、标题验证器和架构域夹具。
 - 合并使用 PR，不要求非作者批准；任务明确授权后可在最新 CI 通过、适用审查问题闭环且无冲突时自动 squash merge，不使用管理员绕过或强推。提交流程见根指南，安全扫描范围见安全说明。
 
 ### CI 检查内容
@@ -122,6 +124,7 @@
 - `rust`：两个平台都在 `circus-sandbox/` 安装 Rust 1.99.1（minimal，含 rustfmt 与 clippy），然后跑 `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo build --locked`、`cargo test --locked`、`RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps`、`cargo run --locked --example workspace` 和 `cargo run --locked --example resource_policy`。`fail-fast` 为 false。这是源码级检查，不是容器或进程隔离验证。
 - `dependencies`：只在 `ubuntu-latest`。`cargo install --locked --version 0.20.2 cargo-deny`，然后 `cargo deny --locked check`。本地复现使用同一安装版本，并在 `circus-sandbox/` 执行检查。
 - `codeql`：只在 `ubuntu-latest`。语言 `rust`，`build-mode: none`，配置 `.github/codeql/sandbox-rust.yml`。只分析 `circus-sandbox`，忽略 `circus-paseo` 与 `circus-sandbox/target`。它不编译 crate，不能代替 `cargo test`。
+- `architecture (ubuntu-latest)` / `architecture (windows-latest)`：在 `circus-sandbox/` 安装 Rust 1.99.1、在 QA 安装 Node.js 24.18.0，然后 `cargo install --locked --version 0.28.0 cargo-modules`、`npm --prefix circus-sandbox/qa ci`、`npm --prefix circus-sandbox/qa run architecture`。作业超时 20 分钟，`fail-fast` 为 false，无 Docker 要求。实际运行器先验证 `rustc` 与 `cargo-modules` 版本，再由脚本解析真实 DOT；失败、空图、错误 crate、未知顶层命名空间或违禁跨域边都使检查失败。
 
 `deny.toml` 的许可证 allow 只有 `Apache-2.0`、`MIT`、`Apache-2.0 WITH LLVM-exception`（winx 0.36.4 只声明这一表达式，不是 Apache-2.0 的别名）、`Unicode-3.0`（unicode-ident 1.0.27 是 `(MIT OR Apache-2.0) AND Unicode-3.0`）。`exceptions` 为空。未列出的许可证失败。漏洞公告失败，且不得写入 ignore。yanked 为 deny，unsound 为 all，unmaintained 不忽略，unused-ignored-advisory 为 deny。来源只允许 crates.io；未知 registry 与 git 失败。通配版本 deny。`multiple-versions` 是 warn，不是 deny。
 

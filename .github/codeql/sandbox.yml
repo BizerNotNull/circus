@@ -1,6 +1,7 @@
 name: Sandbox CodeQL
 # Actions path filter. Does not select languages.
-# Includes sandbox quality, security, metadata, and Rust workflows, not Rust source.
+# Includes sandbox quality, security, metadata, Rust, and architecture workflows,
+# not Rust source.
 # circus-paseo is never analyzed by this config.
 paths:
   - '.github/workflows/sandbox-*.yml'

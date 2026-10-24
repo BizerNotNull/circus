@@ -4,7 +4,7 @@
 
 Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心，`circus-paseo` 作为前端调用方。沙箱目前提供 workspace 文件库和后端中立的资源请求校验，没有 Paseo—沙箱集成，也没有进程或容器隔离；不要把规划写成现有能力。
 
-- **当前开发阶段**：现在处于沙箱开发阶段，工作聚焦 `circus-sandbox`，不需要改动 `circus-paseo`；除非用户明确要求，不主动修改 Paseo。
+- **当前开发阶段**：本轮只收尾工程基础设施，在基础架构与核心功能开发前停止；后续开发须有用户新的明确授权。工作聚焦 `circus-sandbox`，除非用户明确要求，不主动修改 `circus-paseo`。
 - **Paseo 暂不开发**：说明与开发规则见 [circus-paseo/CLAUDE.md](circus-paseo/CLAUDE.md)。除非任务明确要求，不修改其源码、依赖或配置。
 - **沙箱开发入口**：[circus-sandbox/AGENTS.md](circus-sandbox/AGENTS.md)，用户说明见 [circus-sandbox/README.md](circus-sandbox/README.md)。七个领域的职责边界仍由沙箱指南维护；目前实现 workspace 文件 API 和 `runtime::ResourceLimits` 请求校验，不含资源强制或聚合准入。完整交付目标见 [交付计划](circus-sandbox/docs/delivery-plan.md)，当前门禁与命令见 [工程说明](circus-sandbox/docs/engineering.md)，安全扫描约定见 [安全说明](.github/sandbox-security.md)。按当前检出描述实现，不以规划或工作流存在代替交付与运行证据。
 
@@ -17,14 +17,14 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 
 ## Key Directories
 
-| 路径                    | 用途                                                                                                                                                                                                       |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `circus-sandbox/`       | Rust library crate。已实现 workspace 文件 API、资源请求校验及对应 examples/tests、Apache-2.0 `LICENSE` 与 `deny.toml`。                                                                                    |
-| `circus-sandbox/src/`   | 已实现 `workspace` 和公开 `runtime` 资源值模型。`api`、`lifecycle`、`infrastructure`、`environment`、`pool` 仍是占位目录，不是已实现模块。                                                                 |
-| `circus-sandbox/tests/` | `workspace.rs` 用真实临时目录验证公开文件 API。                                                                                                                                                            |
-| `circus-sandbox/docs/`  | 交付计划与工程事实。架构细节不在根指南复制。                                                                                                                                                               |
-| `circus-paseo/`         | 已有 npm workspace 应用；内部结构与开发流程交由其 `CLAUDE.md` 说明。                                                                                                                                       |
-| `.github/workflows/`    | Paseo CI 仍按路径触发。沙箱包含 `sandbox-metadata.yml`、`sandbox-quality.yml`、`sandbox-security.yml` 和 `sandbox-rust.yml`。标题、质量、安全和 Cargo 检查各自的范围见工程说明；它们不证明进程或容器隔离。 |
+| 路径                    | 用途                                                                                                                                                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `circus-sandbox/`       | Rust library crate。已实现 workspace 文件 API、资源请求校验及对应 examples/tests、Apache-2.0 `LICENSE` 与 `deny.toml`。                                                                                 |
+| `circus-sandbox/src/`   | 已实现 `workspace` 和公开 `runtime` 资源值模型。`api`、`lifecycle`、`infrastructure`、`environment`、`pool` 仍是占位目录，不是已实现模块。                                                              |
+| `circus-sandbox/tests/` | `workspace.rs` 用真实临时目录验证公开文件 API。                                                                                                                                                         |
+| `circus-sandbox/docs/`  | 交付计划与工程事实。架构细节不在根指南复制。                                                                                                                                                            |
+| `circus-paseo/`         | 已有 npm workspace 应用；内部结构与开发流程交由其 `CLAUDE.md` 说明。                                                                                                                                    |
+| `.github/workflows/`    | Paseo CI 仍按路径触发。沙箱包含 `sandbox-metadata.yml`、`sandbox-quality.yml`、`sandbox-security.yml`、`sandbox-rust.yml` 和 `sandbox-architecture.yml`。各自范围见工程说明；它们不证明进程或容器隔离。 |
 
 ## Development Commands
 
@@ -49,10 +49,12 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 npm --prefix circus-sandbox/qa ci
 npm --prefix circus-sandbox/qa audit --audit-level=low
 npm --prefix circus-sandbox/qa run check
-node --test circus-sandbox/qa/check.test.mjs circus-sandbox/qa/pr-title.test.mjs
+npm --prefix circus-sandbox/qa test
 ```
 
 QA 固定 Node.js 24.18.0 与 npm，不继承 Paseo 的 Node 版本。`ci` 和 `audit` 是 npm 内置命令，不是 package script。检查使用现有 `check.mjs`、markdownlint promise API 与锁文件，不重新引入 markdownlint-cli2/braces。白名单、`format` 和安全扫描入口统一见工程说明。
+
+语义架构域检查另需 `cargo install --locked --version 0.28.0 cargo-modules`，然后在仓库根目录执行 `npm --prefix circus-sandbox/qa run architecture`。固定域矩阵与分析边界只维护在[工程说明](circus-sandbox/docs/engineering.md#架构域门禁)；不要使用该版本检查未过滤图的 `--acyclic` 代替域门禁。
 
 以下仅是已有 Paseo 命令，**在 `circus-paseo/` 下执行，且仅用于明确要求的 Paseo 任务**：
 
@@ -116,7 +118,7 @@ QA 固定 Node.js 24.18.0 与 npm，不继承 Paseo 的 Node 版本。`ci` 和 `
 
 - PR 提交后并行关注 GitHub Actions CI 和 Sourcery review；两者职责不同，不能互相替代。准备合并前，必须确认审查覆盖最新改动；Sourcery 未触发或未覆盖新增改动时，按其实际支持的方式请求审查，不假定它已经完成。
 - Paseo CI 按路径触发，规则见 `.github/workflows/paseo-ci.yml` 与 `.github/paseo-ci-paths.yml`。根文档或沙箱改动可能不触发它；未触发或跳过不等于 Paseo 通过，也不能代替沙箱检查。
-- 沙箱四套工作流均在本检出，范围见 [工程说明](circus-sandbox/docs/engineering.md)：元数据门禁为 `PR title`；质量门禁含 npm audit、文档/行数检查、QA 测试、actionlint 和 `CodeQL QA`；安全门禁含全历史 Gitleaks、PR-only `Dependency review` 和 `CodeQL (actions)`；`Sandbox Rust` 在 Windows/Linux 上运行 fmt、clippy、build、test、严格 rustdoc 和 example，并在 Ubuntu 运行 cargo-deny 与 Rust CodeQL。结果以对应提交的 Actions 为准，本文不记录某次检查通过，也不以旧提交结果为新提交背书。不为“变绿”修改无关文件。
+- 沙箱五套工作流均在本检出，范围见 [工程说明](circus-sandbox/docs/engineering.md)：元数据门禁为 `PR title`；质量门禁含 npm audit、文档/行数检查、QA 测试、actionlint 和 `CodeQL QA`；安全门禁含全历史 Gitleaks、PR-only `Dependency review` 和 `CodeQL (actions)`；`Sandbox Rust` 在 Windows/Linux 上运行 fmt、clippy、build、test、严格 rustdoc 和 example，并在 Ubuntu 运行 cargo-deny 与 Rust CodeQL；`Sandbox architecture` 在两平台解析真实语义依赖图并执行跨架构域矩阵。结果以对应提交的 Actions 为准，本文不记录某次检查通过，也不以旧提交结果为新提交背书。不为“变绿”修改无关文件。
 - `sandbox-metadata.yml` 只在 PR 的 `opened`、`reopened`、`synchronize`、`edited` 事件运行；按 PR 号取消旧元数据任务。`PR title` 用固定版本 Node.js 直接执行 CLI，不安装依赖，标题只通过 `PR_TITLE` 环境变量传入且不回显。仅编辑标题不会触发质量、安全或 Rust 工作流的重型检查；工作流存在不等于已设为 required check。
 - CI 失败先读失败 job 的日志，区分代码问题与基础设施故障。代码问题修复并补做针对性验证；明确的临时基础设施故障可重跑并记录原因，不靠反复重跑或放宽检查掩盖失败。
 - 逐条判断 Sourcery 和人工审查意见：有效问题修复并说明验证；不采纳时回复技术理由、证据或取舍。安全、隔离、生命周期及资源回收问题必须明确处理，不盲从建议，也不无说明地关闭讨论。
