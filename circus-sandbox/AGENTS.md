@@ -21,11 +21,7 @@
 - `runtime::ResourceLimits` / `ResourceLimitsError` 是后端中立的资源值模型，无 `Default`。内存/工作区为正字节数且不超过 `i64::MAX`，CPU 为正 milli-CPU（`1000` 等于一个 CPU），进程数为正；工作区不超过内存，单文件上限不超过工作区。单文件上限为 `1..usize::MAX`，拒绝 `0` 和 `usize::MAX`，与 `Workspace::new` 一致。标量错误先于关联错误。校验不提供聚合准入/预留、内核强制或隔离，不附加宿主容量或 Docker 专用约束。
 - `Workspace::capture_code_snapshot` 使用字节/条目预算捕获普通文件和目录，拒绝符号链接与特殊节点；`CodeSnapshot::restore` 创建独立工作区。这是进程内存中的有界代码快照，进程退出后不持久存在，不是容器/VM 文件系统、进程或客户机内存检查点。
 
-<<<<<<< HEAD
-未实现，不得写成现有能力：Kubernetes、containerd、HTTP/RPC、Git clone/worktree、沙箱池、容器/VM 运行时快照、工作区总配额执行、宿主磁盘配额、Paseo 接入。已有内存代码快照不代表运行时快照完成。当前 Docker slice 的范围和限制见 [Linux Docker + runc](docs/docker-linux-runc.md) 及 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。不修改 `../circus-paseo/`。
-=======
-未实现，不得写成现有能力：Kubernetes、containerd、HTTP/RPC、Git clone/worktree、沙箱池、进程/容器快照、工作区总配额执行、宿主磁盘配额、Paseo 接入。`CodeSource` 的普通代码副本和 `CodeSnapshot` 的进程内内容快照不推断这些能力。当前 Docker slice 的范围和限制见 [Linux Docker + runc](docs/docker-linux-runc.md) 及 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。不修改 `../circus-paseo/`。
->>>>>>> feat/git-code-workspace
+仍未实现，不得写成现有能力：Kubernetes、containerd、gVisor、Kata Containers、Firecracker、HTTP/RPC、registry 拉取与认证、容器/VM 运行时快照（进程、客户机内存检查点）、工作区总配额执行、宿主磁盘配额、Paseo 接入。已实现且可写为现有能力：`Workspace`、`CodeSource` 独立代码副本、进程内 `CodeSnapshot`、Docker 工作区文件快照、固定提交 Git clone 与受控 worktree、本地 OCI 镜像解析、有界预启动租约池，以及后端中立统一 API。它们都不是隔离、持久化或聚合资源预留的证据。当前 Docker slice 的范围和限制见 [Linux Docker + runc](docs/docker-linux-runc.md) 及 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。不修改 `../circus-paseo/`。
 
 用户说明见 [README.md](README.md)，工程命令与门禁边界见 [docs/engineering.md](docs/engineering.md)，完整目标及交付记录入口见 [docs/delivery-plan.md](docs/delivery-plan.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。当前检出已有 Workspace crate、许可证策略、元数据/质量/安全/Rust 工作流，但开发约定和工作流存在仍然不是“全部领域已交付”或检查已通过。
 
@@ -35,20 +31,16 @@
 
 尚未实现的目标链路（Kubernetes、containerd、池、容器/VM 运行时快照、HTTP/RPC 等）仍然只是规划，不得按目录存在推断能力。
 
-| 目录                  | 职责与边界                                                                                                                                                                                           |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/api/`            | 统一创建、执行命令、文件操作、销毁入口；不泄露后端类型，不预设 HTTP、RPC 或进程内传输。                                                                                                              |
-| `src/lifecycle/`      | 创建、启动、运行、暂停、恢复、销毁的状态转换与资源回收；状态只能由此修改。                                                                                                                           |
-| `src/infrastructure/` | Docker、Kubernetes、containerd 等部署与调度适配；负责资源分配，不承担隔离机制实现。                                                                                                                  |
-| `src/runtime/`        | 已实现后端中立的资源请求值校验，不执行资源限制。当前 Docker + runc 隔离策略由 `infrastructure`/`lifecycle` 显式配置并验证；Kubernetes、containerd、gVisor、Kata Containers、Firecracker 等仍未实现。 |
-| `src/environment/`    | OCI 镜像、基础环境、依赖准备与可复现环境标识。                                                                                                                                                       |
-<<<<<<< HEAD
-| `src/workspace/`      | 已实现：能力目录内的相对文件读写、建目录、删除、回收，以及有界内存代码快照与新工作区恢复。尚未实现 Git clone、worktree 或代码副本管理。                                                              |
-=======
-| `src/workspace/`      | 已实现：能力目录内的相对文件读写、建目录、删除与回收，进程内 `CodeSnapshot`，以及显式授权源的 `CodeSource` 独立代码副本。尚未实现 Git clone/worktree。                                               |
->>>>>>> feat/git-code-workspace
-| `src/pool/`           | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。                                                                                                                             |
-| `tests/`              | `tests/workspace.rs` 验证公开 workspace API；`tests/docker_sandbox.rs` 是默认忽略、仅连接显式真实 Docker Engine 的 Linux + runc 集成测试。                                                           |
+| 目录                  | 职责与边界                                                                                                                                                                                                             |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/api/`            | 统一创建、执行命令、文件操作、销毁入口；不泄露后端类型，不预设 HTTP、RPC 或进程内传输。                                                                                                                                |
+| `src/lifecycle/`      | 创建、启动、运行、暂停、恢复、销毁的状态转换与资源回收；状态只能由此修改。                                                                                                                                             |
+| `src/infrastructure/` | Docker、Kubernetes、containerd 等部署与调度适配；负责资源分配，不承担隔离机制实现。                                                                                                                                    |
+| `src/runtime/`        | 已实现后端中立的资源请求值校验，不执行资源限制。当前 Docker + runc 隔离策略由 `infrastructure`/`lifecycle` 显式配置并验证；Kubernetes、containerd、gVisor、Kata Containers、Firecracker 等仍未实现。                   |
+| `src/environment/`    | OCI 镜像、基础环境、依赖准备与可复现环境标识。                                                                                                                                                                         |
+| `src/workspace/`      | 已实现：能力目录内的相对文件读写、建目录、删除与回收，进程内 `CodeSnapshot`，显式授权源的 `CodeSource` 独立代码副本，固定提交 `GitCheckout` 与自有 `GitWorktree`。Git 准备是受控可信宿主进程，不是进程或文件系统隔离。 |
+| `src/pool/`           | 预启动、快照、沙箱池；复用生命周期与回收规则，禁止跨租用泄露代码或凭据。                                                                                                                                               |
+| `tests/`              | `tests/workspace.rs` 验证公开 workspace API；`tests/docker_sandbox.rs` 是默认忽略、仅连接显式真实 Docker Engine 的 Linux + runc 集成测试。                                                                             |
 
 Kubernetes、containerd、池与容器/VM 运行时快照仍保留为规划目标；已有内存代码快照不等于这些目标已完成。当前只有 Docker + runc 适配器支持真实容器路径，禁止用空适配器声称支持。运行时必须先消费 workspace 文件契约再开发。
 

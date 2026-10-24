@@ -65,6 +65,7 @@ cargo run --locked --example workspace
 - 快照只保存在当前进程内存中，不序列化、不持久化，不是进程/内存检查点、Docker commit、容器或 VM 快照，也不是池已实现的证据。恢复失败且清理也失败时，`RestoreCleanup` 返回目标 workspace 供调用方重试清理。
 
 示例为 `examples/code_snapshot.rs`，公开 API 测试在 `tests/code_snapshot.rs`。
+
 ## 显式授权的代码副本
 
 `CodeSource::open(path)` 打开调用方已经授权读取的源目录，返回只读 capability；不公开源根路径。路径字符串不是租户授权凭证：服务必须先自行决定调用方可读哪个目录，不能把不可信请求里的宿主路径直接传入。打开根目录按宿主路径解析语义处理；此后子项遍历和读取通过 cap-std 目录能力约束在源目录内，不修改源文件。
