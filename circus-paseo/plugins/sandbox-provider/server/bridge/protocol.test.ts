@@ -96,3 +96,19 @@ test("parses optional agent session on successful results only", () => {
     }).success,
   ).toBe(false);
 });
+
+test("accepts image preparation failures from the runner", () => {
+  expect(
+    ServerFrameSchema.parse({
+      v: 1,
+      type: "result",
+      requestId: "request-1",
+      taskId: "task-1",
+      result: {
+        status: "failed",
+        cleanup: "confirmed",
+        error: { code: "image_preparation", message: "Image preparation failed" },
+      },
+    }),
+  ).toMatchObject({ result: { status: "failed", error: { code: "image_preparation" } } });
+});

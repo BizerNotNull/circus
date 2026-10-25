@@ -25,7 +25,7 @@ mod process;
 mod runner;
 
 pub use agent::AgentKind;
-pub use config::{ModelConfig, RunnerConfig, TaskRequest, TaskWorkspace};
+pub use config::{ImagePreparation, ModelConfig, RunnerConfig, TaskRequest, TaskWorkspace};
 pub use mcp::{McpConnection, McpGrant, McpToolPolicy};
 pub use model::{
     CleanupHandle, ModelFailure, TaskError, TaskEvent, TaskFailure, TaskOutcome, TaskOutput,

@@ -143,7 +143,19 @@ test("saves a usable provider without storing a credential in config, argv, or s
   );
   const runnerPath = persisted.agents.providers.sandbox.env.CIRCUS_RUNNER_CONFIG;
   const runner = JSON.parse(await readFile(runnerPath, "utf8"));
-  expect(runner.agentImage).toBe(`sha256:${"a".repeat(64)}`);
+  expect(runner.backend).toEqual({
+    kind: "docker",
+    endpoint: "unix:///var/run/docker.sock",
+    image: `sha256:${"a".repeat(64)}`,
+    runtime: "runc",
+  });
+  expect(runner.image).toEqual({
+    platform: { os: "linux", architecture: "amd64" },
+    pullPolicy: "local-only",
+    prepareTimeoutMs: 30000,
+  });
+  expect(runner).not.toHaveProperty("dockerEndpoint");
+  expect(runner).not.toHaveProperty("agentImage");
   expect(runner.model.apiKeyFile).toBeUndefined();
   expect(
     f.secrets.get(`${runner.model.apiKeyKeychain.service}:${runner.model.apiKeyKeychain.account}`),
@@ -159,6 +171,199 @@ test("saves a usable provider without storing a credential in config, argv, or s
     ]),
   ).not.toContain("fixture-only-secret");
   expect(f.reloads()).toBe(1);
+});
+
+test("reloads saved settings and uses the stored credential for model checks and updates", async () => {
+  const f = await fixture();
+  await f.service.save(model);
+  const reloaded = createSandboxSetup(f.dependencies);
+  expect(await reloaded.snapshot()).toMatchObject({
+    ready: true,
+    settings: {
+      baseUrl: model.baseUrl,
+      model: model.model,
+      preset: "compact",
+      hasCredential: true,
+      credentialStorage: "keychain",
+    },
+  });
+  expect(await reloaded.testConnection({ ...model, apiKey: "" })).toMatchObject({ ok: true });
+  expect(f.requests[0]?.headers).toMatchObject({ Authorization: `Bearer ${model.apiKey}` });
+  expect(JSON.parse(String(f.requests[0]?.body)).model).toBe(model.model);
+  expect(
+    await reloaded.save({ ...model, apiKey: "", model: "updated-model", preset: "balanced" }),
+  ).toMatchObject({ ok: true });
+  expect(await createSandboxSetup(f.dependencies).snapshot()).toMatchObject({
+    settings: { model: "updated-model", preset: "balanced", credentialStorage: "keychain" },
+  });
+});
+
+test("inspects only the configured Docker endpoint and image after reload", async () => {
+  const f = await fixture();
+  await f.service.save(model);
+  const path = join(f.home, "circus/runner.json");
+  const config = JSON.parse(await readFile(path, "utf8"));
+  const endpoint = "unix:///custom/docker.sock";
+  const image = `sha256:${"b".repeat(64)}`;
+  config.backend.endpoint = endpoint;
+  config.backend.image = image;
+  await writeFile(path, JSON.stringify(config));
+  const previous = await readFile(path, "utf8");
+  const keys = [...f.secrets.keys()];
+  const run = f.dependencies.run;
+  const dockerCommands: CommandInput[] = [];
+  let available = true;
+  const service = createSandboxSetup({
+    ...f.dependencies,
+    run: async (input) => {
+      if (input.args.includes("info") || input.args.includes("inspect")) {
+        dockerCommands.push(input);
+        if (input.args[input.args.indexOf("--host") + 1] !== endpoint || !available)
+          return { ok: false, stdout: "" };
+        if (input.args.includes("inspect"))
+          return { ok: input.args.at(-1) === image, stdout: `${image}\n` };
+      }
+      return run(input);
+    },
+  });
+  expect((await service.snapshot()).ready).toBe(true);
+  expect(dockerCommands.some((command) => command.args.at(-1) === image)).toBe(true);
+  available = false;
+  expect((await service.snapshot()).ready).toBe(false);
+  await expect(service.save({ ...model, apiKey: "" })).rejects.toThrow();
+  expect(dockerCommands.every((command) => command.args.includes(endpoint))).toBe(true);
+  expect(await readFile(path, "utf8")).toBe(previous);
+  expect([...f.secrets.keys()]).toEqual(keys);
+});
+
+interface MutableRunnerConfigFixture {
+  backend: {
+    kind: string;
+    endpoint: string;
+    image: string;
+    socket?: string;
+  };
+  image: {
+    prepareTimeoutMs: number;
+    pullPolicy: string;
+  };
+  model: { agentImage?: string };
+  dockerEndpoint?: string;
+  agentImage?: string;
+}
+
+test.each([
+  [
+    "legacy backend fields",
+    (config: MutableRunnerConfigFixture) => {
+      config.dockerEndpoint = config.backend.endpoint;
+      config.agentImage = config.backend.image;
+      const malformed: Partial<MutableRunnerConfigFixture> = config;
+      delete malformed.backend;
+      delete malformed.image;
+    },
+  ],
+  [
+    "obsolete aliases alongside tagged backend",
+    (config: MutableRunnerConfigFixture) => {
+      config.dockerEndpoint = config.backend.endpoint;
+      config.agentImage = config.backend.image;
+    },
+  ],
+  [
+    "unknown backend kind",
+    (config: MutableRunnerConfigFixture) => {
+      config.backend.kind = "unknown";
+    },
+  ],
+  [
+    "unexpected backend field",
+    (config: MutableRunnerConfigFixture) => {
+      config.backend.socket = "/run/containerd/containerd.sock";
+    },
+  ],
+  [
+    "missing preparation settings",
+    (config: MutableRunnerConfigFixture) => {
+      const malformed: Partial<MutableRunnerConfigFixture> = config;
+      delete malformed.image;
+    },
+  ],
+  [
+    "invalid preparation deadline",
+    (config: MutableRunnerConfigFixture) => {
+      config.image.prepareTimeoutMs = 0;
+    },
+  ],
+  [
+    "invalid pull policy",
+    (config: MutableRunnerConfigFixture) => {
+      config.image.pullPolicy = "always";
+    },
+  ],
+  [
+    "unexpected model field",
+    (config: MutableRunnerConfigFixture) => {
+      config.model.agentImage = "obsolete";
+    },
+  ],
+] as const)("preserves malformed configuration: %s", async (_name, mutate) => {
+  const f = await fixture();
+  await f.service.save(model);
+  const path = join(f.home, "circus/runner.json");
+  const config: MutableRunnerConfigFixture = JSON.parse(await readFile(path, "utf8"));
+  mutate(config);
+  const serialized = JSON.stringify(config);
+  await writeFile(path, serialized);
+  const provider = await readFile(join(f.home, "config.json"), "utf8");
+  const keys = [...f.secrets.keys()];
+  const reloaded = createSandboxSetup(f.dependencies);
+  await expect(reloaded.snapshot()).rejects.toThrow();
+  await expect(reloaded.save(model)).rejects.toThrow();
+  await expect(reloaded.testConnection({ ...model, apiKey: "" })).rejects.toThrow();
+  expect(await readFile(path, "utf8")).toBe(serialized);
+  expect(await readFile(join(f.home, "config.json"), "utf8")).toBe(provider);
+  expect([...f.secrets.keys()]).toEqual(keys);
+  expect(f.requests).toHaveLength(0);
+});
+
+test("does not reinterpret or overwrite a configured containerd backend", async () => {
+  const f = await fixture();
+  await f.service.save(model);
+  const path = join(f.home, "circus/runner.json");
+  const config = JSON.parse(await readFile(path, "utf8"));
+  config.backend = {
+    kind: "containerd",
+    socket: "/run/containerd/containerd.sock",
+    namespace: "circus",
+    image: "docker.io/library/circus-agent-codex:0.164.0",
+    runtime: "io.containerd.runc.v2",
+    snapshotter: "overlayfs",
+  };
+  const serialized = JSON.stringify(config);
+  await writeFile(path, serialized);
+  const provider = await readFile(join(f.home, "config.json"), "utf8");
+  const keys = [...f.secrets.keys()];
+  f.commands.length = 0;
+  const service = createSandboxSetup(f.dependencies);
+  await expect(service.snapshot()).rejects.toThrow();
+  await expect(service.prepare()).rejects.toThrow();
+  await expect(service.save(model)).rejects.toThrow();
+  await expect(service.testConnection(model)).rejects.toThrow();
+  await expect(
+    service.saveGithub({
+      id: "github",
+      url: "https://mcp.example/mcp/",
+      token: "fixture-token",
+      owner: "team",
+      repo: "approved",
+    }),
+  ).rejects.toThrow();
+  expect(await readFile(path, "utf8")).toBe(serialized);
+  expect(await readFile(join(f.home, "config.json"), "utf8")).toBe(provider);
+  expect([...f.secrets.keys()]).toEqual(keys);
+  expect(f.commands).toHaveLength(0);
+  expect(f.requests).toHaveLength(0);
 });
 
 test("does not trust security's zero exit code without reading back the saved key", async () => {
@@ -384,7 +589,7 @@ test("finds a first-run Codex image when the Engine requires its canonical repos
   expect((await service.snapshot()).ready).toBe(true);
   await service.save(model);
   const saved = JSON.parse(await readFile(join(f.home, "circus/runner.json"), "utf8"));
-  expect(saved.agentImage).toBe(`sha256:${"a".repeat(64)}`);
+  expect(saved.backend.image).toBe(`sha256:${"a".repeat(64)}`);
 });
 
 test("MCP selects its own trusted CA without inheriting the model service's private CA", async () => {
