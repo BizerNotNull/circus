@@ -199,6 +199,7 @@ fn claude_agent_session_is_rejected_without_creating_a_sandbox() {
 #[test]
 fn opencode_rejects_unsupported_model_ids_before_allocation() {
     let runner = AgentRunner::new(RunnerConfig {
+        image_preparation: None,
         backend: BackendConfig::docker("unix:///unused/docker.sock", "unused-image", "runc"),
         resources: ResourceLimits::new(1024 * 1024, 1000, 32, 1024 * 1024, 4096).unwrap(),
         model: ModelConfig::new(
@@ -220,6 +221,7 @@ fn opencode_rejects_unsupported_model_ids_before_allocation() {
 #[tokio::test(flavor = "current_thread")]
 async fn opencode_accepts_a_native_session_and_cancels_before_allocation() {
     let runner = AgentRunner::new(RunnerConfig {
+        image_preparation: None,
         backend: BackendConfig::docker("unix:///unused/docker.sock", "unused-image", "runc"),
         resources: ResourceLimits::new(1024 * 1024, 1000, 32, 1024 * 1024, 4096).unwrap(),
         model: ModelConfig::new(
