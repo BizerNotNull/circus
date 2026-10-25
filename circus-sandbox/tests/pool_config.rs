@@ -21,7 +21,13 @@ fn backend() -> BackendConfig {
 #[test]
 fn rejects_zero_capacity() {
     assert!(matches!(
-        PoolConfig::new(backend(), sandbox_config(), 0, None, Duration::from_secs(30)),
+        PoolConfig::new(
+            backend(),
+            sandbox_config(),
+            0,
+            None,
+            Duration::from_secs(30)
+        ),
         Err(PoolError::InvalidCapacity)
     ));
 }
@@ -36,7 +42,13 @@ fn rejects_zero_lease_ttl() {
 
 #[test]
 fn accepts_valid_config_and_attaches_metrics() {
-    let config = PoolConfig::new(backend(), sandbox_config(), 2, None, Duration::from_secs(30))
-        .expect("valid pool config");
+    let config = PoolConfig::new(
+        backend(),
+        sandbox_config(),
+        2,
+        None,
+        Duration::from_secs(30),
+    )
+    .expect("valid pool config");
     let _ = config.with_metrics(SandboxMetrics::new());
 }
