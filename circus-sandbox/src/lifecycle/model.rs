@@ -356,3 +356,88 @@ pub enum SandboxError {
     #[error("the selected backend cannot {capability}")]
     UnsupportedCapability { capability: &'static str },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_id_parse_display_and_as_ref() {
+        let id = RecoveryId::parse("550e8400-e29b-41d4-a716-446655440000").expect("canonical");
+        assert_eq!(id.as_str(), "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(id.as_ref(), id.as_str());
+        assert_eq!(id.to_string(), id.as_str());
+        assert_eq!(
+            "550e8400-e29b-41d4-a716-446655440000"
+                .parse::<RecoveryId>()
+                .expect("from_str")
+                .as_str(),
+            id.as_str()
+        );
+        assert!(RecoveryId::parse("550E8400-E29B-41D4-A716-446655440000").is_err());
+        assert!(RecoveryId::parse("not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn sandbox_operation_display_names_every_variant() {
+        let cases = [
+            (SandboxOperation::Start, "start"),
+            (SandboxOperation::Pause, "pause"),
+            (SandboxOperation::Resume, "resume"),
+            (SandboxOperation::Status, "status"),
+            (SandboxOperation::WriteFile, "write_file"),
+            (SandboxOperation::ReadFile, "read_file"),
+            (SandboxOperation::CreateDirAll, "create_dir_all"),
+            (SandboxOperation::RemoveFile, "remove_file"),
+            (SandboxOperation::Exec, "exec"),
+            (SandboxOperation::SpawnProcess, "spawn_process"),
+            (
+                SandboxOperation::CaptureWorkspaceSnapshot,
+                "capture_workspace_snapshot",
+            ),
+            (
+                SandboxOperation::RestoreWorkspaceSnapshot,
+                "restore_workspace_snapshot",
+            ),
+        ];
+        for (operation, name) in cases {
+            assert_eq!(operation.to_string(), name);
+        }
+    }
+
+    #[test]
+    fn output_phase_and_cleanup_failure_display() {
+        assert_eq!(OutputPhase::NotStarted.to_string(), "not started");
+        assert_eq!(OutputPhase::Stdout.to_string(), "stdout");
+        assert_eq!(OutputPhase::Stderr.to_string(), "stderr");
+        assert!(
+            CleanupFailure::Backend {
+                message: "boom".into()
+            }
+            .to_string()
+            .contains("boom")
+        );
+        assert!(
+            CleanupFailure::StillPresent {
+                instance_id: "id".into(),
+                detail: "present".into(),
+            }
+            .to_string()
+            .contains("present")
+        );
+        assert!(
+            CleanupFailure::Unknown {
+                detail: "maybe".into()
+            }
+            .to_string()
+            .contains("maybe")
+        );
+        assert!(
+            CleanupFailure::UnresolvedCreate {
+                instance_id: "id".into()
+            }
+            .to_string()
+            .contains("unresolved")
+        );
+    }
+}

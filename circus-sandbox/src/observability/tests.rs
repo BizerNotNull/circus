@@ -320,3 +320,85 @@ fn cleanup_events_distinguish_ownership_and_pending_cleanup() {
     );
     assert!(!capture.text().contains("still present"));
 }
+
+#[test]
+fn command_facts_sanitize_empty_and_non_graphic_programs() {
+    assert_eq!(
+        events::command_facts(&[], 0),
+        CommandFacts {
+            program: "program".to_string(),
+            argc: 0,
+            env_overrides: 0,
+        }
+    );
+    assert_eq!(
+        events::command_facts(&[String::from("   "), String::from("a")], 1).program,
+        "program"
+    );
+    assert_eq!(
+        events::command_facts(&[String::from("/tmp/bin/tool=evil"), String::from("x")], 0).program,
+        "toolevil"
+    );
+}
+
+#[test]
+fn pool_and_backend_helper_events_use_fixed_names() {
+    let (capture, ()) = capture(|| {
+        let _create = events::create_span("docker");
+        events::transition_completed("pause", "ok", false);
+        events::snapshot_capture_completed("ok", false);
+        events::snapshot_restore_completed("error", true);
+        events::pool_acquire_completed("ok");
+        events::pool_handoff();
+        events::pool_release();
+        events::pool_expired();
+        events::pool_ready();
+        events::pool_retired();
+        events::pool_refilled();
+        events::backend_selected("docker");
+        events::backend_connect_completed("unix", "ok");
+        events::backend_prepare_completed("ok");
+        let _backend_create = events::backend_create_span();
+        events::backend_create_completed("ok", false, "none");
+        events::backend_recovery_completed("confirmed_absent");
+        events::backend_transition_completed("start", "ok", "none");
+        events::backend_exec_completed(3, Some(0), 1, 0, "none", "ok");
+    });
+    for name in [
+        "sandbox.transition.completed",
+        "sandbox.snapshot.capture.completed",
+        "sandbox.snapshot.restore.completed",
+        "pool.acquire.completed",
+        "pool.lease.handed_off",
+        "pool.lease.released",
+        "pool.lease.expired",
+        "pool.slot.ready",
+        "pool.slot.retired",
+        "pool.slot.refilled",
+        "backend.selected",
+        "backend.connect.completed",
+        "backend.prepare.completed",
+        "backend.create.completed",
+        "backend.recovery.completed",
+        "backend.transition.completed",
+        "backend.exec.completed",
+    ] {
+        let _ = capture.event(name);
+    }
+    assert_eq!(
+        capture
+            .span("sandbox.create")
+            .fields
+            .get("backend")
+            .map(String::as_str),
+        Some("docker"),
+    );
+    assert_eq!(
+        capture
+            .event("backend.exec.completed")
+            .fields
+            .get("duration_ms")
+            .map(String::as_str),
+        Some("3"),
+    );
+}
