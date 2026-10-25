@@ -121,12 +121,13 @@ async fn docker_linux_runc_lifecycle() -> Result<(), Box<dyn std::error::Error>>
             .is_some_and(|caps| caps.iter().any(|cap| cap == "ALL"))
     );
     assert!(
-        observed.security_opt.as_ref().is_some_and(|options| options.iter().any(
-            |option| matches!(
+        observed
+            .security_opt
+            .as_ref()
+            .is_some_and(|options| options.iter().any(|option| matches!(
                 option.as_str(),
                 "no-new-privileges" | "no-new-privileges:true" | "no-new-privileges=true"
-            )
-        ))
+            )))
     );
     let workspace = observed
         .tmpfs_workspace
