@@ -200,7 +200,7 @@ pub(crate) fn verify(spec: &CreateSpec, host: &HostReport) -> Result<(), PolicyM
     expect_str("network_mode", NETWORK_MODE, host.network_mode.as_ref())?;
     verify_contains("cap_drop", "ALL", host.cap_drop.as_deref())?;
     verify_empty("cap_add", host.cap_add.as_deref())?;
-    verify_contains("security_opt", SECURITY_OPT, host.security_opt.as_deref())?;
+    verify_security_opt(host.security_opt.as_deref())?;
     verify_count("binds", host.bind_count)?;
     verify_count("mounts", host.mount_count)?;
     verify_count("devices", host.device_count)?;
@@ -270,6 +270,29 @@ fn verify_contains(
         }
         Some(values) => Err(mismatch(field, expected, format!("{values:?}"))),
         None => Err(mismatch(field, expected, "not reported")),
+    }
+}
+fn verify_security_opt(actual: Option<&[String]>) -> Result<(), PolicyMismatch> {
+    match actual {
+        Some(values)
+            if values.iter().any(|value| {
+                let (key, setting) = value
+                    .split_once([':', '='])
+                    .map_or((value.as_str(), None), |(key, setting)| {
+                        (key, Some(setting))
+                    });
+                key.eq_ignore_ascii_case("no-new-privileges")
+                    && setting.is_none_or(|setting| setting.eq_ignore_ascii_case("true"))
+            }) =>
+        {
+            Ok(())
+        }
+        Some(values) => Err(mismatch(
+            "security_opt",
+            SECURITY_OPT,
+            format!("{values:?}"),
+        )),
+        None => Err(mismatch("security_opt", SECURITY_OPT, "not reported")),
     }
 }
 

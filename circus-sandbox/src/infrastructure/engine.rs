@@ -27,8 +27,6 @@ pub(crate) use recovery::{OwnerCheck, Recovered, RemovalControl, recover_with};
 mod process;
 pub(crate) use process::{EngineProcess, ProcessChunk, ProcessSpec};
 
-use std::collections::HashMap;
-
 use futures_util::StreamExt;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -810,20 +808,16 @@ impl Engine {
     }
 }
 impl RemovalControl for Engine {
-    fn inspect_owner(
-        &self,
-        name: &str,
-        owner_label: &str,
-    ) -> impl Future<Output = OwnerCheck> + Send {
-        async move { self.owner_check(name, owner_label).await }
+    async fn inspect_owner(&self, name: &str, owner_label: &str) -> OwnerCheck {
+        self.owner_check(name, owner_label).await
     }
 
-    fn stop(&self, id: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
-        async move { self.stop_best_effort(id).await }
+    async fn stop(&self, id: &str) -> Result<(), EngineError> {
+        self.stop_best_effort(id).await
     }
 
-    fn remove(&self, id: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
-        async move { self.force_remove(id).await }
+    async fn remove(&self, id: &str) -> Result<(), EngineError> {
+        self.force_remove(id).await
     }
 }
 
@@ -847,7 +841,6 @@ impl RemovalControl for Engine {
         async move { Engine::force_remove(self, id).await }
     }
 }
-
 pub(crate) fn engine_error_kind(err: &EngineError) -> &'static str {
     if err.policy.is_some() {
         return "policy_mismatch";
@@ -894,26 +887,6 @@ pub(crate) fn file_error(kind: EngineErrorKind, message: impl Into<String>) -> E
     }
 }
 
-fn push_bounded(
-    buf: &mut Vec<u8>,
-    chunk: &[u8],
-    other_len: usize,
-    limit: usize,
-) -> Result<(), EngineError> {
-    if buf
-        .len()
-        .checked_add(other_len)
-        .and_then(|used| used.checked_add(chunk.len()))
-        .is_none_or(|total| total > limit)
-    {
-        return Err(file_error(
-            EngineErrorKind::Limit,
-            "command output exceeded the byte limit",
-        ));
-    }
-    buf.extend_from_slice(chunk);
-    Ok(())
-}
 fn connect_socket(kind: SocketKind, path: &str) -> Result<bollard::Docker, EngineError> {
     match kind {
         SocketKind::Unix => {
@@ -996,7 +969,7 @@ fn is_not_found(err: &bollard::errors::Error) -> bool {
 #[cfg(test)]
 mod isolation_tests {
     use super::*;
-    use bollard::models::{ContainerConfig, ContainerInspectResponse, MountPoint};
+    use bollard::models::{ContainerConfig, ContainerInspectResponse};
 
     fn fixture() -> (CreateSpec, ContainerInspectResponse) {
         let spec = CreateSpec {
@@ -1038,7 +1011,11 @@ mod isolation_tests {
             spec.workspace_path.clone(),
             "size=8388608,mode=0755,gid=65534,uid=65534,nodev,nosuid,rw".into(),
         );
-        for option in ["no-new-privileges", "no-new-privileges:true", "no-new-privileges=true"] {
+        for option in [
+            "no-new-privileges",
+            "no-new-privileges:true",
+            "no-new-privileges=true",
+        ] {
             inspected.host_config.as_mut().unwrap().security_opt = Some(vec![option.into()]);
             let report = policy::report_from(inspected.host_config.clone());
             assert!(policy::verify(&spec, &report).is_ok(), "{option}");
@@ -1060,7 +1037,9 @@ mod isolation_tests {
             ("caps added", |h| h.cap_add = Some(vec!["SYS_ADMIN".into()])),
             ("caps retained", |h| h.cap_drop = None),
             ("nnp absent", |h| h.security_opt = None),
-            ("nnp false", |h| h.security_opt = Some(vec!["no-new-privileges:false".into()])),
+            ("nnp false", |h| {
+                h.security_opt = Some(vec!["no-new-privileges:false".into()])
+            }),
             ("bind", |h| h.binds = Some(vec!["/:/host".into()])),
             ("mount", |h| h.mounts = Some(vec![Default::default()])),
             ("device", |h| h.devices = Some(vec![Default::default()])),
