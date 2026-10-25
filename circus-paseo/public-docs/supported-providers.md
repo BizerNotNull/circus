@@ -58,6 +58,53 @@ for provider-specific environment variables:
 
 See [Custom providers](/docs/custom-providers) for command and environment overrides.
 
+## Sandbox (Codex)
+
+Circus's sandbox provider is opt-in. Install the Circus Rust bridge on the daemon host and
+configure its Docker endpoint, pinned Codex image, resource limits and model channel. The bridge
+configuration uses an explicit model API key file; Paseo does not read your Codex login or forward
+your home directory, proxy settings, MCP servers, system prompt or agent environment to the task.
+
+Add this entry to the daemon configuration, replacing both absolute paths:
+
+```json
+{
+  "agents": {
+    "providers": {
+      "sandbox": {
+        "enabled": true,
+        "command": ["/absolute/path/to/circus-stdio-bridge"],
+        "env": { "CIRCUS_RUNNER_CONFIG": "/absolute/path/to/runner.json" }
+      }
+    }
+  }
+}
+```
+
+Choose **Sandbox (Codex)** for a prompt-only task. To supply files, open the workspace's
+**Sandbox task** panel. Choose files on web/desktop, or paste text with an explicit relative path;
+review the list, enter each file to export and set a deadline. Browser selection imports the chosen
+bytes, including current unsaved changes only if you explicitly paste them. It does not scan the
+project directory. Duplicate names are rejected; nested paths can be supplied through the pasted
+file control or the SDK's `options.inputFiles`.
+
+The normal task timeline shows text, tool output and progress through export and cleanup.
+**Stop** waits for the running task's cancellation result. Successful completion requires confirmed
+sandbox cleanup. A result with pending cleanup offers **Retry cleanup**. Unknown cleanup after a
+bridge failure requires checking the runner's owned resources on the host.
+
+Exports remain separate from the project. Preview and download them from the result card on
+web/desktop; native clients can preview and copy UTF-8 text. Binary download currently requires
+web/desktop. Files are held in a bounded, in-memory daemon cache (64 MiB, 256 files) and expire when
+the daemon restarts. Download them before restarting. No automatic patch application, project
+overwrite, Git commit or workspace cleanup is performed.
+
+Each sandbox accepts one prompt and is destroyed at the end. Creating a new task starts with a new
+filesystem; it does not retain the previous conversation, files or running processes. Follow-up
+prompts, steering, resume, host tools and image prompts are unavailable. The host configuration
+selects the model. A future retained-session runner must add explicit resume and workspace
+ownership semantics before enabling continuation here.
+
 ## ACP catalog
 
 Pick any of these from the in-app provider catalog. Each entry is a one-click install of the underlying CLI.

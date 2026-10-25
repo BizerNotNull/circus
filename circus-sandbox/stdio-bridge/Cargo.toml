@@ -1,0 +1,21 @@
+[package]
+name = "circus-stdio-bridge"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "Apache-2.0"
+description = "Bounded single-task stdio transport for the Circus Agent runner."
+
+[dependencies]
+circus-agent-runner = { version = "0.1.0", path = "../agent-runner" }
+circus-sandbox = { version = "0.1.0", path = ".." }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+sonic-rs = "0.5"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

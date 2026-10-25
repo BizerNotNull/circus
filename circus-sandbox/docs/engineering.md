@@ -4,7 +4,7 @@
 
 ## 当前工程
 
-当前检出已有真实 Rust library crate：`Cargo.toml`、Cargo 生成的 `Cargo.lock`、`rust-toolchain.toml`、Apache-2.0 `LICENSE`、`deny.toml`、`src/lib.rs`、`src/workspace/` 与 `src/runtime/`、真实 example 和测试。Rust 1.99.1 / edition 2024；公开入口为同步 `Workspace` 文件 API 和后端中立的 `runtime::ResourceLimits` 值校验，不是进程沙箱、容器或服务。
+当前检出是 Rust 1.99.1 / edition 2024 的 Cargo workspace，共用工具链与生成的 `Cargo.lock`。根包 `circus-sandbox` 提供文件工作区、资源请求校验、本地 Linux Docker + runc、containerd + runc、Kubernetes workload、认证 HTTP API、交互进程、镜像准备、Git、工作区快照和预启动池；成员 `agent-runner/` 提供基于公开沙箱 API 的单任务 Codex 调用库，`stdio-bridge/` 提供同机子进程协议入口。三者均在 `default-members` 中，现有 build、clippy、test、doc 命令覆盖三包；格式检查使用 `cargo fmt --all --check`，依赖策略使用 `cargo deny --workspace --locked check` 显式覆盖全部成员。Agent 协议测试入口见[运行器说明](codex-agent.md)，Node 与 stdio 契约见[桥接说明](stdio-bridge.md)，Linux CI 同时运行运行器的 Python 策略与本地 HTTPS 测试。Paseo 通过显式启用的 sandbox provider 使用 stdio 单任务入口；运行器当前仅选择 Docker 后端。
 
 本文按当前检出描述工程范围，不以文件存在代替合并、发布或最新提交的检查。交付记录入口见 [交付计划](delivery-plan.md)，安全扫描约定见 [安全说明](../../.github/sandbox-security.md)。
 
@@ -54,7 +54,7 @@ api              -> pool, lifecycle, environment, workspace, runtime, error, obs
 facade           -> api, pool, lifecycle, environment, workspace, runtime, error, observability
 ```
 
-- 生成命令在 `circus-sandbox/` 执行：`cargo modules dependencies --lib --all-features --no-externs --no-owns`。脚本先执行 `cargo modules --version`，要求精确 `cargo-modules 0.28.0`，再解析 stdout。analyzer 非零、超时、输出过大或没有 DOT 都失败，不把缺失图当成通过。
+- 生成命令在 `circus-sandbox/` 执行：`cargo modules dependencies --package circus-sandbox --lib --all-features --no-externs --no-owns`。明确选择核心包，调用层运行器不属于这套内部域矩阵。脚本先执行 `cargo modules --version`，要求精确 `cargo-modules 0.28.0`，再解析 stdout。analyzer 非零、超时、输出过大或没有 DOT 都失败，不把缺失图当成通过。
 - 顶层域取 crate 根之后的第一个精确命名空间段。根 crate 和声明在 crate 根的非模块符号归入 `facade`；根级类型的方法/关联项按声明的完整 ID 与 kind 归入 `facade`。判断不使用模块名大小写启发式。
 - 同域 `uses` 边（getter、impl、关联项递归）计数但不做域内环检查。不同域边必须在源域的 allowlist 内，否则失败。allowlist 本身是 DAG，脚本启动时验证，因此工具报告图内的跨域环必然包含被拒绝的边；不使用 item 级环检测，也不把报告图当作完整调用图。
 - 失败关闭还包括：空图或非 digraph、固定目标 `circus_sandbox` 的 crate 节点缺失、节点在目标 crate 之外、路径与 label body 不一致、undeclared 边、非 `uses` 边、未知顶层命名空间，以及任何无法识别的 DOT 语句。该门禁专用于本项目，不另写 Cargo.toml 解析器。错误有界输出并以非零状态退出。

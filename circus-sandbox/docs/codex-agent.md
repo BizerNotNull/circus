@@ -1,67 +1,96 @@
-# Codex 单任务调用示例
+# Agent 单任务运行器
 
-`examples/codex_agent/` 在现有 `Sandbox` 和 `ProcessSession` 上演示一个 Codex turn：通过 `BackendConfig::docker` 显式选择后端，初始化 app-server、创建会话、发送任务、等待完成，通过沙箱文件 API 取回一个指定文件，再销毁沙箱。它是调用方示例，尚未接入 Paseo，也不是新的沙箱核心 API。
+`agent-runner/` 提供独立的 `circus-agent-runner` library crate，把 Codex 单任务示例整理成可复用调用入口。调用方提交任务、消费事件、等待产物；运行器负责准备独立沙箱、驱动一个 Codex turn、取回文件和确认清理。它通过 `circus-sandbox` 的公开 API 工作，Codex 协议没有进入沙箱核心。Paseo 通过 [stdio bridge](stdio-bridge.md) 和 [sandbox provider](../../circus-paseo/public-docs/supported-providers.md#sandbox-codex) 接入；HTTP 服务、多轮会话和持久化任务恢复仍未实现。
+
+## 调用契约
+
+`AgentRunner::new(RunnerConfig)` 接收显式后端、资源限制、`ModelConfig` 和宿主 Python 路径；库不会自动读取环境变量或个人 Codex 登录文件。同一个运行器可以创建并发任务，每个任务使用新沙箱和独立临时 token。
+
+| 入口                        | 语义                                                                           |
+| --------------------------- | ------------------------------------------------------------------------------ |
+| `runner.start(TaskRequest)` | 校验后在当前 Tokio runtime 启动任务，返回 `AgentTask`；不等待执行完成。        |
+| `task.id()`                 | 任务的独立标识。                                                               |
+| `task.next_event().await`   | 按序读取阶段、沙箱标识、文本增量、工具开始/完成和工具输出；关闭时返回 `None`。 |
+| `task.cancel()`             | 幂等请求取消；仍需等待结果确认终止与回收。                                     |
+| `task.wait().await`         | 返回可重复读取的 `Arc<TaskOutcome>`；取消等待 future 不会取消任务。            |
+
+典型消费方式是在循环中读取 `next_event`，结束后调用 `wait`。也可以同时等待结果和消费事件；不要只等结果而永久不读事件。任务句柄 Drop 会请求取消，后台 worker 继续负责清理；宿主进程或 Tokio runtime 退出后的恢复不在当前能力范围内。
+
+成功结果包含 `task_id` 和 `artifacts: BTreeMap<String, Vec<u8>>`；只在任务完成、全部指定文件取回、沙箱销毁成功后返回。库不会把模型文件自动写入宿主路径。失败返回 `TaskFailure`：`error` 为可匹配错误，`cleanup` 在沙箱回收未确认时保留所有权，调用方应保存句柄并执行 `cleanup.retry().await`。清理错误同时保留此前的任务错误。`WorkerGone` 表示 worker 意外消失，不可把它的空 cleanup 字段当作已清理证据。
+
+事件队列最多 256 项，单条宿主协议帧最多 64 KiB，累计事件文本及开销最多 8 MiB。消费过慢会以 `EventBackpressure` 结束任务并清理；最终结果通过独立通道返回，不会被满队列阻塞。`Cleaning` 事件为尽力发送，清理结论以 `wait` 为准。文本和工具输出来自沙箱，应作为不可信文本展示，不能当宿主命令执行。
+
+## 输入、产物与期限
+
+`TaskRequest` 包含 `prompt`、`input_files`、`output_paths` 和 `timeout`。输入字节写入沙箱的 `/workspace/project/`；产物路径相对这个项目目录，按相同名称返回。
+
+- 提示词最多 64 KiB；输入最多 64 个文件、总计 8 MiB；输出最多 32 个指定文件、总计 8 MiB。单文件另受 `ResourceLimits.max_file_bytes` 约束。
+- 文件路径拒绝绝对路径、空组件、`.`、`..`、反斜杠、冒号和控制字符；后端文件 API 继续约束链接和非普通文件。重复输出、缺失产物、超限产物均不返回成功。
+- 期限必须大于零且不超过一小时，包含准备、运行和导出。创建请求必须先收敛才能保留正确的清理所有权；销毁也必须等到确认，因此实际返回时间可能超过任务期限。
+- 取消、超时、模型错误、协议错误、事件拥塞和产物失败均进入统一清理路径。没有重试模型请求、自动恢复或跨任务排队策略。
 
 ## 模型通道
 
-容器始终使用 `network=none`、只读根、非 root、无宿主 bind 和显式资源限额。容器内 Python 转发器只监听自己的 `127.0.0.1`，将 Codex 的模型请求封装到已有进程标准流；宿主 Python 控制器验证请求后访问操作者指定的 HTTPS 模型服务，并将 Responses SSE 流送回。Docker socket 只由 Rust 管理端使用。
+容器使用 `network=none`、只读根、非 root、无宿主 bind 和显式资源限额。容器内 Python 转发器只监听自己的 `127.0.0.1`，将 Codex 的模型请求封装到已有进程标准流；宿主 Python 控制器验证请求后访问显式配置的 HTTPS 模型服务，并将 Responses SSE 流送回。Docker socket 只由 Rust 管理端使用。
 
 ```text
-宿主控制器 ── HTTPS /responses ── 模型服务
-     │
-     │ ProcessSession stdin/stdout，带长度和总量限制
-     │
-容器转发器 ── 127.0.0.1 ── Codex app-server ── 项目文件与工具
+调用方 → AgentRunner → Sandbox / ProcessSession → 容器内 Codex app-server
+                          │                              │
+                     宿主控制器 ← 标准流隧道 ← 容器内模型转发器
+                          │
+                     HTTPS /responses → 模型服务
 ```
 
-- 上游地址、模型名和真实 API key 由宿主显式配置。真实 key 不写入镜像、工作区或沙箱 `ProcessRequest`，只传给宿主控制器。每次任务生成独立临时 token；任务完成、失败或控制器退出后不再接受其请求。
-- 宿主只接受 `POST /v1/responses`，模型必须匹配配置，要求流式响应，强制 `store=false` 并拒绝后台任务。容器不能指定上游 URL、转发 Authorization 或任意 HTTP 头；不跟随重定向，不继承系统 HTTP 代理。
-- 临时 token 的权限覆盖整个任务沙箱，不区分同一沙箱里的 Codex 与其工具进程；沙箱中的代码可以使用获准的模型通道。该通道不提供内容过滤、费用计量或 token 计费上限，也不提供 Git、软件包下载或任意互联网访问。
-- 单次模型请求正文最多 2 MiB、响应最多 8 MiB；每个任务最多 16 次请求、累计响应最多 16 MiB，只允许一个在途模型请求。模型连接与读取空闲超时为 30 秒。每条进程输出流最多 32 MiB，进程与宿主控制器期限为 180 秒；这些是示例预算。
-- 使用 Codex 的 `externalSandbox` turn 策略：文件、进程、网络与资源边界由外层 Docker 沙箱执行。自动化示例遇到额外审批或用户输入请求会失败，不代替用户批准。
-- Codex 以固定参数 `codex app-server --listen stdio://` 启动，不经过 shell。转发器分配的数字端口写入沙箱内独占创建的临时 `config.toml`；配置只引用任务 token 的环境变量名，不含真实 API key，随沙箱一起销毁。
+- 真实 API key 仅提供给宿主控制器，不写入镜像、工作区或沙箱进程环境；`ModelConfig` 的 Debug 隐去它。每次任务使用独立临时 token，权限覆盖整个任务沙箱，不区分 Codex 与其工具进程。
+- 宿主只接受 `POST /v1/responses`，模型必须匹配配置，要求流式响应，强制 `store=false` 并拒绝后台任务。不跟随重定向，不继承 HTTP 代理，不接受容器指定上游 URL 或转发 Authorization。
+- 每个任务最多 16 次请求、每次正文 2 MiB、响应 8 MiB、累计响应 16 MiB，一次只允许一个在途请求；连接与读取空闲超时 30 秒。每条进程输出流最多 32 MiB。它们是传输预算，不是 token 计费上限。
+- 模型错误保留安全类别：TLS、连接/读取超时、HTTP 状态、传输、协议和预算；不把原始上游错误正文或请求头放入事件和日志。需要额外 CA 时调用 `ModelConfig::with_ca_file`，仍验证 HTTPS 证书。
+- 使用 Codex `externalSandbox` 策略，文件、进程、网络与资源边界由外层 Docker 执行。遇到额外审批或用户输入请求返回 `UnsupportedInteraction`。
+- Codex 使用固定参数 `codex app-server --listen stdio://` 启动，不经过 shell。动态回环端口写入独占创建的沙箱临时 TOML，配置只引用任务 token 的环境变量名，随沙箱销毁。
 
-Rust 示例使用 Tokio 管理宿主 Python 子进程与沙箱会话；失败或超时会终止并等待宿主控制器、显式调用沙箱销毁。正常任务先通过 `read_file` 取回指定结果，再销毁沙箱。若销毁失败，命令返回清理错误；不会宣称资源已回收。无需另外暴露监听端口、挂载 socket 或开启容器网络。
+模型通道不提供任意联网、Git 拉取、软件包下载、内容过滤或费用计量。宿主控制器由 Tokio 启动、终止和等待；沙箱销毁仍归既有 lifecycle 管理。
 
 ## 运行真实模型任务
 
-前提：已构建 [Codex Agent 镜像](../images/codex/README.md)、显式可用的本地 Linux Docker Engine、宿主 Python 3.11+（含可信 CA）和支持 Codex 工具调用的 Responses SSE 服务。仅兼容 Chat Completions 的网关不能用于本示例。`CIRCUS_HOST_PYTHON` 可指定宿主 Python 路径，默认 `python3`；示例不会读取 Codex 个人登录文件。
+前提：已构建 [Codex Agent 镜像](../images/codex/README.md)、显式可用的本地 Linux Docker Engine、宿主 Python 3.11+（含可信 CA）和支持 Codex 工具调用的 Responses SSE 服务。仅兼容 Chat Completions 的网关不适用。`CIRCUS_HOST_PYTHON` 可指定宿主 Python，默认 `python3`；`CIRCUS_MODEL_CA_FILE` 可指定 PEM CA 文件。
 
-在 `circus-sandbox/` 运行，以下为 Bash 示例。地址和模型名必须替换为已确认的服务配置；模型请求会发送任务内容并可能产生费用。
+先用 `docker --host "$CIRCUS_DOCKER_ENDPOINT" image inspect circus-agent-codex:0.164.0 --format '{{.Id}}'` 获取本地镜像的不可变 ID。以下 `CIRCUS_AGENT_IMAGE` 使用该 `sha256:` ID，与 stdio 配置一致；验收不依赖可变 tag 解析。
+
+在 `circus-sandbox/` 运行以下 Bash 示例，替换镜像 ID、地址和模型名。密钥经终端输入，示例不读取个人登录文件。
 
 ```bash
 export CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock
-export CIRCUS_AGENT_IMAGE=circus-agent-codex:0.164.0
+export CIRCUS_AGENT_IMAGE=sha256:REPLACE_WITH_VERIFIED_IMAGE_ID
 export CIRCUS_MODEL_BASE_URL=https://your-approved-gateway.example/v1
 export CIRCUS_MODEL=your-approved-model
 read -r -s -p 'Model API key: ' CIRCUS_MODEL_API_KEY
 export CIRCUS_MODEL_API_KEY
 printf '\n'
-export CIRCUS_AGENT_PROMPT='Create answer.py with add(a, b). Run a Python assertion that add(20, 22) equals 42. Write 42 followed by a newline to result.txt after the test passes.'
-export CIRCUS_AGENT_RESULT=project/result.txt
-cargo run --locked --example codex_agent
+export CIRCUS_AGENT_PROMPT='Fix the existing answer.py add(a, b). Run Python assertions for add(20, 22) == 42 and add(-2, 2) == 0. Write 42 followed by a newline to result.txt after the tests pass.'
+cargo run --locked -p circus-agent-runner --example codex_agent
 unset CIRCUS_MODEL_API_KEY
 ```
 
-创建后向 stderr 打印本任务的沙箱 ID，成功时打印完成提示与取回文件内容。失败时返回非零状态；模型通道只输出固定错误类别（TLS、超时、传输、协议、HTTP 拒绝、预算或控制器）及可用的 HTTP 状态码，不回显异常原文、上游响应或凭证。示例创建空项目，输入代码可由调用方使用已有 `write_file` 在启动前写入。`CIRCUS_AGENT_RESULT` 是沙箱工作区内的相对路径；指定文件不存在、超限或不安全时，取回失败并回收沙箱。
+示例先传入错误的 `answer.py`，导出修复后的 `answer.py` 和 `result.txt`，打印阶段、工具状态、文件大小和结果内容。库调用方自行选择输入文件和产物列表；旧示例的 `CIRCUS_AGENT_RESULT` 已移除。示例不打印模型事件正文，产物内容本身仍是不可信任务数据。
 
-## 验证与边界
+## 验证入口
 
-宿主策略与本地 HTTPS 测试不请求模型、不需要 Docker；HTTPS 测试需要 OpenSSL CLI，只生成临时测试证书，不修改系统信任设置：
+输入与事件边界、宿主策略及本地 HTTPS 测试不请求模型、不需要 Docker。HTTPS 测试需要 OpenSSL CLI，只生成临时证书，不修改系统信任设置：
 
 ```bash
-python3 -B -m unittest discover -s tests -p 'test_codex_*.py' -v
+cargo test --locked -p circus-agent-runner --lib
+python3 -B -m unittest discover -s agent-runner/tests -p 'test_codex_*.py' -v
 ```
 
-真实 Docker / Codex 测试使用固定脚本生成的 Responses 事件作为对端，**不进行模型推理，也不证明任何实际网关兼容**：
+真实 Docker / Codex 测试用脚本生成 Responses 事件作为对端，不进行模型推理，不证明实际网关兼容：
 
 ```bash
 CIRCUS_DOCKER_SANDBOX=1 \
 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
-CIRCUS_AGENT_IMAGE=circus-agent-codex:0.164.0 \
-  cargo test --locked --test codex_agent -- --ignored --nocapture
+CIRCUS_AGENT_IMAGE=sha256:REPLACE_WITH_VERIFIED_IMAGE_ID \
+  cargo test --locked -p circus-agent-runner tests::docker -- --ignored --nocapture --test-threads=1
 ```
 
-这个测试会让两个真实 Codex 任务并发执行工具、生成 Python 文件并运行断言，然后通过沙箱文件 API 取回结果。它检查 Engine 返回的禁网证据、沙箱内没有启用的外部网卡与外部路由、外部连接被拒绝，并在全部工具环境变量值中排除测试用上游 key。成功、上游失败和超时均按各任务拥有的容器 ID 检查回收，避免其他任务的容器影响断言；超时还检查宿主控制器已经退出。测试对端仅由测试代码注入，正常示例没有切换到假模型的运行选项。验收使用 linux/amd64；其他平台、实际网关、长任务和高并发需单独验证。
+这些测试覆盖并发任务输入隔离、修改已有代码、真实工具执行、事件和产物；检查容器没有启用的非 loopback 接口及对外路由、宿主 key 未进入任何工具环境值，并按每个任务自己的实例标识确认回收。另覆盖 HTTP 拒绝、产物缺失、主动取消、超时和句柄 Drop。脚本对端仅由私有测试入口注入，公开运行器没有假模型开关。实际网关用上方 example 单独验收；其他平台、长任务和高并发需另外验证。
 
-协议依据：[Codex app-server](https://developers.openai.com/codex/app-server/) 的 `initialize`、`thread/start`、`turn/start`、`turn/completed`，以及 [配置参考](https://developers.openai.com/codex/config-reference/) 的自定义 Responses provider。运行验证针对镜像固定的 Codex CLI 0.164.0；升级 CLI 后需重跑实际验收。
+协议依据：[Codex app-server](https://developers.openai.com/codex/app-server/) 的 `initialize`、`thread/start`、`turn/start`、`turn/completed`，以及 [配置参考](https://developers.openai.com/codex/config-reference/) 的自定义 Responses provider。镜像固定 Codex CLI 0.164.0；升级 CLI 后需重跑实际验收。

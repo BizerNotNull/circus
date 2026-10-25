@@ -300,6 +300,8 @@ export function checkArchitecture({ cwd = sandboxDir } = {}) {
     [
       "modules",
       "dependencies",
+      "--package",
+      "circus-sandbox",
       "--lib",
       "--all-features",
       "--no-externs",

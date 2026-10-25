@@ -48,6 +48,34 @@ Paseo MCP 工具和引导功能不可用。你自己为 `agy` 配置的 MCP 服�
 
 命令和环境变量覆盖见[自定义 Provider](/docs/custom-providers)。
 
+## Sandbox (Codex) {#sandbox-codex}
+
+Circus 的沙箱 Provider 需要显式启用。在 daemon 主机上安装 Circus Rust bridge，并配置 Docker 端点、固定的 Codex 镜像、资源限制和模型渠道。bridge 配置使用显式指定的模型 API 密钥文件；Paseo 不会读取你的 Codex 登录，也不会把主目录、代理设置、MCP 服务器、系统提示词或 Agent 环境变量传给任务。
+
+在 daemon 配置中添加以下条目，并替换其中两个绝对路径：
+
+```json
+{
+  "agents": {
+    "providers": {
+      "sandbox": {
+        "enabled": true,
+        "command": ["/absolute/path/to/circus-stdio-bridge"],
+        "env": { "CIRCUS_RUNNER_CONFIG": "/absolute/path/to/runner.json" }
+      }
+    }
+  }
+}
+```
+
+只需提示词的任务可以直接选择 **Sandbox (Codex)**。要提供文件，请打开工作区的 **Sandbox task** 面板。在 Web 或桌面端选择文件，或粘贴文本并指定相对路径；检查文件列表，逐项填写要导出的文件路径，再设置任务期限。浏览器选取只导入所选文件的内容；尚未保存的修改需要显式粘贴才会纳入任务。它不会扫描项目目录。重名文件会被拒绝；嵌套路径可以通过粘贴文件控件或 SDK 的 `options.inputFiles` 提供。
+
+任务时间线显示文本、工具输出，以及导出和清理进度。**Stop** 会等待正在运行的任务返回取消结果。只有确认沙箱清理完成，任务才能成功结束。清理状态为 pending 的结果会提供 **Retry cleanup**。bridge 故障后若清理状态为 unknown，需要在主机上检查该运行器拥有的资源。
+
+导出文件与项目分开保留。在 Web 或桌面端，可以从结果卡片预览和下载；原生客户端可以预览和复制 UTF-8 文本，二进制文件下载目前需要 Web 或桌面端。文件保存在 daemon 的有界内存缓存中（64 MiB，256 个文件），daemon 重启后失效，请在重启前下载。不会自动应用补丁、覆盖项目、提交 Git 或清理工作区。
+
+每个沙箱只接受一条提示词，并在结束时销毁。创建新任务会使用全新的文件系统，不保留上一个任务的对话、文件或运行中的进程。后续提示词、引导、恢复、主机工具和图片提示词均不可用。模型由主机配置选择。后续若要支持保留会话，运行器必须先明确实现恢复与工作区归属语义，才能在此启用继续对话。
+
 ## ACP 目录 {#acp-catalog}
 
 在应用内的 Provider 目录中选择以下任意一个。每个条目都可以一键安装底层 CLI。

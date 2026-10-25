@@ -6,11 +6,12 @@ import io
 import json
 import ssl
 import tomllib
+import types
 from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-SOURCE = Path(__file__).resolve().parents[1] / "examples/codex_agent/bridge.py"
+SOURCE = Path(__file__).resolve().parents[1] / "src/codex_bridge.py"
 SPEC = importlib.util.spec_from_file_location("circus_codex_bridge", SOURCE)
 bridge = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(bridge)
@@ -78,29 +79,11 @@ class ModelPolicyTests(unittest.TestCase):
                 raise RuntimeError("upstream echoed host-key and task prompt")
         self.controller.provider = FailingProvider()
         sent = []
-        diagnostic = io.StringIO()
-        with patch.object(bridge, "send", sent.append), patch.object(bridge.sys, "stderr", diagnostic):
+        with patch.object(bridge, "send", sent.append), patch.object(bridge, "event") as events:
             self.controller.model_request(self.request())
             self.controller.worker.join(timeout=2)
         self.assertEqual(sent, [{"channel": "http_error", "id": 1}])
-        self.assertIn('"category": "controller"', diagnostic.getvalue())
-        self.assertNotIn("host-key", diagnostic.getvalue())
-        self.assertNotIn("task prompt", diagnostic.getvalue())
-
-    def test_model_failure_categories_are_safe(self):
-        for error, category, status in [
-            (ssl.SSLError("private handshake detail"), "tls", None),
-            (TimeoutError("private timeout detail"), "timeout", None),
-            (OSError("private network detail"), "transport", None),
-            (bridge.ModelFailure("rejected", 403), "rejected", 403),
-            (bridge.ModelFailure("budget"), "budget", None),
-        ]:
-            diagnostic = io.StringIO()
-            with self.subTest(category=category), patch.object(bridge.sys, "stderr", diagnostic):
-                bridge.report_failure(error)
-                self.assertEqual(json.loads(diagnostic.getvalue().split(": ", 1)[1]),
-                                 {"category": category, "status": status})
-                self.assertNotIn("private", diagnostic.getvalue())
+        events.assert_called_once_with("failure", code="controller", status=None)
 
     def test_guest_config_keeps_dynamic_port_as_data(self):
         config = tomllib.loads(bridge.guest_config(12345))
@@ -128,7 +111,7 @@ class ModelPolicyTests(unittest.TestCase):
                 self.controller.on_rpc({"method": "turn/completed", "params": {
                     "threadId": thread, "turn": {"id": turn, "status": status}}})
         sent = []
-        with patch.object(bridge, "send", sent.append):
+        with patch.object(bridge, "send", sent.append), patch.object(bridge, "event"):
             self.controller.on_rpc({"method": "turn/completed", "params": {
                 "threadId": "thread", "turn": {"id": "turn", "status": "completed"}}})
         self.assertTrue(self.controller.finished)
@@ -138,6 +121,50 @@ class ModelPolicyTests(unittest.TestCase):
     def test_unexpected_approval_requests_are_not_granted(self):
         with self.assertRaises(bridge.BridgeError):
             self.controller.on_rpc({"id": 10, "method": "item/commandExecution/requestApproval"})
+
+    def test_failures_preserve_only_safe_category_and_http_status(self):
+        for error, code, status in [
+            (ssl.SSLError("secret TLS detail"), "tls", None),
+            (TimeoutError("secret timeout detail"), "timeout", None),
+            (OSError("secret transport detail"), "transport", None),
+            (bridge.BridgeError("secret upstream body", "rejected", 403), "rejected", 403),
+        ]:
+            with patch.object(bridge, "event") as emitted:
+                bridge.failure(error)
+                emitted.assert_called_once_with("failure", code=code, status=status)
+
+    def test_normalized_item_events_are_correlated_and_bounded(self):
+        self.controller.thread_id, self.controller.turn_id = "thread", "turn"
+        params = {"threadId": "thread", "turnId": "turn", "itemId": "item", "delta": "x" * 9000}
+        with patch.object(bridge, "event") as emitted:
+            self.controller.on_rpc({"method": "item/agentMessage/delta", "params": params})
+            self.assertEqual(emitted.call_count, 3)
+            self.assertTrue(all(len(call.kwargs["text"]) <= 4096 for call in emitted.call_args_list))
+        with self.assertRaises(bridge.BridgeError):
+            self.controller.on_rpc({"method": "item/agentMessage/delta", "params": {**params, "turnId": "other"}})
+
+    def test_events_redact_host_and_task_credentials(self):
+        output = io.BytesIO()
+        with patch.dict(bridge.os.environ, {"CIRCUS_MODEL_API_KEY": "secret-host-key", "CIRCUS_TASK_TOKEN": "secret-task-key"}):
+            with patch.object(bridge.sys, "stderr", types.SimpleNamespace(buffer=output)):
+                bridge.event("text", text="secret-host-key secret-task-key")
+        self.assertNotIn(b"secret", output.getvalue())
+        self.assertEqual(json.loads(output.getvalue())["text"], "[REDACTED] [REDACTED]")
+
+    def test_tool_final_output_falls_back_only_when_no_deltas_were_received(self):
+        self.controller.thread_id, self.controller.turn_id = "thread", "turn"
+        params = {"threadId": "thread", "turnId": "turn", "item": {
+            "id": "command", "type": "commandExecution", "exitCode": 1,
+            "aggregatedOutput": "assertion failed\n"}}
+        with patch.object(bridge, "event") as emitted:
+            self.controller.on_rpc({"method": "item/completed", "params": params})
+            self.assertEqual([call.args for call in emitted.call_args_list], [("tool_output",), ("tool",)])
+            self.assertEqual(emitted.call_args_list[0].kwargs["text"], "assertion failed\n")
+        with patch.object(bridge, "event") as emitted:
+            self.controller.on_rpc({"method": "item/commandExecution/outputDelta", "params": {
+                "threadId": "thread", "turnId": "turn", "itemId": "command", "delta": "assertion failed\n"}})
+            self.controller.on_rpc({"method": "item/completed", "params": params})
+            self.assertEqual([call.args for call in emitted.call_args_list], [("tool_output",), ("tool",)])
 
 
 if __name__ == "__main__":
