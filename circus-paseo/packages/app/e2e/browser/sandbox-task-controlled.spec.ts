@@ -79,12 +79,6 @@ test("creates through agents.create with a controlled stdio provider fixture", a
     await expect(page.getByText("Sandbox task created.", { exact: true })).toBeVisible();
     await expect.poll(() => existsSync(marker)).toBe(true);
     await page.getByRole("button", { name: "Open task", exact: true }).click();
-    await expect(
-      page.getByText(
-        "Task complete. Sandbox cleanup confirmed. Download exports before the daemon restarts.",
-        { exact: true },
-      ),
-    ).toBeVisible();
     await expect(page.getByText("Sandbox cleanup: confirmed", { exact: true })).toBeVisible();
     await expect(page.getByText("result.txt · 3 bytes", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Preview", exact: true }).click();

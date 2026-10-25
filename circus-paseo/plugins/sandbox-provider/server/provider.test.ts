@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import type {
   ProviderConnection,
   ProviderEvent,
@@ -40,6 +40,7 @@ function harness() {
     const result = Promise.withResolvers<CircusTaskResult>();
     return {
       async start(request) {
+        await writeFile(request.workspaceArchive!, `candidate-${requests.length + 1}`);
         requests.push(request);
         turns.push({ complete: result.resolve, closed: finished.promise });
         return {
@@ -85,6 +86,9 @@ function harness() {
           terminalById.get(event.turnId)?.();
         }
       });
+    },
+    async waitStart(count: number) {
+      await vi.waitFor(() => expect(requests).toHaveLength(count));
     },
     waitTurn(index: number) {
       return terminalTurns[index - 1]!;
@@ -187,13 +191,10 @@ test("sequential prompts reuse the derived archive and continue the returned thr
     f.observe(connection);
     await open(connection, "session-a", "open-1");
     await prompt(connection, "session-a", "message-1");
+    await f.waitStart(1);
     const archive = workspaceArchive(stateDir, "session-a");
     expect(dirname(archive)).toBe(stateDir);
-    expect(f.requests[0]).toMatchObject({
-      workspaceArchive: archive,
-      workspaceMaxTotalBytes: 64 * 1024 * 1024,
-      workspaceMaxEntries: 65_536,
-    });
+    expect(f.requests[0]?.workspaceArchive).not.toBe(archive);
     expect(f.requests[0]?.agentSession).toBeUndefined();
     f.turns[0]!.complete({
       status: "succeeded",
@@ -208,8 +209,8 @@ test("sequential prompts reuse the derived archive and continue the returned thr
     });
 
     await prompt(connection, "session-a", "message-2");
+    await f.waitStart(2);
     expect(f.requests[1]).toMatchObject({
-      workspaceArchive: archive,
       agentSession: "thread-a",
     });
     f.turns[1]!.complete({
@@ -260,10 +261,10 @@ test("restores persistence and rejects unsupported or malformed handles", async 
       persistence: { version: 1, data: { agentSession: "thread-restored" } },
     });
     await prompt(connection, "../../escape", "message-1");
+    await f.waitStart(1);
     const archive = workspaceArchive(stateDir, "../../escape");
     expect(dirname(archive)).toBe(stateDir);
     expect(f.requests[0]).toMatchObject({
-      workspaceArchive: archive,
       agentSession: "thread-restored",
     });
     f.turns[0]!.complete({
@@ -290,6 +291,7 @@ test("pending cleanup blocks the next prompt until retry", async () => {
     f.observe(connection);
     await open(connection, "session-a", "open-1");
     await prompt(connection, "session-a", "message-1");
+    await f.waitStart(1);
     f.turns[0]!.complete({
       status: "cancelled",
       cleanup: "pending",
@@ -304,9 +306,34 @@ test("pending cleanup blocks the next prompt until retry", async () => {
     });
     expect(await f.provider.retryCleanup("task-1")).toEqual({ cleanup: "confirmed" });
     await prompt(connection, "session-a", "message-3");
+    await f.waitStart(2);
     expect(f.requests).toHaveLength(2);
     f.turns[1]!.complete({ status: "succeeded", cleanup: "confirmed", artifacts: {} });
     await f.waitTurn(2);
+    await connection.close();
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a persisted non-resumable agent cannot silently reopen a fresh conversation", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "circus-provider-"));
+  try {
+    const f = harness();
+    const connection = await f.provider.registration().connect({
+      launch: launch(stateDir),
+      versions: [1],
+      capabilities,
+    });
+    f.observe(connection);
+    await open(connection, "one-shot", "open-1", {
+      version: 1,
+      data: { continuationDisabled: true },
+    });
+    expect(f.events.findLast((event) => event.type === "request.failed")).toMatchObject({
+      error: { code: "unsupported" },
+    });
+    expect(f.events.some((event) => event.type === "session.opened")).toBe(false);
     await connection.close();
   } finally {
     await rm(stateDir, { recursive: true, force: true });

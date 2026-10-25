@@ -148,7 +148,8 @@ test("saves a usable provider without storing a credential in config, argv, or s
   expect(
     f.secrets.get(`${runner.model.apiKeyKeychain.service}:${runner.model.apiKeyKeychain.account}`),
   ).toBe(model.apiKey);
-  expect((await stat(runnerPath)).mode & 0o777).toBe(0o600);
+  // Windows stat mode bits do not model ACLs; the credential stays in Keychain.
+  if (process.platform !== "win32") expect((await stat(runnerPath)).mode & 0o777).toBe(0o600);
   expect(
     JSON.stringify([
       persisted,

@@ -118,19 +118,21 @@ the daemon restarts. Download them before restarting. No automatic patch applica
 overwrite, Git commit or workspace cleanup is performed.
 
 Sandbox sessions are sequential. Each prompt runs in a fresh sandbox restored from the session's
-plaintext workspace archive in `CIRCUS_SANDBOX_STATE_DIR`, then captures that archive back before
-destroying the sandbox. Codex resumes the native thread returned by the previous completed turn,
+plaintext workspace archive in `CIRCUS_SANDBOX_STATE_DIR`. Each turn captures into a separate candidate
+archive; only a successful turn with a resumable thread replaces the committed archive. Failed or
+cancelled turns leave the previous checkpoint unchanged. Codex resumes the native thread returned by the previous completed turn,
 so follow-up prompts retain completed files and conversation. Running processes, in-flight turns
 and unsandboxed host state are not preserved; a turn that is still running cannot be recovered
 after a restart. Archive paths are derived from the session ID, are never accepted from prompts or
 attachments, and are not encrypted, so they stay inside the trusted host state directory. Persistence
-contains only the versioned Codex thread handle; reopening after a daemon restart uses the same
-session ID and state directory to find the archive.
+contains a versioned Codex thread handle, or a marker that continuation is unavailable; reopening a
+resumable session after a daemon restart uses the same session ID and state directory to find the archive.
 
 Steering, host tools, image prompts and automatic patch application are unavailable. Only one turn
 may run at a time. **Stop** cancels the active turn and waits for its cleanup; a pending or unknown
-cleanup blocks the next prompt until **Retry cleanup** confirms it. Claude Code remains single-turn
-and fails closed if a resumed thread is requested. This implementation uses Docker on Linux only.
+cleanup blocks the next prompt until **Retry cleanup** confirms it. An agent that returns no resumable
+handle, including Claude Code, remains single-turn: follow-up prompts and reopening are explicitly rejected.
+This implementation uses Docker on Linux only.
 The host configuration selects the model. Provider options `workspaceMaxTotalBytes` (default 64 MiB,
 maximum 512 MiB) and `workspaceMaxEntries` (default 65,536, maximum 1,000,000) bound each archive
 load and capture.

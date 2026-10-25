@@ -1,5 +1,7 @@
-import { resolve } from "node:path";
-import { expect, test } from "vitest";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, expect, test, vi } from "vitest";
 import type { ProviderEvent, ProviderSessionConfig } from "@getpaseo/plugin/server/provider";
 import { SandboxSession, type TaskClient } from "./session.js";
 import { ArtifactStore } from "./artifacts.js";
@@ -9,14 +11,14 @@ import type {
   CleanupStatus,
   CircusTaskRequest,
 } from "./bridge/stdio-client.js";
-import {
-  DEFAULT_WORKSPACE_MAX_ENTRIES,
-  DEFAULT_WORKSPACE_MAX_TOTAL_BYTES,
-} from "../shared/task.js";
 import { launchConfig } from "./provider.js";
 
-const archive = resolve("state", "session.snapshot");
 const hostRoot = process.platform === "win32" ? "C:\\private" : "/private";
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
 
 const config: ProviderSessionConfig = {
   cwd: "/private/host/project",
@@ -40,14 +42,20 @@ interface Turn {
   setCleanup(cleanup: CleanupStatus): void;
 }
 
-function fixture(options: {
+async function fixture(options: {
   events?: CircusTaskEvent[];
   sessionConfig?: ProviderSessionConfig;
   agentSession?: string;
   archive?: string;
+  onClose?(count: number): Promise<void>;
 }) {
+  const dir = await mkdtemp(join(tmpdir(), "circus-session-"));
+  tempDirs.push(dir);
+  const archive = options.archive ?? join(dir, "session.snapshot");
+  if (options.agentSession) await writeFile(archive, "restored archive");
   const observed: ProviderEvent[] = [];
   const requests: CircusTaskRequest[] = [];
+  const restoredInputs: Array<string | undefined> = [];
   const startedTurnIds: string[] = [];
   const turns: Turn[] = [];
   const turnsById = new Map<string, Turn>();
@@ -56,6 +64,13 @@ function fixture(options: {
 
   const createClient = (): TaskClient => ({
     async start(request) {
+      restoredInputs.push(
+        await readFile(request.workspaceArchive!, "utf8").catch((error) => {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+          throw error;
+        }),
+      );
+      await writeFile(request.workspaceArchive!, `candidate-${requests.length + 1}`);
       requests.push(request);
       const turnId = startedTurnIds[turns.length];
       if (!turnId) throw new Error("turn start was not announced");
@@ -92,6 +107,7 @@ function fixture(options: {
     },
     async close() {
       closed += 1;
+      await options.onClose?.(closed);
     },
   });
 
@@ -99,7 +115,7 @@ function fixture(options: {
     id: "session-1",
     config: options.sessionConfig ?? config,
     createClient,
-    archive: options.archive ?? archive,
+    archive,
     agentSession: options.agentSession,
     artifacts: new ArtifactStore(),
     emit(event) {
@@ -112,11 +128,22 @@ function fixture(options: {
       }
     },
   });
-  function prompt(text = "Fix the project") {
+  async function prompt(text = "Fix the project") {
+    const before = requests.length;
+    const promptResult = observed.length;
     session.prompt({
       clientMessageId: `message-${observed.length}`,
       delivery: "auto",
       input: { type: "message", content: [{ type: "text", text }] },
+    });
+    await vi.waitFor(() => {
+      const rejected = observed
+        .slice(promptResult)
+        .some((event) => event.type === "session.prompt_result" && event.result.type === "failed");
+      const failedTurn = observed
+        .slice(promptResult)
+        .some((event) => event.type === "session.turn" && event.state === "failed");
+      expect(requests.length > before || rejected || failedTurn).toBe(true);
     });
   }
   return {
@@ -125,6 +152,8 @@ function fixture(options: {
     requests,
     turns,
     prompt,
+    archive,
+    restoredInputs,
     cancelled: () => cancelled,
     closed: () => closed,
     persistence: () =>
@@ -135,18 +164,9 @@ function fixture(options: {
 }
 
 test("runs sequential prompts with one fresh client, archive and returned agent session", async () => {
-  const f = fixture({});
-  f.prompt();
-  expect(f.requests[0]).toEqual({
-    prompt: "Fix the project",
-    inputFiles: { "answer.py": Buffer.from("print(42)") },
-    outputPaths: ["result.txt"],
-    timeoutMs: 60_000,
-    mcpGrants: [],
-    workspaceArchive: archive,
-    workspaceMaxTotalBytes: DEFAULT_WORKSPACE_MAX_TOTAL_BYTES,
-    workspaceMaxEntries: DEFAULT_WORKSPACE_MAX_ENTRIES,
-  });
+  const f = await fixture({});
+  await f.prompt();
+  expect(f.restoredInputs[0]).toBeUndefined();
   f.turns[0]!.complete({
     status: "succeeded",
     cleanup: "confirmed",
@@ -154,23 +174,15 @@ test("runs sequential prompts with one fresh client, archive and returned agent 
     agentSession: "thread-1",
   });
   await f.turns[0]!.finished;
+  expect(await readFile(f.archive, "utf8")).toBe("candidate-1");
   expect(f.closed()).toBe(1);
   expect(
     f.observed.filter((event) => event.type === "session.turn").map((event) => event.state),
   ).toEqual(["started", "completed"]);
 
-  f.prompt("Continue");
-  expect(f.requests[1]).toEqual({
-    prompt: "Continue",
-    inputFiles: { "answer.py": Buffer.from("print(42)") },
-    outputPaths: ["result.txt"],
-    timeoutMs: 60_000,
-    mcpGrants: [],
-    workspaceArchive: archive,
-    workspaceMaxTotalBytes: DEFAULT_WORKSPACE_MAX_TOTAL_BYTES,
-    workspaceMaxEntries: DEFAULT_WORKSPACE_MAX_ENTRIES,
-    agentSession: "thread-1",
-  });
+  await f.prompt("Continue");
+  expect(f.restoredInputs[1]).toBe("candidate-1");
+  expect(f.requests[1]?.agentSession).toBe("thread-1");
   f.turns[1]!.complete({
     status: "succeeded",
     cleanup: "confirmed",
@@ -178,6 +190,7 @@ test("runs sequential prompts with one fresh client, archive and returned agent 
     agentSession: "thread-2",
   });
   await f.turns[1]!.finished;
+  expect(await readFile(f.archive, "utf8")).toBe("candidate-2");
   expect(f.closed()).toBe(2);
   expect(f.turns).toHaveLength(2);
   expect(f.persistence()).toEqual([
@@ -187,13 +200,14 @@ test("runs sequential prompts with one fresh client, archive and returned agent 
 });
 
 test("restores a persisted agent session and exposes it on the first request", async () => {
-  const f = fixture({ agentSession: "thread-restored" });
-  f.prompt();
+  const f = await fixture({ agentSession: "thread-restored" });
+  await f.prompt();
   expect(f.requests[0]?.agentSession).toBe("thread-restored");
   f.turns[0]!.complete({
     status: "succeeded",
     cleanup: "confirmed",
     artifacts: {},
+    agentSession: "thread-restored",
   });
   await f.turns[0]!.finished;
   expect(f.requests).toHaveLength(1);
@@ -201,7 +215,7 @@ test("restores a persisted agent session and exposes it on the first request", a
 });
 
 test("provider options override archive budgets", async () => {
-  const f = fixture({
+  const f = await fixture({
     sessionConfig: {
       ...config,
       providerOptions: {
@@ -211,7 +225,7 @@ test("provider options override archive budgets", async () => {
       },
     },
   });
-  f.prompt();
+  await f.prompt();
   expect(f.requests[0]).toMatchObject({
     workspaceMaxTotalBytes: 4096,
     workspaceMaxEntries: 32,
@@ -221,8 +235,8 @@ test("provider options override archive budgets", async () => {
 });
 
 test("Stop cancels the active turn, waits for cleanup, then accepts the next prompt", async () => {
-  const f = fixture({});
-  f.prompt();
+  const f = await fixture({});
+  await f.prompt();
   const stopped = f.session.interrupt();
   f.turns[0]!.complete({
     status: "cancelled",
@@ -243,14 +257,58 @@ test("Stop cancels the active turn, waits for cleanup, then accepts the next pro
       },
     },
   });
-  f.prompt("Try again");
+  await f.prompt("Try again");
   expect(f.requests).toHaveLength(2);
   expect(f.requests[1]?.agentSession).toBeUndefined();
 });
 
+test.each(["failed", "cancelled"] as const)(
+  "%s turns cannot replace the completed checkpoint",
+  async (status) => {
+    const f = await fixture({ agentSession: "thread-completed" });
+    await f.prompt();
+    f.turns[0]!.complete({
+      status,
+      cleanup: "confirmed",
+      error: { code: status === "cancelled" ? "cancelled" : "agent_failed", message: status },
+    });
+    await f.turns[0]!.finished;
+    expect(await readFile(f.archive, "utf8")).toBe("restored archive");
+    expect(f.persistence()).toEqual([]);
+    await f.prompt("Continue the completed turn");
+    expect(f.restoredInputs[1]).toBe("restored archive");
+    expect(f.requests[1]?.agentSession).toBe("thread-completed");
+    f.turns[1]!.complete({
+      status: "succeeded",
+      cleanup: "confirmed",
+      artifacts: {},
+      agentSession: "thread-next",
+    });
+    await f.turns[1]!.finished;
+    expect(await readFile(f.archive, "utf8")).toBe("candidate-2");
+  },
+);
+
+test("an agent without a resumable thread remains one-shot", async () => {
+  const f = await fixture({});
+  await f.prompt();
+  f.turns[0]!.complete({ status: "succeeded", cleanup: "confirmed", artifacts: {} });
+  await f.turns[0]!.finished;
+  expect(f.persistence()).toEqual([{ version: 1, data: { continuationDisabled: true } }]);
+  await expect(readFile(f.archive)).rejects.toMatchObject({ code: "ENOENT" });
+  await f.prompt("Must not silently start a fresh conversation");
+  expect(f.requests).toHaveLength(1);
+  expect(f.observed.at(-1)).toMatchObject({
+    type: "session.prompt_result",
+    result: { type: "failed" },
+  });
+  await f.session.close();
+  expect(f.closed()).toBe(1);
+});
+
 test("pending cleanup keeps the result and blocks prompts until retry confirms", async () => {
-  const f = fixture({});
-  f.prompt();
+  const f = await fixture({});
+  await f.prompt();
   f.turns[0]!.complete({
     status: "cancelled",
     cleanup: "pending",
@@ -258,7 +316,7 @@ test("pending cleanup keeps the result and blocks prompts until retry confirms",
   });
   await f.turns[0]!.finished;
   expect(f.closed()).toBe(0);
-  f.prompt("Should not start");
+  await f.prompt("Should not start");
   expect(f.requests).toHaveLength(1);
   expect(f.observed.at(-1)).toMatchObject({
     type: "session.prompt_result",
@@ -268,13 +326,50 @@ test("pending cleanup keeps the result and blocks prompts until retry confirms",
   f.turns[0]!.setCleanup("confirmed");
   expect(await f.session.retryCleanup()).toBe("confirmed");
   expect(f.closed()).toBe(1);
-  f.prompt("After cleanup");
+  await f.prompt("After cleanup");
   expect(f.requests).toHaveLength(2);
 });
 
+test("a stale concurrent cleanup retry cannot erase the next active turn", async () => {
+  const releaseStale = Promise.withResolvers<void>();
+  const f = await fixture({
+    onClose: async (count) => {
+      if (count === 2) await releaseStale.promise;
+    },
+  });
+  await f.prompt();
+  f.turns[0]!.complete({
+    status: "cancelled",
+    cleanup: "pending",
+    error: { code: "cleanup", message: "requires retry" },
+  });
+  await f.turns[0]!.finished;
+  f.turns[0]!.setCleanup("confirmed");
+  const first = f.session.retryCleanup();
+  const stale = f.session.retryCleanup();
+  await first;
+  await f.prompt("Next turn");
+  releaseStale.resolve();
+  await stale;
+  await f.prompt("Must remain blocked while next turn runs");
+  expect(f.requests).toHaveLength(2);
+  expect(f.observed.at(-1)).toMatchObject({
+    type: "session.prompt_result",
+    result: { type: "failed" },
+  });
+  f.turns[1]!.complete({
+    status: "succeeded",
+    cleanup: "confirmed",
+    artifacts: {},
+    agentSession: "next-thread",
+  });
+  await f.turns[1]!.finished;
+  expect(await readFile(f.archive, "utf8")).toBe("candidate-2");
+});
+
 test("unknown cleanup blocks prompts as well", async () => {
-  const f = fixture({});
-  f.prompt();
+  const f = await fixture({});
+  await f.prompt();
   f.turns[0]!.complete({
     status: "failed",
     cleanup: "unknown",
@@ -282,7 +377,7 @@ test("unknown cleanup blocks prompts as well", async () => {
   });
   await f.turns[0]!.finished;
   expect(f.closed()).toBe(1);
-  f.prompt("Blocked");
+  await f.prompt("Blocked");
   expect(f.requests).toHaveLength(1);
   expect(f.observed.at(-1)).toMatchObject({
     type: "session.prompt_result",
@@ -291,7 +386,7 @@ test("unknown cleanup blocks prompts as well", async () => {
 });
 
 test("keeps model errors visible and rejects host attachments", async () => {
-  const f = fixture({});
+  const f = await fixture({});
   f.session.prompt({
     clientMessageId: "upload",
     delivery: "auto",
@@ -314,7 +409,7 @@ test("keeps model errors visible and rejects host attachments", async () => {
     type: "session.prompt_result",
     result: { type: "failed" },
   });
-  f.prompt();
+  await f.prompt();
   f.turns[0]!.complete({
     status: "failed",
     cleanup: "confirmed",

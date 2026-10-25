@@ -39,6 +39,7 @@ const hostConfiguredModel = {
 const persistenceSchema = z.strictObject({
   version: z.literal(1),
   data: z.strictObject({
+    continuationDisabled: z.literal(true).optional(),
     agentSession: z
       .string()
       .regex(/^[a-zA-Z0-9_-]{1,128}$/)
@@ -139,6 +140,11 @@ export class SandboxProvider {
         if (sessions.has(input.sessionId))
           throw new SandboxProviderError("duplicate", "Sandbox session already exists");
         const restored = readPersistence(input.persistence);
+        if (restored.continuationDisabled)
+          throw new SandboxProviderError(
+            "unsupported",
+            "This agent did not return a resumable session. Start a new sandbox session.",
+          );
         if (input.config.toolPolicy)
           throw new SandboxProviderError(
             "unsupported",

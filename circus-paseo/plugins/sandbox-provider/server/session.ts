@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { copyFile, rename, rm } from "node:fs/promises";
 import type {
   ProviderEvent,
   ProviderPrompt,
@@ -41,12 +42,14 @@ type RunState =
       task: Promise<CircusTask>;
       done: Promise<void>;
       cleanup: CleanupStatus;
+      candidate: string;
     };
 
 export class SandboxSession {
   private state: RunState = { status: "ready" };
   private result: TaskResultView | null = null;
   private agentSession: string | undefined;
+  private continuationDisabled = false;
   private readonly options;
 
   constructor(private readonly context: SessionOptions) {
@@ -107,16 +110,26 @@ export class SandboxSession {
       });
       // Only connection/tool IDs cross this boundary. Host MCP configurations,
       // credentials, system prompts, env and cwd never enter the task request.
-      pending = client.start({
-        prompt: text,
-        inputFiles,
-        outputPaths: this.options.outputPaths,
-        timeoutMs: this.options.timeoutMs,
-        mcpGrants: this.options.mcpGrants,
-        workspaceArchive: this.context.archive,
-        workspaceMaxTotalBytes: this.options.workspaceMaxTotalBytes,
-        workspaceMaxEntries: this.options.workspaceMaxEntries,
-        ...(this.agentSession === undefined ? {} : { agentSession: this.agentSession }),
+      const candidate = `${this.context.archive}.${turnId}.pending`;
+      pending = Promise.resolve().then(async () => {
+        try {
+          await copyFile(this.context.archive, candidate);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT" || this.agentSession !== undefined)
+            throw error;
+        }
+        state.cleanup = "unknown";
+        return client.start({
+          prompt: text,
+          inputFiles,
+          outputPaths: this.options.outputPaths,
+          timeoutMs: this.options.timeoutMs,
+          mcpGrants: this.options.mcpGrants,
+          workspaceArchive: candidate,
+          workspaceMaxTotalBytes: this.options.workspaceMaxTotalBytes,
+          workspaceMaxEntries: this.options.workspaceMaxEntries,
+          ...(this.agentSession === undefined ? {} : { agentSession: this.agentSession }),
+        });
       });
     } catch (failure) {
       this.promptFailure(turnId, failure);
@@ -127,7 +140,8 @@ export class SandboxSession {
       client,
       task: pending,
       done: Promise.resolve(),
-      cleanup: "unknown",
+      cleanup: "confirmed",
+      candidate: `${this.context.archive}.${turnId}.pending`,
     };
     this.state = state;
     state.done = this.consume(pending, client, turnId);
@@ -153,6 +167,8 @@ export class SandboxSession {
   }
 
   private validatePrompt(prompt: ProviderPrompt): string | null {
+    if (this.continuationDisabled)
+      return "This agent did not return a resumable session. Start a new sandbox session.";
     if (this.state.status === "active")
       return "Wait for the current sandbox turn to finish before sending another prompt.";
     if (this.state.status === "finished")
@@ -186,16 +202,14 @@ export class SandboxSession {
       const [outcome] = await Promise.all([task.result, drain()]);
       if (this.state.status === "active") this.state.cleanup = outcome.cleanup;
       if (outcome.status === "succeeded") {
-        if (outcome.agentSession !== undefined) this.agentSession = outcome.agentSession;
-        this.publishPersistence();
+        const message = await this.commitCheckpoint(outcome.agentSession);
         const artifacts = await this.context.artifacts.save(outcome.artifacts);
         this.result = {
           taskId,
           status: "succeeded",
           cleanup: "confirmed",
           artifacts,
-          message:
-            "Task complete. Sandbox cleanup confirmed. The next prompt resumes this session's completed turn.",
+          message,
         };
         terminal = "completed";
       } else {
@@ -214,9 +228,7 @@ export class SandboxSession {
         terminal = outcome.status === "cancelled" ? "canceled" : "failed";
       }
       if (outcome.cleanup === "confirmed") {
-        const closeError = await this.release(client);
-        if (closeError) this.appendMessage(closeError);
-        this.state = { status: "ready" };
+        await this.finishConfirmed(this.state, client);
       } else if (this.state.status !== "ready") {
         // A retryable cleanup handle keeps its bridge alive; an untracked
         // unknown cleanup cannot be resumed safely and remains blocked.
@@ -232,12 +244,14 @@ export class SandboxSession {
       const current = this.state;
       const cleanup = current.status === "ready" ? "unknown" : current.cleanup;
       this.result = { taskId, status: "failed", cleanup, artifacts: [], message: error.message };
-      if (cleanup !== "pending") {
-        const closeError = await this.release(client);
-        if (closeError) this.appendMessage(closeError);
+      if (cleanup === "confirmed") await this.finishConfirmed(current, client);
+      else {
+        if (cleanup !== "pending") {
+          const closeError = await this.release(client);
+          if (closeError) this.appendMessage(closeError);
+        }
+        if (current.status !== "ready") this.state = { ...current, status: "finished" };
       }
-      if (cleanup === "confirmed") this.state = { status: "ready" };
-      else if (current.status !== "ready") this.state = { ...current, status: "finished" };
     }
     if (terminal !== "completed") for (const item of timeline.finish(terminal)) this.item(item);
     this.publishResult();
@@ -276,11 +290,7 @@ export class SandboxSession {
     state.cleanup = await task.retryCleanup();
     if (this.result) this.result = { ...this.result, cleanup: state.cleanup };
     this.publishResult();
-    if (state.cleanup === "confirmed") {
-      const closeError = await this.release(state.client);
-      if (closeError) this.appendMessage(closeError);
-      this.state = { status: "ready" };
-    }
+    if (state.cleanup === "confirmed") await this.finishConfirmed(state, state.client);
     return state.cleanup;
   }
 
@@ -308,6 +318,21 @@ export class SandboxSession {
     if (failure) throw failure;
   }
 
+  private async finishConfirmed(state: RunState, client: TaskClient): Promise<void> {
+    const closeError = await this.release(client);
+    if (closeError) this.appendMessage(closeError);
+    if (state.status !== "ready") await this.discardCandidate(state.candidate);
+    if (this.state === state) this.state = { status: "ready" };
+  }
+
+  private async discardCandidate(candidate: string): Promise<void> {
+    try {
+      await rm(candidate, { force: true });
+    } catch {
+      this.appendMessage("The temporary workspace checkpoint could not be removed on the host.");
+    }
+  }
+
   private async release(client: TaskClient): Promise<string | null> {
     try {
       await client.close();
@@ -317,13 +342,31 @@ export class SandboxSession {
     }
   }
 
+  private async commitCheckpoint(agentSession: string | undefined): Promise<string> {
+    if (agentSession !== undefined) {
+      const current = this.state;
+      if (current.status === "ready") throw new Error("No active checkpoint");
+      await rename(current.candidate, this.context.archive);
+      this.agentSession = agentSession;
+    } else {
+      this.continuationDisabled = true;
+    }
+    this.publishPersistence();
+    return this.continuationDisabled
+      ? "Task complete. Sandbox cleanup confirmed. This agent has no resumable session; start a new sandbox session for another task."
+      : "Task complete. Sandbox cleanup confirmed. The next prompt resumes this session's completed turn.";
+  }
+
   private publishPersistence(): void {
+    let data: { continuationDisabled?: true; agentSession?: string } = {};
+    if (this.continuationDisabled) data = { continuationDisabled: true };
+    else if (this.agentSession !== undefined) data = { agentSession: this.agentSession };
     this.context.emit({
       type: "session.persistence",
       sessionId: this.context.id,
       persistence: {
         version: 1,
-        data: this.agentSession === undefined ? {} : { agentSession: this.agentSession },
+        data,
       },
     });
   }
