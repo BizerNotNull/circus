@@ -200,7 +200,6 @@ class HostController:
         self.total = 0
         self.worker = None
         self.revoked = threading.Event()
-        self.response_deadline = None
         self.text_seen = set()
         self.output_seen = set()
         self.mcp = None
@@ -242,12 +241,17 @@ class HostController:
         if self.finished or self.revoked.is_set() or (self.worker and self.worker.is_alive()):
             raise BridgeError("model channel is unavailable or busy")
         request_id, body = self.validate_request(message)
+        response_deadline = time.monotonic() + 34
+        started = False
 
         def emit(kind, chunk):
-            if (self.revoked.is_set()
-                    or (self.response_deadline is not None
-                        and time.monotonic() >= self.response_deadline)):
+            nonlocal started
+            if self.revoked.is_set():
                 return
+            if not started:
+                if kind != "http_start" or time.monotonic() >= response_deadline:
+                    return
+                started = True
             response = {"channel": kind, "id": request_id}
             if chunk is not None:
                 self.total += len(chunk)
@@ -262,10 +266,11 @@ class HostController:
             except Exception as error:
                 if not self.revoked.is_set():
                     failure(error)
-                    try:
-                        send({"channel": "http_error", "id": request_id})
-                    except OSError:
-                        pass
+                    if started or time.monotonic() < response_deadline:
+                        try:
+                            send({"channel": "http_error", "id": request_id})
+                        except OSError:
+                            pass
 
         self.worker = threading.Thread(target=forward, daemon=True)
         self.worker.start()
