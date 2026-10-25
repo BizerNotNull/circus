@@ -110,7 +110,12 @@ async fn docker_linux_runc_lifecycle() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(enforcement.readonly_root, Some(true));
     assert_eq!(enforcement.network_mode.as_deref(), Some("none"));
     assert_eq!(enforcement.bind_count, Some(0));
-    assert!(enforcement.cap_drop.as_ref().is_some_and(|caps| caps.iter().any(|c| c == "ALL")));
+    assert!(
+        enforcement
+            .cap_drop
+            .as_ref()
+            .is_some_and(|caps| caps.iter().any(|c| c == "ALL"))
+    );
     let security = f.sandbox().exec(py(&["-c", r###"from pathlib import Path; s=Path('/proc/self/status').read_text(); print(next(x for x in s.splitlines() if x.startswith('NoNewPrivs:'))); print(next(x for x in s.splitlines() if x.startswith('CapEff:')))"###])).await?;
     let security_text = String::from_utf8(security.stdout)?;
     assert!(
