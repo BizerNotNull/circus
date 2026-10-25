@@ -113,7 +113,12 @@ pub(crate) async fn run_attached(
                             result = output.send(Ok(item)) => result.is_ok(),
                         };
                         if !sent {
-                            return Ok(());
+                            if cancel.is_cancelled() {
+                                return Ok(());
+                            }
+                            return Err(SandboxError::WorkerGone {
+                                detail: "process output receiver was dropped".to_string(),
+                            });
                         }
                     }
                     Ok(None) => {
