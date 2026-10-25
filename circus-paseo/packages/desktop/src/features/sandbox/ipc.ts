@@ -51,7 +51,7 @@ export function createSandboxSetupCommandHandlers(): Record<string, DesktopComma
   });
   return {
     sandbox_setup_inspect: () => setup.snapshot(),
-    sandbox_setup_prepare: () => action(() => setup.prepare()),
+    sandbox_setup_prepare: (args) => action(() => setup.prepare(args)),
     sandbox_setup_test: (args) => action(() => setup.testConnection(args)),
     sandbox_setup_save: (args) => action(() => setup.save(args)),
     sandbox_setup_mcp_save: (args) => action(() => setup.saveGithub(args)),

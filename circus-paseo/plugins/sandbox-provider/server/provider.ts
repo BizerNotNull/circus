@@ -70,7 +70,7 @@ export class SandboxProvider {
       icon: "icon.svg",
       requiresConfiguration: true,
       description:
-        "Sequential Codex turns in disposable sandboxes, each restored from the session's completed workspace and native thread",
+        "Sequential Codex sessions resume completed threads. Claude Code supports one non-resumable task per sandbox session.",
       command: ["circus-stdio-bridge"],
       status: async ({ launch }) => {
         try {

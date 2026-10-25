@@ -1,5 +1,5 @@
 import { useCallback, useReducer } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import {
@@ -28,11 +28,13 @@ interface Draft extends SandboxSetupInput {
 }
 type DraftChange =
   | { type: "field"; field: "baseUrl" | "model" | "apiKey"; value: string }
+  | { type: "agent"; value: SandboxSetupInput["agent"] }
   | { type: "preset"; value: SandboxResourcePreset }
   | { type: "clear-secret" };
 
 function reduceDraft(state: Draft, change: DraftChange): Draft {
   if (change.type === "field") return { ...state, [change.field]: change.value };
+  if (change.type === "agent") return { ...state, agent: change.value };
   if (change.type === "preset") return { ...state, preset: change.value };
   return { ...state, apiKey: "", secretRevision: state.secretRevision + 1 };
 }
@@ -77,43 +79,110 @@ interface SetupFormProps {
   refreshing: boolean;
 }
 
+function AgentChoices({
+  agent,
+  choices,
+  disabled,
+}: {
+  agent: SandboxSetupInput["agent"];
+  choices: readonly {
+    id: NonNullable<SandboxSetupInput["agent"]>;
+    label: string;
+    onPress: () => void;
+  }[];
+  disabled: boolean;
+}) {
+  return (
+    <>
+      <View style={styles.actions}>
+        {choices.map((choice) => (
+          <Button
+            key={choice.id}
+            variant={agent === choice.id ? "default" : "outline"}
+            size="sm"
+            onPress={choice.onPress}
+            disabled={disabled}
+          >
+            {choice.label}
+          </Button>
+        ))}
+      </View>
+      <Text style={styles.muted}>
+        {agent === "codex"
+          ? "Codex · OpenAI-compatible Responses API. Use a model service you trust; task contents are sent to that service."
+          : "Claude Code · Anthropic Messages API. Each prompt is a separate, non-resumable task; the next prompt requires a new Sandbox session."}
+      </Text>
+    </>
+  );
+}
+
+async function runSetupAction(operation: Action, draft: Draft, queryClient: QueryClient) {
+  if (operation === "select_source") {
+    const selected = sandboxSetupSnapshotSchema.parse(
+      await invokeDesktopCommand("sandbox_setup_select_source"),
+    );
+    queryClient.setQueryData(queryKey, selected);
+    return { ok: true, message: "Environment checked." };
+  }
+  const input = {
+    baseUrl: draft.baseUrl,
+    model: draft.model,
+    apiKey: draft.apiKey,
+    agent: draft.agent,
+    preset: draft.preset,
+  };
+  return sandboxSetupResultSchema.parse(
+    await invokeDesktopCommand(`sandbox_setup_${operation}`, input),
+  );
+}
+
+function settleSetupAction(
+  operation: Action,
+  dispatch: (change: DraftChange) => void,
+  queryClient: QueryClient,
+) {
+  if (operation === "save") dispatch({ type: "clear-secret" });
+  if (operation !== "test") void queryClient.invalidateQueries({ queryKey });
+}
+function SetupAlerts({
+  error,
+  result,
+}: {
+  error: boolean;
+  result: { ok: boolean; message: string } | undefined;
+}) {
+  return (
+    <>
+      {error ? (
+        <Alert
+          variant="error"
+          title="Setup was not completed"
+          description="Check the environment and entered values. If you changed the service URL, enter its API key. Existing settings remain available; retry when the issue is resolved."
+        />
+      ) : null}
+      {result ? (
+        <Alert variant={result.ok ? "success" : "error"} description={result.message} />
+      ) : null}
+    </>
+  );
+}
+
 function SetupForm({ snapshot, refresh, refreshing }: SetupFormProps) {
   const queryClient = useQueryClient();
   const [draft, dispatch] = useReducer(reduceDraft, {
     baseUrl: snapshot.settings.baseUrl,
     model: snapshot.settings.model,
     apiKey: "",
+    agent: snapshot.settings.agent ?? "codex",
     preset: snapshot.settings.preset,
     secretRevision: 0,
   });
   const action = useMutation({
     // Only the action name enters React Query's mutation variables; never cache the API key.
-    mutationFn: async (operation: Action) => {
-      if (operation === "select_source") {
-        const selected = sandboxSetupSnapshotSchema.parse(
-          await invokeDesktopCommand("sandbox_setup_select_source"),
-        );
-        queryClient.setQueryData(queryKey, selected);
-        return { ok: true, message: "Environment checked." };
-      }
-      const input = {
-        baseUrl: draft.baseUrl,
-        model: draft.model,
-        apiKey: draft.apiKey,
-        preset: draft.preset,
-      };
-      return sandboxSetupResultSchema.parse(
-        await invokeDesktopCommand(
-          `sandbox_setup_${operation}`,
-          operation === "prepare" ? undefined : input,
-        ),
-      );
-    },
-    onSettled: (_result, _error, operation) => {
-      if (operation === "save") dispatch({ type: "clear-secret" });
-      if (operation !== "test") void queryClient.invalidateQueries({ queryKey });
-    },
+    mutationFn: (operation: Action) => runSetupAction(operation, draft, queryClient),
+    onSettled: (_result, _error, operation) => settleSetupAction(operation, dispatch, queryClient),
   });
+
   const setBaseUrl = useCallback(
     (value: string) => dispatch({ type: "field", field: "baseUrl", value }),
     [],
@@ -126,6 +195,12 @@ function SetupForm({ snapshot, refresh, refreshing }: SetupFormProps) {
     (value: string) => dispatch({ type: "field", field: "apiKey", value }),
     [],
   );
+  const selectCodex = useCallback(() => dispatch({ type: "agent", value: "codex" }), []);
+  const selectClaude = useCallback(() => dispatch({ type: "agent", value: "claude-code" }), []);
+  const agentChoices = [
+    { id: "codex", label: "Codex", onPress: selectCodex },
+    { id: "claude-code", label: "Claude Code", onPress: selectClaude },
+  ] as const;
   const prepare = useCallback(() => action.mutate("prepare"), [action]);
   const selectSource = useCallback(() => action.mutate("select_source"), [action]);
   const test = useCallback(() => action.mutate("test"), [action]);
@@ -141,7 +216,7 @@ function SetupForm({ snapshot, refresh, refreshing }: SetupFormProps) {
   return (
     <SettingsSection
       title="Circus sandbox"
-      info="Run one Codex task in a disposable environment. Only this computer's desktop app can change these settings; remote task clients cannot manage credentials."
+      info="Run one task in a disposable environment. Only this computer's desktop app can change these settings; remote task clients cannot manage credentials."
     >
       <View style={[settingsStyles.card, styles.content]}>
         <View style={styles.heading}>
@@ -175,10 +250,11 @@ function SetupForm({ snapshot, refresh, refreshing }: SetupFormProps) {
         </View>
         <View style={styles.group}>
           <Text style={styles.label}>2. Connect your model</Text>
-          <Text style={styles.muted}>
-            Codex · OpenAI-compatible Responses API. Use a model service you trust; task contents
-            are sent to that service.
-          </Text>
+          <AgentChoices
+            agent={draft.agent ?? "codex"}
+            choices={agentChoices}
+            disabled={busy || !snapshot.supported}
+          />
           <Text style={styles.fieldLabel}>Service URL</Text>
           <EditingTextInput
             accessibilityLabel="Sandbox model service URL"
@@ -254,16 +330,7 @@ function SetupForm({ snapshot, refresh, refreshing }: SetupFormProps) {
             description="The sandbox has no direct network access. Model requests pass through the host connector. Tool connections require separate setup below and explicit permission for each task."
           />
         </View>
-        {action.isError ? (
-          <Alert
-            variant="error"
-            title="Setup was not completed"
-            description="Check the environment and entered values. If you changed the service URL, enter its API key. Existing settings remain available; retry when the issue is resolved."
-          />
-        ) : null}
-        {action.data ? (
-          <Alert variant={action.data.ok ? "success" : "error"} description={action.data.message} />
-        ) : null}
+        <SetupAlerts error={action.isError} result={action.data} />
         <Button onPress={save} disabled={!snapshot.ready || !canConnect}>
           Save and enable sandbox
         </Button>

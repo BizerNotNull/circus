@@ -58,18 +58,19 @@ for provider-specific environment variables:
 
 See [Custom providers](/docs/custom-providers) for command and environment overrides.
 
-## Sandbox (Codex)
+## Sandbox (Codex and Claude Code) {#sandbox-codex}
 
-Circus's **Sandbox** provider is opt-in. The host configuration selects Codex or Claude Code and
-its matching pinned image and model protocol. On macOS, open the local desktop host settings and
-use **Sandbox setup** to detect prerequisites, prepare Codex, test the model connection and save its
-API key in Keychain. This source-checkout workflow requires Docker Desktop and build prerequisites;
-it is not a bundled installer. Browser and remote clients must configure the desktop host first.
+Circus's **Sandbox** provider is opt-in. The host configuration selects Codex or Claude Code with
+its matching pinned image and model protocol. On macOS, open the local desktop host settings and use
+**Sandbox setup** to select an agent, detect prerequisites, prepare its image, test the matching model
+API and save the API key in Keychain. This source-checkout workflow requires Docker Desktop and build
+prerequisites; it is not a bundled installer. Browser and remote clients must configure the desktop
+host first.
 
-For manual setup or Claude Code, install the Circus Rust bridge on the daemon host and configure
-its Docker endpoint, matching agent image, resource limits and model channel. A credential can be
-an explicit private key file or macOS Keychain reference. Personal Agent logins, home directories,
-proxy settings, ambient MCP servers, system prompts and agent environments are not imported.
+For manual setup, install the Circus Rust bridge on the daemon host and configure its Docker endpoint,
+matching agent image, resource limits and model channel. A credential can be an explicit private key
+file or macOS Keychain reference. Personal Agent logins, home directories, proxy settings, ambient MCP
+servers, system prompts and agent environments are not imported.
 
 Add this entry to the daemon configuration, replacing all three absolute paths:
 

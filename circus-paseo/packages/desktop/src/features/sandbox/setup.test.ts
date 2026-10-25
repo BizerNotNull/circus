@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
+import { CLAUDE_CODE_IMAGE } from "./environment.js";
 import { createSandboxSetup } from "./setup.js";
 import type { CommandInput, RunCommand } from "./command.js";
 
@@ -16,8 +17,16 @@ async function fixture() {
   roots.push(root);
   const home = join(root, "home");
   const bin = join(root, "bin");
+  const source = join(root, "repo");
   await mkdir(home);
   await mkdir(bin);
+  await Promise.all(
+    ["codex", "claude-code"].map(async (agent) => {
+      const image = join(source, "circus-sandbox", "images", agent);
+      await mkdir(image, { recursive: true });
+      await writeFile(join(image, "Dockerfile"), "FROM scratch\n");
+    }),
+  );
   await Promise.all(
     ["docker", "python3", "circus-stdio-bridge"].map((name) =>
       writeFile(join(bin, name), "", { mode: 0o700 }),
@@ -33,6 +42,7 @@ async function fixture() {
   const secrets = new Map<string, string>();
   const commands: CommandInput[] = [];
   const requests: RequestInit[] = [];
+  const requestUrls: string[] = [];
   let reloads = 0;
   let keychainWritable = true;
   const run: RunCommand = async (command) => {
@@ -63,14 +73,26 @@ async function fixture() {
     home,
     userHome: root,
     platform: "darwin",
-    sourceCandidates: [],
+    sourceCandidates: [source],
     binaryDirectories: [bin],
     run,
     reload: async () => {
       reloads += 1;
     },
-    request: async (_url: string | URL | Request, init?: RequestInit) => {
+    request: async (url: string | URL | Request, init?: RequestInit) => {
       if (init) requests.push(init);
+      const requestUrl = String(url);
+      requestUrls.push(requestUrl);
+      if (requestUrl.includes("/messages"))
+        return new Response(
+          JSON.stringify({
+            id: "msg_fixture",
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: "OK" }],
+          }),
+          { status: 200 },
+        );
       const rpc = JSON.parse(String(init?.body));
       if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
       if (rpc.method === "initialize")
@@ -101,9 +123,7 @@ async function fixture() {
         );
       return new Response(
         JSON.stringify({ id: "resp_fixture", object: "response", status: "completed", output: [] }),
-        {
-          status: 200,
-        },
+        { status: 200 },
       );
     },
   };
@@ -114,6 +134,7 @@ async function fixture() {
     secrets,
     commands,
     requests,
+    requestUrls,
     dependencies,
     reloads: () => reloads,
     refuseKeychain: () => {
@@ -143,6 +164,7 @@ test("saves a usable provider without storing a credential in config, argv, or s
   );
   const runnerPath = persisted.agents.providers.sandbox.env.CIRCUS_RUNNER_CONFIG;
   const runner = JSON.parse(await readFile(runnerPath, "utf8"));
+  expect(runner.agent).toBe("codex");
   expect(runner.agentImage).toBe(`sha256:${"a".repeat(64)}`);
   expect(runner.model.apiKeyFile).toBeUndefined();
   expect(
@@ -159,6 +181,53 @@ test("saves a usable provider without storing a credential in config, argv, or s
     ]),
   ).not.toContain("fixture-only-secret");
   expect(f.reloads()).toBe(1);
+});
+test("saves the selected Claude Code agent and its inspected image", async () => {
+  const f = await fixture();
+  expect(await f.service.save({ ...model, agent: "claude-code" })).toMatchObject({ ok: true });
+  const persisted = JSON.parse(await readFile(join(f.home, "config.json"), "utf8"));
+  const runnerPath = persisted.agents.providers.sandbox.env.CIRCUS_RUNNER_CONFIG;
+  const runner = JSON.parse(await readFile(runnerPath, "utf8"));
+  expect(runner.agent).toBe("claude-code");
+  expect(runner.agentImage).toBe(`sha256:${"a".repeat(64)}`);
+  expect(persisted.agents.providers.sandbox.env.CIRCUS_RUNNER_CONFIG).toBe(runnerPath);
+});
+test("prepares the selected Claude Code image instead of the default Codex image", async () => {
+  const f = await fixture();
+  const normalRun = f.dependencies.run;
+  const service = createSandboxSetup({
+    ...f.dependencies,
+    run: async (command) => {
+      if (command.args.includes("inspect") && command.args.at(-1) === CLAUDE_CODE_IMAGE)
+        return { ok: false, stdout: "" };
+      return normalRun(command);
+    },
+  });
+  expect(await service.prepare({ ...model, agent: "claude-code" })).toMatchObject({ ok: true });
+  const imageBuild = f.commands.find((command) => command.args.includes("build"));
+  expect(imageBuild?.args).toContain(CLAUDE_CODE_IMAGE);
+  expect(imageBuild?.args).toContain(
+    join(f.dependencies.sourceCandidates[0]!, "circus-sandbox/images/claude-code"),
+  );
+  expect((await service.snapshot()).settings.agent).toBe("claude-code");
+});
+
+test("Claude Code connection check uses Anthropic Messages authentication and payload", async () => {
+  const f = await fixture();
+  expect(await f.service.testConnection({ ...model, agent: "claude-code" })).toMatchObject({
+    ok: true,
+    message: expect.stringContaining("Messages API"),
+  });
+  expect(f.requestUrls).toEqual(["https://model.example/v1/messages?beta=true"]);
+  expect(f.requests[0]?.headers).toMatchObject({
+    "x-api-key": model.apiKey,
+    "anthropic-version": "2023-06-01",
+  });
+  expect(JSON.parse(String(f.requests[0]?.body))).toEqual({
+    model: model.model,
+    max_tokens: 32,
+    messages: [{ role: "user", content: "Reply with OK." }],
+  });
 });
 
 test("does not trust security's zero exit code without reading back the saved key", async () => {
