@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { mcpGrantsSchema } from "../../shared/mcp.js";
+import { MAX_WORKSPACE_ENTRIES, MAX_WORKSPACE_TOTAL_BYTES } from "../../shared/task.js";
 
 export const PROTOCOL_VERSION = 1;
 export const MAX_FRAME_BYTES = 12 * 1024 * 1024;
@@ -7,7 +8,9 @@ export const MAX_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_EVENT_BYTES = 512 * 1024;
 
 const id = z.string().regex(/^[a-zA-Z0-9-]{1,64}$/);
+const sessionId = z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/);
 const path = z.string().refine(isProjectPath);
+const hostPath = z.string().refine(isAbsoluteHostPath);
 const base64 = z
   .string()
   .max(Math.ceil(MAX_FILE_BYTES / 3) * 4)
@@ -27,6 +30,21 @@ export function isProjectPath(value: string): boolean {
   );
 }
 
+/** Trusted host path from configuration or the provider's derived state path. */
+export function isAbsoluteHostPath(value: string): boolean {
+  const absolute =
+    process.platform === "win32"
+      ? /^(?:[A-Za-z]:[\\/]|\\\\[^\\/])/.test(value)
+      : value.startsWith("/");
+  return (
+    value.length > 0 &&
+    Buffer.byteLength(value) <= 4096 &&
+    Buffer.from(value).toString() === value &&
+    !/\p{Cc}/u.test(value) &&
+    absolute
+  );
+}
+
 function files(max: number) {
   return z
     .array(file)
@@ -38,24 +56,41 @@ function files(max: number) {
     });
 }
 
-export const TaskRequestSchema = z.strictObject({
-  prompt: z.string().refine((value) => {
-    const bytes = Buffer.byteLength(value);
-    return (
-      bytes > 0 &&
-      bytes <= 65536 &&
-      Buffer.from(value).toString() === value &&
-      !value.includes("\0")
-    );
-  }),
-  inputFiles: files(64),
-  outputPaths: z
-    .array(path)
-    .max(32)
-    .refine((values) => new Set(values).size === values.length),
-  timeoutMs: z.number().int().min(1).max(3_600_000),
-  mcpGrants: mcpGrantsSchema.optional(),
-});
+export const TaskRequestSchema = z
+  .strictObject({
+    prompt: z.string().refine((value) => {
+      const bytes = Buffer.byteLength(value);
+      return (
+        bytes > 0 &&
+        bytes <= 65536 &&
+        Buffer.from(value).toString() === value &&
+        !value.includes("\0")
+      );
+    }),
+    inputFiles: files(64),
+    outputPaths: z
+      .array(path)
+      .max(32)
+      .refine((values) => new Set(values).size === values.length),
+    timeoutMs: z.number().int().min(1).max(3_600_000),
+    mcpGrants: mcpGrantsSchema.optional(),
+    workspaceArchive: hostPath.optional(),
+    workspaceMaxTotalBytes: z.number().int().min(1).max(MAX_WORKSPACE_TOTAL_BYTES).optional(),
+    workspaceMaxEntries: z.number().int().min(1).max(MAX_WORKSPACE_ENTRIES).optional(),
+    agentSession: sessionId.optional(),
+  })
+  .superRefine((request, context) => {
+    if (
+      request.workspaceArchive === undefined &&
+      (request.workspaceMaxTotalBytes !== undefined || request.workspaceMaxEntries !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["workspaceArchive"],
+        message: "Workspace budgets require a workspace archive",
+      });
+    }
+  });
 
 export const TaskEventSchema = z.discriminatedUnion("kind", [
   z.strictObject({
@@ -88,6 +123,7 @@ const failure = z.strictObject({
     "timed_out",
     "backpressure",
     "sandbox",
+    "workspace",
     "host_io",
     "model_tls",
     "model_timeout",
@@ -110,6 +146,7 @@ const result = z.discriminatedUnion("status", [
     status: z.literal("succeeded"),
     cleanup: z.literal("confirmed"),
     artifacts: files(32),
+    agentSession: sessionId.optional(),
   }),
   z.strictObject({ status: z.literal("failed"), cleanup: CleanupStatusSchema, error: failure }),
   z.strictObject({ status: z.literal("cancelled"), cleanup: CleanupStatusSchema, error: failure }),

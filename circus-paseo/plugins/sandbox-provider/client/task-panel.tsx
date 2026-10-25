@@ -4,7 +4,7 @@ import { usePaseo, useTabState, type PluginWorkspacePanelProps } from "@getpaseo
 import { ScrollView, SettingsAction, SettingsSection, TextInput } from "@getpaseo/plugin/client/ui";
 import {
   SANDBOX_PROVIDER_SELECTION,
-  SINGLE_TASK_NOTICE,
+  SANDBOX_SESSION_NOTICE,
   inputFileBytes,
   type InputFile,
 } from "../shared/task.js";
@@ -101,7 +101,7 @@ export function TaskPanel({
   }, [created, host.id, navigation, workspaceId]);
   return (
     <ScrollView contentContainerStyle={styles.content}>
-      <Text style={styles.muted}>{SINGLE_TASK_NOTICE}</Text>
+      <Text style={styles.muted}>{SANDBOX_SESSION_NOTICE}</Text>
       <SettingsSection title="Task">
         <TextInput
           accessibilityLabel="Sandbox prompt"

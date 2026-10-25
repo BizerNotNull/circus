@@ -138,6 +138,9 @@ test("saves a usable provider without storing a credential in config, argv, or s
   expect(persisted.daemon.listen).toBe("127.0.0.1:19001");
   expect(persisted.agents.providers.codex.enabled).toBe(false);
   expect(persisted.agents.providers.sandbox.command[0]).toMatch(/circus-stdio-bridge$/);
+  expect(persisted.agents.providers.sandbox.env.CIRCUS_SANDBOX_STATE_DIR).toBe(
+    join(f.home, "circus/sandbox-state"),
+  );
   const runnerPath = persisted.agents.providers.sandbox.env.CIRCUS_RUNNER_CONFIG;
   const runner = JSON.parse(await readFile(runnerPath, "utf8"));
   expect(runner.agentImage).toBe(`sha256:${"a".repeat(64)}`);
@@ -145,7 +148,8 @@ test("saves a usable provider without storing a credential in config, argv, or s
   expect(
     f.secrets.get(`${runner.model.apiKeyKeychain.service}:${runner.model.apiKeyKeychain.account}`),
   ).toBe(model.apiKey);
-  expect((await stat(runnerPath)).mode & 0o777).toBe(0o600);
+  // Windows stat mode bits do not model ACLs; the credential stays in Keychain.
+  if (process.platform !== "win32") expect((await stat(runnerPath)).mode & 0o777).toBe(0o600);
   expect(
     JSON.stringify([
       persisted,

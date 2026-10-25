@@ -304,23 +304,7 @@ pub(crate) fn report_from_any(runtime: Option<String>, spec: Option<&Any>) -> Ho
         Some(true) => Some(vec!["no-new-privileges".to_string()]),
         _ => None,
     };
-    let namespaces = value
-        .pointer("/linux/namespaces")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("type").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-        });
-    report.network_mode = namespaces.map(|items| {
-        if items.contains(&"network") {
-            "private"
-        } else {
-            "host"
-        }
-        .to_string()
-    });
+    report.network_mode = network_mode(&value).map(str::to_string);
     if let Some(mounts) = value.get("mounts").and_then(Value::as_array) {
         report.bind_count = Some(
             mounts
@@ -376,6 +360,44 @@ fn empty_capabilities(capabilities: Option<&Value>) -> bool {
             .and_then(Value::as_array)
             .is_none_or(|items| items.is_empty())
     })
+}
+
+/// This adapter installs no CNI or OCI hooks. A pathless network namespace is
+/// fresh and unconfigured, not an inherited or externally joined namespace.
+/// Host-privileged changes after creation are outside this inspected-spec report.
+fn network_mode(value: &Value) -> Option<&'static str> {
+    let namespaces = value.pointer("/linux/namespaces")?.as_array()?;
+    let mut network = None;
+    for namespace in namespaces {
+        let kind = namespace.get("type")?.as_str()?;
+        if kind.is_empty() {
+            return None;
+        }
+        if kind == "network" {
+            if network.is_some() {
+                return None;
+            }
+            network = Some(namespace);
+        }
+    }
+    let Some(network) = network else {
+        return Some("host");
+    };
+    match network.get("path") {
+        Some(Value::String(path)) if !path.is_empty() => Some("private"),
+        Some(_) => None,
+        None => {
+            // Any hook can configure networking; executable names are not proof.
+            let no_hooks = match value.get("hooks") {
+                None => true,
+                Some(Value::Object(hooks)) => hooks
+                    .values()
+                    .all(|hooks| hooks.as_array().is_some_and(Vec::is_empty)),
+                Some(_) => false,
+            };
+            no_hooks.then_some("none")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -446,7 +468,7 @@ mod tests {
         let report = report_from_any(Some("io.containerd.runc.v2".to_string()), Some(&any));
         assert_eq!(report.runtime.as_deref(), Some("io.containerd.runc.v2"));
         assert_eq!(report.readonly_root, Some(true));
-        assert_eq!(report.network_mode.as_deref(), Some("private"));
+        assert_eq!(report.network_mode.as_deref(), Some("none"));
         assert_eq!(report.cap_drop, Some(vec!["ALL".to_string()]));
         assert_eq!(
             report.security_opt,
@@ -459,6 +481,50 @@ mod tests {
         let tmpfs = report.tmpfs.unwrap();
         assert_eq!(tmpfs.len(), 1);
         assert!(tmpfs.contains_key("/workspace"));
+    }
+
+    #[test]
+    fn network_report_never_calls_joined_or_unknown_namespaces_offline() {
+        let report =
+            |value: Value| report_from_any(None, Some(&any(SPEC_TYPE_URL, &value))).network_mode;
+        assert_eq!(
+            report(json!({"linux":{"namespaces":[{"type":"network"}]}})).as_deref(),
+            Some("none")
+        );
+        assert_eq!(
+            report(json!({"linux":{"namespaces":[{"type":"network","path":"/run/netns/joined"}]}}))
+                .as_deref(),
+            Some("private")
+        );
+        assert_eq!(
+            report(json!({"linux":{"namespaces":[{"type":"pid"}]}})).as_deref(),
+            Some("host")
+        );
+        for namespaces in [
+            Value::Null,
+            json!({}),
+            json!([null]),
+            json!([{}]),
+            json!([{"type":null}]),
+            json!([{"type":""},{"type":"network"}]),
+            json!([{"type":"network"},{"type":"network"}]),
+            json!([{"type":"network","path":null}]),
+            json!([{"type":"network","path":""}]),
+            json!([{"type":"network","path":12}]),
+        ] {
+            assert_eq!(report(json!({"linux":{"namespaces":namespaces}})), None);
+        }
+        for hooks in [
+            Value::Null,
+            json!([]),
+            json!({"createRuntime":null}),
+            json!({"createRuntime":[{"path":"/arbitrary-hook"}]}),
+        ] {
+            assert_eq!(
+                report(json!({"linux":{"namespaces":[{"type":"network"}]},"hooks":hooks})),
+                None
+            );
+        }
     }
 
     #[test]

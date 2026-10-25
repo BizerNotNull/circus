@@ -34,6 +34,8 @@ pub async fn serve(
         return Err("invalid_state");
     };
     let grants = request.mcp_grants.clone();
+    let include_agent_session =
+        request.workspace_archive.is_some() || request.agent_session.is_some();
     let task = runner
         .start_with_mcp(request.into_task()?, grants)
         .map_err(|_| "invalid_request")?;
@@ -79,7 +81,8 @@ pub async fn serve(
         .as_ref()
         .err()
         .and_then(|failure| failure.cleanup.clone());
-    let (mut result, mut cleanup) = crate::outcome::present(outcome.as_ref());
+    let (mut result, mut cleanup) =
+        crate::outcome::present(outcome.as_ref(), include_agent_session);
     let after_retry = crate::outcome::after_cleanup_retry(outcome.as_ref());
     if disconnected && outcome.is_ok() {
         result = FinalResult::Cancelled {

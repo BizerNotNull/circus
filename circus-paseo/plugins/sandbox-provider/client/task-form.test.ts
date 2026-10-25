@@ -1,5 +1,9 @@
 import { expect, test } from "vitest";
 import { openTaskForm } from "./task-form.js";
+import {
+  DEFAULT_WORKSPACE_MAX_ENTRIES,
+  DEFAULT_WORKSPACE_MAX_TOTAL_BYTES,
+} from "../shared/task.js";
 
 test("MCP access requires explicit tool selection and clearing removes every grant", async () => {
   const submitted: unknown[] = [];
@@ -50,6 +54,8 @@ test("creates a task using reviewed files, output paths and deadline", async () 
         outputPaths: ["answer.py", "result.txt"],
         timeoutMs: 300_000,
         mcpGrants: [],
+        workspaceMaxTotalBytes: DEFAULT_WORKSPACE_MAX_TOTAL_BYTES,
+        workspaceMaxEntries: DEFAULT_WORKSPACE_MAX_ENTRIES,
       },
     },
   ]);

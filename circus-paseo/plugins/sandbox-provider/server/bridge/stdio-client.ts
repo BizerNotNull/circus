@@ -12,6 +12,7 @@ import {
   MAX_FRAME_BYTES,
   ServerFrameSchema,
   TaskRequestSchema,
+  isAbsoluteHostPath,
   type CircusTaskEvent,
   type CleanupStatus,
   type ClientFrame,
@@ -26,6 +27,8 @@ export interface CircusClientConfig {
   executable: string;
   configFile: string;
   env: Record<string, string>;
+  /** Host state directory for workspace archives; never sent to the bridge. */
+  stateDir: string;
   shutdownTimeoutMs?: number;
 }
 export interface CircusTaskRequest {
@@ -34,6 +37,10 @@ export interface CircusTaskRequest {
   outputPaths: string[];
   timeoutMs: number;
   mcpGrants?: McpGrant[];
+  workspaceArchive?: string;
+  workspaceMaxTotalBytes?: number;
+  workspaceMaxEntries?: number;
+  agentSession?: string;
 }
 export type CircusTaskResult =
   | Exclude<WireResult, { status: "succeeded" }>
@@ -41,6 +48,7 @@ export type CircusTaskResult =
       status: "succeeded";
       cleanup: "confirmed";
       artifacts: Record<string, Uint8Array>;
+      agentSession?: string;
     };
 export interface CircusTask {
   readonly id: string;
@@ -57,6 +65,7 @@ const configSchema = z.strictObject({
     .refine((path) => !/\.(cmd|bat)$/i.test(path)),
   configFile: z.string().refine(isAbsolute),
   env: z.record(z.string(), z.string()),
+  stateDir: z.string().refine(isAbsoluteHostPath),
   shutdownTimeoutMs: z.number().int().min(1).max(300_000).default(120_000),
 });
 
