@@ -266,7 +266,7 @@ jobs:
 
       - name: Upload lcov artifact
         if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f59558db74 # v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: circus-sandbox-lcov
           path: ${{ runner.temp }}/circus-sandbox-lcov.info
