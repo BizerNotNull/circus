@@ -173,6 +173,30 @@ test("saves a usable provider without storing a credential in config, argv, or s
   expect(f.reloads()).toBe(1);
 });
 
+test("prepares a first-run runtime while the model fields are still blank", async () => {
+  const f = await fixture();
+  const source = join(f.home, "source");
+  await mkdir(join(source, "circus-sandbox/images/codex"), { recursive: true });
+  await writeFile(join(source, "circus-sandbox/images/codex/Dockerfile"), "");
+  await f.service.selectSource(source);
+  await expect(
+    f.service.prepare({ agent: "codex", baseUrl: "", model: "", preset: "compact" }),
+  ).resolves.toMatchObject({ ok: true });
+});
+
+test("resaves an existing Claude Code configuration", async () => {
+  const f = await fixture();
+  const claudeModel = { ...model, agent: "claude-code" as const };
+  await f.service.save(claudeModel);
+  const reloaded = createSandboxSetup(f.dependencies);
+  await expect(
+    reloaded.save({ ...claudeModel, apiKey: "", model: "updated-claude-model" }),
+  ).resolves.toMatchObject({ ok: true });
+  const runner = JSON.parse(await readFile(join(f.home, "circus/runner.json"), "utf8"));
+  expect(runner.agent).toBe("claude-code");
+  expect(runner.model.model).toBe("updated-claude-model");
+});
+
 test("reloads saved settings and uses the stored credential for model checks and updates", async () => {
   const f = await fixture();
   await f.service.save(model);

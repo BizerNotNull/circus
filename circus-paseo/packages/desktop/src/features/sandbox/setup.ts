@@ -92,6 +92,12 @@ const runnerSchema = z.strictObject({
   }),
   mcpConnections: z.array(connectionSchema).optional(),
 });
+const preparationInputSchema = z
+  .object({
+    agent: z.enum(["codex", "claude-code"]).optional(),
+  })
+  .passthrough();
+
 type RunnerConfig = z.infer<typeof runnerSchema>;
 const presets = {
   compact: {
@@ -159,10 +165,6 @@ function requireRuntime(environment: SandboxEnvironment) {
 }
 
 function selectResources(preset: SandboxSetupInput["preset"], config: RunnerConfig | null) {
-  if (config?.agent && config.agent !== "codex")
-    throw new SandboxSetupError(
-      "This setup currently manages Codex only. Your existing agent configuration has not been changed.",
-    );
   if (preset !== "custom") return presets[preset];
   if (!config) throw new SandboxSetupError("Choose a resource preset for the new environment.");
   return config.resources;
@@ -344,7 +346,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       if (raw === undefined) {
         agent = activeAgent ?? (await current()).config?.agent ?? "codex";
       } else {
-        agent = sandboxSetupInputSchema.parse(raw).agent ?? "codex";
+        agent = preparationInputSchema.parse(raw).agent ?? "codex";
       }
       activeAgent = agent;
       const { environment } = await inspect(agent);
