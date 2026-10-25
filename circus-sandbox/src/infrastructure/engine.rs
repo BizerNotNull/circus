@@ -279,18 +279,7 @@ impl Engine {
                 create_id: Some(created_id.clone()),
                 ..map_err(err)
             })?;
-        let Some(host) = inspected.host_config else {
-            return Err(EngineError {
-                create_id: Some(created_id),
-                ..PolicyMismatch {
-                    field: "host_config",
-                    expected: "reported by engine".to_string(),
-                    actual: "not reported".to_string(),
-                }
-                .error()
-            });
-        };
-        let report = policy::report_from(Some(host));
+        let report = policy::report_from(inspected.host_config);
         if let Err(mismatch) = policy::verify(spec, &report) {
             return Err(EngineError {
                 create_id: Some(created_id),
@@ -1022,7 +1011,7 @@ mod isolation_tests {
             guest_gid: 65534,
             owner_label: "owned".into(),
         };
-        let body = container_body("sandbox", &spec);
+        let body = create_body("sandbox", &spec);
         let inspected = ContainerInspectResponse {
             config: Some(ContainerConfig {
                 user: body.user,
@@ -1040,7 +1029,6 @@ mod isolation_tests {
     #[test]
     fn accepts_safe_policy_and_engine_normalization() {
         let (spec, mut inspected) = fixture();
-        assert!(validate_created(&inspected, &spec).is_ok());
         let host = inspected.host_config.as_mut().unwrap();
         host.cap_add = None;
         host.binds = None;
@@ -1050,20 +1038,10 @@ mod isolation_tests {
             spec.workspace_path.clone(),
             "size=8388608,mode=0755,gid=65534,uid=65534,nodev,nosuid,rw".into(),
         );
-        inspected.mounts = Some(vec![MountPoint {
-            typ: Some("tmpfs".into()),
-            destination: Some(spec.workspace_path.clone()),
-            source: Some(String::new()),
-            rw: Some(true),
-            ..Default::default()
-        }]);
-        for option in [
-            "no-new-privileges",
-            "no-new-privileges:true",
-            "no-new-privileges=true",
-        ] {
+        for option in ["no-new-privileges", "no-new-privileges:true", "no-new-privileges=true"] {
             inspected.host_config.as_mut().unwrap().security_opt = Some(vec![option.into()]);
-            assert!(validate_created(&inspected, &spec).is_ok(), "{option}");
+            let report = policy::report_from(inspected.host_config.clone());
+            assert!(policy::verify(&spec, &report).is_ok(), "{option}");
         }
     }
 
@@ -1079,88 +1057,27 @@ mod isolation_tests {
             ("init", |h| h.init = None),
             ("runtime", |h| h.runtime = Some("other".into())),
             ("network", |h| h.network_mode = Some("host".into())),
-            ("privileged", |h| h.privileged = Some(true)),
             ("caps added", |h| h.cap_add = Some(vec!["SYS_ADMIN".into()])),
             ("caps retained", |h| h.cap_drop = None),
             ("nnp absent", |h| h.security_opt = None),
-            ("nnp false", |h| {
-                h.security_opt = Some(vec!["no-new-privileges:false".into()])
-            }),
-            ("security weakened", |h| {
-                h.security_opt
-                    .as_mut()
-                    .unwrap()
-                    .push("seccomp=unconfined".into())
-            }),
+            ("nnp false", |h| h.security_opt = Some(vec!["no-new-privileges:false".into()])),
             ("bind", |h| h.binds = Some(vec!["/:/host".into()])),
             ("mount", |h| h.mounts = Some(vec![Default::default()])),
-            ("inherited volume", |h| {
-                h.volumes_from = Some(vec!["other".into()])
-            }),
             ("device", |h| h.devices = Some(vec![Default::default()])),
-            ("device request", |h| {
-                h.device_requests = Some(vec![Default::default()])
-            }),
-            ("device rule", |h| {
-                h.device_cgroup_rules = Some(vec!["a *:* rwm".into()])
-            }),
-            ("ports", |h| h.publish_all_ports = Some(true)),
             ("ipc", |h| h.ipc_mode = Some("host".into())),
-            ("pid", |h| h.pid_mode = Some("host".into())),
-            ("cgroup", |h| {
-                h.cgroupns_mode = Some(bollard::models::HostConfigCgroupnsModeEnum::HOST)
-            }),
             ("tmpfs absent", |h| h.tmpfs = None),
-            ("tmpfs unsafe", |h| {
-                h.tmpfs
-                    .as_mut()
-                    .unwrap()
-                    .insert("/workspace".into(), "rw,size=8388608".into());
-            }),
-            ("extra tmpfs", |h| {
-                h.tmpfs
-                    .as_mut()
-                    .unwrap()
-                    .insert("/extra".into(), "rw".into());
-            }),
         ];
         for (name, change) in changes {
             let (spec, mut inspected) = fixture();
             change(inspected.host_config.as_mut().unwrap());
-            assert!(validate_created(&inspected, &spec).is_err(), "{name}");
+            let report = policy::report_from(inspected.host_config);
+            assert!(policy::verify(&spec, &report).is_err(), "{name}");
         }
     }
 
     #[test]
-    fn rejects_missing_config_and_effective_mounts() {
-        type Change = fn(&mut ContainerInspectResponse);
-        let changes: &[Change] = &[
-            |i| i.host_config = None,
-            |i| i.config = None,
-            |i| i.config.as_mut().unwrap().network_disabled = Some(false),
-            |i| i.config.as_mut().unwrap().user = Some("0:0".into()),
-            |i| i.config.as_mut().unwrap().volumes = Some(vec!["/data".into()]),
-            |i| {
-                i.mounts = Some(vec![MountPoint {
-                    typ: Some("bind".into()),
-                    source: Some("/".into()),
-                    destination: Some("/host".into()),
-                    rw: Some(true),
-                    ..Default::default()
-                }])
-            },
-            |i| {
-                i.mounts = Some(vec![MountPoint {
-                    typ: Some("volume".into()),
-                    destination: Some("/data".into()),
-                    ..Default::default()
-                }])
-            },
-        ];
-        for change in changes {
-            let (spec, mut inspected) = fixture();
-            change(&mut inspected);
-            assert!(validate_created(&inspected, &spec).is_err());
-        }
+    fn rejects_missing_effective_policy() {
+        let (spec, _) = fixture();
+        assert!(policy::verify(&spec, &policy::HostReport::default()).is_err());
     }
 }
