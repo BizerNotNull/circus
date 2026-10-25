@@ -10,11 +10,36 @@ const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) struct Events {
     sender: mpsc::Sender<TaskEvent>,
     bytes: usize,
+    session: Option<String>,
 }
 
 impl Events {
     pub(crate) fn new(sender: mpsc::Sender<TaskEvent>) -> Self {
-        Self { sender, bytes: 0 }
+        Self {
+            sender,
+            bytes: 0,
+            session: None,
+        }
+    }
+
+    /// Actual native agent session reported by the controller, if any.
+    pub(crate) fn agent_session(&self) -> Option<&str> {
+        self.session.as_deref()
+    }
+
+    fn set_agent_session(&mut self, id: String) -> Result<(), TaskError> {
+        if !crate::config::valid_session_id(&id) {
+            return Err(TaskError::Protocol);
+        }
+        if let Some(existing) = &self.session {
+            return if existing == &id {
+                Ok(())
+            } else {
+                Err(TaskError::Protocol)
+            };
+        }
+        self.session = Some(id);
+        Ok(())
     }
 
     pub(crate) fn send(&mut self, event: TaskEvent) -> Result<(), TaskError> {
@@ -56,6 +81,10 @@ pub(crate) enum WireEvent {
         text: String,
     },
     TurnCompleted,
+    /// Actual native thread id, reported once after start or resume.
+    AgentSession {
+        id: String,
+    },
     Failure {
         code: FailureCode,
         status: Option<u16>,
@@ -104,6 +133,7 @@ impl WireEvent {
             })?,
             Self::ToolOutput { id, text } => events.send(TaskEvent::ToolOutput { id, text })?,
             Self::TurnCompleted => return Ok(true),
+            Self::AgentSession { id } => events.set_agent_session(id)?,
             Self::Failure { code, status } => {
                 return Err(match code {
                     FailureCode::Tls => ModelFailure::Tls.into(),

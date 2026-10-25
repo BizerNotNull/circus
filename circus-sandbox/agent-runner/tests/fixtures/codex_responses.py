@@ -38,6 +38,11 @@ assert Path('answer.py').read_text() == 'def add(a, b): return a - b\\n'
 Path('answer.py').write_text('def add(a, b): return a + b\\n')
 exec(Path('answer.py').read_text())
 assert add(20, 22) == 42
+persisted = Path('persisted.txt')
+if persisted.exists():
+    assert persisted.read_text() == 'durable\\n', 'durable workspace was not restored'
+else:
+    persisted.write_text('durable\\n')
 Path('result.txt').write_text('42\\n')
 print('tests passed')
 """

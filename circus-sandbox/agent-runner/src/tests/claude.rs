@@ -42,6 +42,8 @@ async fn claude_cancel_and_timeout_revoke_requests_and_confirm_container_cleanup
             input_files: BTreeMap::new(),
             output_paths: vec![],
             timeout: Duration::from_secs(if cancel { 90 } else { 30 }),
+            workspace: None,
+            agent_session: None,
         };
         let controller = format!(
             "{}\nclass HangingMessages:\n def forward(self, body, emit):\n  import time\n  event('text', text='fixture request reached')\n  time.sleep(300)\nmain_claude_host(HangingMessages())\n",

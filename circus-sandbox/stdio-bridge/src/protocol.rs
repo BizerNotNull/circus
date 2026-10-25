@@ -124,6 +124,10 @@ impl TaskInput {
             input_files,
             output_paths: self.output_paths,
             timeout: Duration::from_millis(self.timeout_ms),
+            // The v1 stdio protocol remains single-turn: durable archives and
+            // native session resume are caller-only library features here.
+            workspace: None,
+            agent_session: None,
         })
     }
 }

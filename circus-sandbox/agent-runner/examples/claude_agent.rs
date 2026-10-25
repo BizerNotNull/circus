@@ -49,6 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )]),
         output_paths: vec!["answer.py".into(), "result.txt".into()],
         timeout: Duration::from_secs(180),
+        workspace: None,
+        agent_session: None,
     })?;
     while let Some(event) = task.next_event().await {
         // This example prints only trusted state and static event categories.

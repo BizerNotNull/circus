@@ -3,12 +3,12 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use circus_sandbox::{BackendConfig, ResourceLimits};
+use circus_sandbox::{BackendConfig, ResourceLimits, SnapshotBudget};
 
 use crate::runner::BRIDGE;
 use crate::{
     AgentRunner, AgentTask, ModelConfig, ModelFailure, RunnerConfig, TaskError, TaskEvent,
-    TaskOutcome, TaskPhase, TaskRequest, ToolPhase,
+    TaskFailure, TaskOutcome, TaskPhase, TaskRequest, TaskWorkspace, ToolPhase,
 };
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -51,6 +51,8 @@ fn request(marker: &str) -> TaskRequest {
         ]),
         output_paths: vec!["answer.py".into(), "result.txt".into(), "marker.txt".into()],
         timeout: Duration::from_secs(60),
+        workspace: None,
+        agent_session: None,
     }
 }
 
@@ -251,6 +253,88 @@ async fn cancellation_timeout_and_handle_drop_reap_owned_resources() -> Result {
             assert!(instance_absent(&id)?);
         }
         host_absent(pid.path())?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires explicit real Linux Docker and the pinned Codex image"]
+async fn sequential_tasks_restore_workspace_and_resume_the_native_codex_thread() -> Result {
+    let runner = runner()?;
+    let directory = tempfile::tempdir()?;
+    let archive = directory.path().join("workspace.archive");
+    let workspace = || TaskWorkspace {
+        archive: archive.clone(),
+        budget: SnapshotBudget::new(16 * 1024 * 1024, 2048).unwrap(),
+    };
+    let mut first = request("first");
+    first.workspace = Some(workspace());
+    first.output_paths.push("persisted.txt".into());
+    let task = runner.start_controller(first, fixture())?;
+    let (outcome, events) = collect(&task).await?;
+    let output = outcome
+        .as_ref()
+        .as_ref()
+        .map_err(|error| format!("{error:?}; fixture events: {events:?}"))?;
+    let session = output
+        .agent_session
+        .clone()
+        .ok_or("first task did not report a native agent session")?;
+    assert_eq!(output.artifacts["persisted.txt"], b"durable\n");
+    assert!(archive.is_file(), "workspace archive was not saved");
+
+    let mut second = request("second");
+    second.workspace = Some(workspace());
+    second.agent_session = Some(session.clone());
+    second.output_paths.push("persisted.txt".into());
+    let task = runner.start_controller(second, fixture())?;
+    let (outcome, events) = collect(&task).await?;
+    let output = outcome
+        .as_ref()
+        .as_ref()
+        .map_err(|error| format!("{error:?}; fixture events: {events:?}"))?;
+    // The fixture only succeeds when it finds the first turn's file and the
+    // second task resumed the same native thread instead of starting a new one.
+    assert_eq!(output.artifacts["persisted.txt"], b"durable\n");
+    assert_eq!(output.agent_session.as_deref(), Some(session.as_str()));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires explicit real Linux Docker and the pinned Codex image"]
+async fn workspace_archive_failures_are_typed_and_still_destroy_the_sandbox() -> Result {
+    let runner = runner()?;
+    let directory = tempfile::tempdir()?;
+    let budget = SnapshotBudget::new(1024 * 1024, 128).unwrap();
+    for (archive, expected) in [
+        (
+            directory.path().join("missing").join("workspace.archive"),
+            TaskPhase::Exporting,
+        ),
+        (directory.path().to_path_buf(), TaskPhase::Preparing),
+    ] {
+        let mut request = request("archive");
+        request.workspace = Some(TaskWorkspace { archive, budget });
+        let task = runner.start_controller(request, fixture())?;
+        let (outcome, events) = collect(&task).await?;
+        let TaskFailure {
+            error,
+            cleanup: None,
+        } = outcome.as_ref().as_ref().unwrap_err()
+        else {
+            return Err(format!("archive failure was not cleaned up: {outcome:?}").into());
+        };
+        assert!(
+            matches!(
+                error,
+                TaskError::Workspace {
+                    phase,
+                    task: None,
+                    ..
+                } if *phase == expected
+            ),
+            "{error:?}; fixture events: {events:?}"
+        );
     }
     Ok(())
 }

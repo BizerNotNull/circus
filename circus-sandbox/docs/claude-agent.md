@@ -71,7 +71,7 @@ cargo test --locked -p circus-agent-runner claude_cancel_and_timeout -- --ignore
 
 脚本对端要求真实 CLI 执行 Bash 工具：修改文件、运行 Python assertions，检查容器没有上游 key、Docker socket 与外部网络，再导出产物并独立 `docker inspect` 确认容器不存在。这证明真实 CLI、HTTPS Messages 传输、工具执行与清理链路，**不证明真实模型推理**；使用真实模型需另外提供有权限的服务配置。
 
-当前仅单任务，不实现 Claude 登录、Bedrock/Vertex/Foundry 认证、多轮恢复、订阅 OAuth 复用或跨进程持久化。MCP 的协议与授权范围以集成的 MCP 代理说明及实际测试为准。
+当前仅单任务，不实现 Claude 登录、Bedrock/Vertex/Foundry 认证、多轮恢复、订阅 OAuth 复用或跨进程持久化。Claude 以 `--no-session-persistence` 运行；传入 `TaskRequest.agent_session` 会在分配沙箱前返回 `Invalid`，宿主入口也会拒绝 `CIRCUS_RESUME_THREAD`，不会静默开始一个无关的新 turn。MCP 的协议与授权范围以集成的 MCP 代理说明及实际测试为准。
 
 集成 MCP 代理后，`test_claude_mcp_docker.py` 使用同一宿主工具代理验证真实 Claude CLI 的工具发现、授权调用、文件产物与清理。设置 `CIRCUS_CLAUDE_MCP_DOCKER=1`、`CIRCUS_BRIDGE_BINARY`（构建后的 stdio bridge 绝对路径）、`CIRCUS_CLAUDE_IMAGE` 与 `CIRCUS_DOCKER_ENDPOINT` 后显式运行。它使用本地 HTTPS MCP 服务和脚本化 Messages 对端，不声称真实 SaaS、OAuth 或真实模型已验证；代理会验证并丢弃 CLI 的追踪元数据，不向上游传递额外权限。
 
