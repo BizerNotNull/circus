@@ -133,8 +133,12 @@ class DockerMcpTests(unittest.TestCase):
             connection = service.config()
             del connection["headers"]
             connection["headersFile"] = str(headers)
-            config = {"version": 1, "dockerEndpoint": os.environ["CIRCUS_DOCKER_ENDPOINT"],
-                      "agentImage": os.environ["CIRCUS_AGENT_IMAGE"], "python": sys.executable,
+            config = {"version": 1,
+                      "backend": {"kind": "docker", "endpoint": os.environ["CIRCUS_DOCKER_ENDPOINT"],
+                                  "image": os.environ["CIRCUS_AGENT_IMAGE"], "runtime": "runc"},
+                      "image": {"platform": {"os": "linux", "architecture": "amd64"},
+                                "pullPolicy": "local-only", "prepareTimeoutMs": 30000},
+                      "python": sys.executable,
                       "resources": {"memoryBytes": 536870912, "cpuMillis": 1000, "maxProcesses": 128,
                                     "workspaceBytes": 134217728, "maxFileBytes": 2097152},
                       "model": {"baseUrl": os.environ["CIRCUS_MCP_MODEL_BASE_URL"] if real_model else service.base + "/v1",

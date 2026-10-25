@@ -25,10 +25,12 @@ pub fn present(outcome: &TaskOutcome, include_agent_session: bool) -> (FinalResu
                 Cleanup::Confirmed
             };
             let code = code(&failure.error);
-            let message = if code == "cancelled" {
-                "Agent task cancelled"
-            } else {
-                "Agent task failed; inspect the error code and cleanup status"
+            let message = match code {
+                "cancelled" => "Agent task cancelled",
+                "image_preparation" => {
+                    "Image preparation failed; check the selected daemon, image, platform, and pull policy"
+                }
+                _ => "Agent task failed; inspect the error code and cleanup status",
             };
             let error = Failure { code, message };
             let result = if code == "cancelled" {
@@ -72,6 +74,7 @@ fn code(error: &TaskError) -> &'static str {
         TaskError::Cancelled => "cancelled",
         TaskError::TimedOut => "timed_out",
         TaskError::EventBackpressure => "backpressure",
+        TaskError::ImagePreparation(_) => "image_preparation",
         TaskError::Sandbox { .. } => "sandbox",
         TaskError::HostIo(_) => "host_io",
         TaskError::Workspace { .. } => "workspace",
@@ -115,6 +118,36 @@ mod tests {
                 .unwrap()
                 .contains("agentSession")
         );
+    }
+
+    #[test]
+    fn image_preparation_failure_is_actionable_without_exposing_daemon_details() {
+        let outcome = Err(TaskFailure {
+            error: TaskError::ImagePreparation(
+                "registry rejected https://user:private-token@registry/private-sdk-body".into(),
+            ),
+            cleanup: None,
+        });
+        let (result, cleanup) = present(&outcome, false);
+        assert!(cleanup == Cleanup::Confirmed);
+        let json = sonic_rs::to_string(&result).unwrap();
+        assert!(matches!(
+            &result,
+            FinalResult::Failed {
+                error: Failure {
+                    code: "image_preparation",
+                    ..
+                },
+                ..
+            }
+        ));
+        for private in [
+            "private-token",
+            "registry/private-sdk-body",
+            "https://user:",
+        ] {
+            assert!(!json.contains(private));
+        }
     }
 
     #[test]

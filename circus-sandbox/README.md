@@ -138,6 +138,39 @@ Call `GitCheckout::cleanup().await` for observable, idempotent removal. `GitErro
 cargo run --locked --example resource_policy
 ```
 
+## Agent 任务的后端与镜像准备
+
+`circus-agent-runner` 的可信调用方在 `RunnerConfig.backend` 中显式选择后端；新增必填 Rust 字段
+`image_preparation: Option<ImagePreparation>`。迁移已有结构体初始化时，`None` 表示保留调用方传入的
+后端/镜像，不做运行器镜像准备（仍须满足后端本地镜像前置条件）；`Some(ImagePreparation { platform,
+timeout, pull_policy })` 显式请求任务内准备，连接与 image reference 仍只来自 `backend`。
+准备在任务拥有的 worker 内、创建沙箱之前执行；准备自身 timeout 与整个任务 deadline 共同约束，
+取消或期限中断准备后不会稍后继续 create。已进入 `Sandbox::create` 时仍等待归属结果并按既有生命周期清理，
+不能把取消确认冒充已销毁。
+
+[stdio bridge](docs/stdio-bridge.md) 的 JSON 虽仍为 `version: 1`，却是配置破坏性变更：
+旧平铺 Docker 字段必须迁移为 `backend: { kind: "docker", endpoint, image, runtime }`，
+或 `backend: { kind: "containerd", socket, namespace, image, runtime, snapshotter }`，
+并增加 `image: { platform: { os: "linux", architecture, variant? }, pullPolicy, prepareTimeoutMs }`。
+这里只展示字段形状，不是可直接复制的 JSON；完整有效样例见桥接文档。仅接受 `runc` 和 containerd 的
+`overlayfs`；未知/混合字段、旧别名、未编译的后端或不支持的组合在 `ready` 与模型/MCP 凭据读取前拒绝。
+bridge 总是显式启用准备；`ready` 不代表镜像已准备或 daemon 已可用。
+
+`local-only` 默认只用所选 daemon/namespace 的本地镜像；`if-missing` 仅缺失时允许一次无认证拉取，
+没有隐式 registry 凭据、重试或后端回退。成功后创建使用不可变 Docker image ID 或同 namespace 的
+containerd digest-qualified alias，不重新使用可变 tag。containerd local-only 仍可能写 alias metadata；
+冲突 alias 不覆盖，外部删除不被阻止，共享 cache/daemon transfer 可能在取消或失败后继续改变，
+不承诺 cache 回滚或删除。底层 `Sandbox::create` 本身仍不自动拉取。
+
+Linux containerd 路径须安装 `protobuf-compiler`，使用可访问的本地 Unix socket、显式 namespace、
+`runc`、`overlayfs` 和支持请求资源限制的 cgroup；镜像须适配平台并包含所选 CLI 与 Python 3。
+构建 bridge 使用 `cargo build --locked --features containerd -p circus-stdio-bridge`；feature 测试使用
+`cargo test --locked --features containerd -p circus-agent-runner -p circus-stdio-bridge --all-targets`。
+后者的自有 Unix 协议对端无需 root 或真实 daemon；真实 Linux daemon 前置条件与集成命令见
+[containerd 文档](docs/containerd-runc.md)。桌面设置仍仅管理 Docker/macOS Keychain，明确拒绝且不改写
+已有 containerd 配置，不增加 containerd 设置向导。脚本化 HTTPS peer 或固定 CLI 的离线启动不等于实际模型推理、
+真实 MCP 工具调用或 Kubernetes/其他 agent 的离线端到端证据；实际 smoke 结果只记在对应 PR。
+
 ## Linux Docker + runc
 
 可手动构建的 [Codex Agent 镜像](images/codex/README.md) 固定 CLI 与 Node 版本，包含 Python 3、Git、ripgrep，并提供可写 HOME/缓存/临时目录的启动脚本。镜像验收沿用当前禁网策略，范围是工具和 Codex stdio 离线启动。
@@ -345,6 +378,20 @@ npm --prefix circus-sandbox/qa run architecture
 - containerd 从创建时选定的同一份 image config 读取 `config.Env`，持久到容器 OCI process spec；初始化进程、`ProcessSession` 与一次性 `exec` 继承镜像环境，不复制宿主环境。交互请求的显式环境按变量名覆盖镜像值，固定 `PATH` / `LANG` 只在缺失时补齐；非法环境元数据失败关闭。
 - guest uid/gid、workspace 工作目录与初始化 argv 仍由 lifecycle 拥有，不采用镜像的 `USER`、`WORKDIR` 或 `ENTRYPOINT` / `CMD`；本修复不改变隔离策略或 agent/Paseo 接入范围。
 - `containerd_process` 新增默认忽略的真实回归：以官方 `python:3.12-slim` 的 `PYTHON_VERSION` 对照实际解释器版本，覆盖交互进程与一次性 exec 继承、含 `=` 的显式覆盖、宿主 opt-in 标志不泄漏及输出/退出码；输出断言前显式清理。fixture 要求与运行入口见 [containerd 文档](docs/containerd-runc.md#测试)，新增用例未在本次编辑中执行。
+
+### 未发布：Agent 后端配置与任务内镜像准备
+
+- stdio bridge 配置切换为严格 tagged `backend`（Docker 或 containerd）和独立必填 `image` 策略；
+  `version: 1` 不代表旧平铺配置仍兼容，须按 [迁移说明](docs/stdio-bridge.md#宿主配置) 更新，无旧别名。
+- `RunnerConfig` 新增 `image_preparation: Option<ImagePreparation>`：已有调用方显式填 `None` 可保持自行准备的镜像，
+  `Some` 在任务拥有的 worker 内按平台/策略/期限准备；任务取消与 deadline 中断准备后禁止后续创建。
+- 创建使用已准备的 Docker image ID/containerd digest-qualified alias；仅缺失时可选一次无认证拉取，
+  不回退、不重试、不删除共享 cache，取消/失败也不保证 daemon transfer/cache 回滚。
+- containerd bridge 需要 Linux 本地 daemon、显式 socket/namespace、`runc`、`overlayfs` 和 `containerd` feature；
+  桌面设置保持 Docker/macOS Keychain-only，拒绝改写 containerd 配置。
+- 现有 containerd CI 仅在 `containerd_sandbox` 矩阵行、安装 protobuf 后以非特权 runner 执行
+  `cargo test --locked --features containerd -p circus-agent-runner -p circus-stdio-bridge --all-targets`；
+  不替代真实 daemon 套件，也不声明实际模型、MCP、Kubernetes 或其他 agent smoke 已通过。
 
 ### 未发布：Kubernetes 交互进程
 
