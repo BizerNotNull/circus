@@ -10,6 +10,7 @@ import {
 } from "../shared/task.js";
 import { openTaskForm, taskFormDraftSchema, type TaskFormDraft } from "./task-form.js";
 import { chooseFiles } from "./web.js";
+import { ToolPermissions } from "./tool-permissions.js";
 
 const defaultDraft: TaskFormDraft = {
   prompt: "",
@@ -18,6 +19,7 @@ const defaultDraft: TaskFormDraft = {
   filePath: "",
   fileText: "",
   files: [],
+  mcpGrants: [],
 };
 
 export function TaskPanel({
@@ -166,6 +168,15 @@ export function TaskPanel({
           editable={!pending}
           onChangeText={controls.outputs}
           style={styles.input}
+        />
+      </SettingsSection>
+      <SettingsSection title="Tool permissions">
+        <ToolPermissions
+          hostId={host.id}
+          theme={theme}
+          grants={state.mcpGrants}
+          disabled={pending}
+          onChange={form.setMcpGrants}
         />
       </SettingsSection>
       {state.submission.status === "failed" ? (

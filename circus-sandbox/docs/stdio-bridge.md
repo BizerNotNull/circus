@@ -19,6 +19,10 @@ cargo build --locked -p circus-stdio-bridge
 启动参数固定为 `circus-stdio-bridge --config /absolute/config.json`。配置只由可信宿主准备，
 不能从任务 prompt、文件内容、providerOptions 或远端任务消息中生成。
 
+顶层 `agent` 可选 `codex`（默认）或 `claude-code`。镜像须匹配所选 CLI，模型服务须分别支持
+Responses 或 Anthropic Messages；不能把 Codex 网关配置直接当作 Claude 已可用。
+Claude 的镜像与运行契约见 [Claude Code 适配器](claude-agent.md)。
+
 ```json
 {
   "version": 1,
@@ -44,8 +48,19 @@ cargo build --locked -p circus-stdio-bridge
 `caFile` 可省略，省略时使用宿主 Python 的证书信任。配置最多 64 KiB；key 文件最多 4098 字节，
 去掉末尾换行后交给运行器校验。配置、key、CA 和 Python 使用绝对路径；binary 由 Node 显式指定
 绝对路径且拒绝 `.cmd` / `.bat`。Node 只传调用方提供的环境，不自动继承 `process.env`。
+配置与 key 必须是普通文件，拒绝末端符号链接；Unix 使用非阻塞打开，拒绝 FIFO 等特殊节点。
 key 文件应只允许运行 daemon 的宿主账户读取。Node 不读取 key，Rust 不把真实 key 放入协议、
 沙箱环境或工作区。stdout 仅输出协议；stderr 只输出静态诊断，不输出配置、上游正文或错误链。
+
+macOS 可用 `"apiKeyKeychain": { "service": "circus", "account": "model" }` 替代
+`apiKeyFile`，两者必须且只能选一个。桌面设置将真实密钥保存在本机 Keychain，JSON 只记录引用。
+Rust 通过固定 `/usr/bin/security` 读取，输出有容量限制，10 秒内未完成则终止并等待子进程；
+查询失败不输出平台诊断，也不回退到环境变量或明文文件。其他平台拒绝 Keychain 引用，仍可由
+可信宿主显式配置凭证文件。本机特权进程与已经控制 daemon 账户的攻击者不在此凭证隔离边界内。
+
+可选 `mcpConnections` 配置宿主 HTTPS 工具服务、凭证引用与参数策略；任务仅以
+`mcpGrants` 引用连接 ID 和工具名。省略授权不会自动开放任何工具，完整范围见
+[MCP 凭据代理](mcp-broker.md)。
 
 ## TypeScript 调用契约
 
@@ -85,18 +100,18 @@ try {
 未知版本、空帧、无效 UTF-8、超限帧、EOF 中的半帧和非法消息状态。
 TypeScript 的严格 Zod schema 位于 `bridge/protocol.ts`，Rust 模型位于 `stdio-bridge/src/protocol.rs`。
 
-| 方向        | type             | 字段与语义                                                             |
-| ----------- | ---------------- | ---------------------------------------------------------------------- |
-| Rust → Node | `ready`          | `maxFrameBytes: 12582912`，配置完成，尚未创建任务                      |
-| Node → Rust | `start`          | `requestId`、`request: { prompt, inputFiles, outputPaths, timeoutMs }` |
-| Rust → Node | `accepted`       | `requestId`、Rust 分配的 `taskId`                                      |
-| Rust → Node | `event`          | `requestId`、`taskId`、从 1 连续递增的 `seq`、`event`                  |
-| Node → Rust | `cancel`         | `requestId`、`taskId`，只作用于本连接任务                              |
-| Rust → Node | `cancel_ack`     | 相同关联字段；仅确认请求，未确认回收                                   |
-| Rust → Node | `result`         | 相同关联字段和 `result`，一次且在全部事件之后                          |
-| Node → Rust | `cleanup_retry`  | 相同关联字段，仅任务结束后可调用                                       |
-| Rust → Node | `cleanup_result` | 相同关联字段、`cleanup`                                                |
-| Rust → Node | `error`          | `code`、静态 `message`，连接失败并退出非零                             |
+| 方向        | type             | 字段与语义                                                                         |
+| ----------- | ---------------- | ---------------------------------------------------------------------------------- |
+| Rust → Node | `ready`          | `maxFrameBytes: 12582912`，配置完成，尚未创建任务                                  |
+| Node → Rust | `start`          | `requestId`、`request: { prompt, inputFiles, outputPaths, timeoutMs, mcpGrants? }` |
+| Rust → Node | `accepted`       | `requestId`、Rust 分配的 `taskId`                                                  |
+| Rust → Node | `event`          | `requestId`、`taskId`、从 1 连续递增的 `seq`、`event`                              |
+| Node → Rust | `cancel`         | `requestId`、`taskId`，只作用于本连接任务                                          |
+| Rust → Node | `cancel_ack`     | 相同关联字段；仅确认请求，未确认回收                                               |
+| Rust → Node | `result`         | 相同关联字段和 `result`，一次且在全部事件之后                                      |
+| Node → Rust | `cleanup_retry`  | 相同关联字段，仅任务结束后可调用                                                   |
+| Rust → Node | `cleanup_result` | 相同关联字段、`cleanup`                                                            |
+| Rust → Node | `error`          | `code`、静态 `message`，连接失败并退出非零                                         |
 
 Wire 文件使用 `{ "path": "relative/name", "data": "canonical padded base64" }` 数组，
 拒绝重复路径。请求没有命令、宿主 cwd、模型端点、环境、凭证或可复用沙箱标识字段。

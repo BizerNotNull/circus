@@ -12,6 +12,7 @@ test("accepts only explicit project-relative files and bounded task settings", (
     inputFiles: [{ path: "src/answer.py", text: "answer = 42\n" }],
     outputPaths: ["result.txt"],
     timeoutMs: 60_000,
+    mcpGrants: [],
   });
   for (const path of [
     "/etc/passwd",
@@ -37,4 +38,18 @@ test("accepts only explicit project-relative files and bounded task settings", (
   expect(taskOptionsSchema.safeParse({ outputPaths: ["a", "a"] }).success).toBe(false);
   expect(taskOptionsSchema.safeParse({ timeoutMs: 3_600_001 }).success).toBe(false);
   expect(taskOptionsSchema.safeParse({ cwd: "/home/user" }).success).toBe(false);
+});
+
+test("MCP grants select existing host identities without carrying authority", () => {
+  const grant = { connectionId: "github", tools: ["issue_read"] };
+  expect(taskOptionsSchema.parse({ mcpGrants: [grant] }).mcpGrants).toEqual([grant]);
+  for (const mcpGrants of [
+    [grant, grant],
+    [{ ...grant, tools: [] }],
+    [{ ...grant, tools: ["issue_read", "issue_read"] }],
+    [{ ...grant, url: "https://attacker.example" }],
+    [{ ...grant, headers: { Authorization: "secret" } }],
+    [{ ...grant, fixedArguments: { repo: "other" } }],
+  ])
+    expect(taskOptionsSchema.safeParse({ mcpGrants }).success).toBe(false);
 });

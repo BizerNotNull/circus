@@ -5,6 +5,7 @@ import {
   type TaskOptions,
 } from "../shared/task.js";
 import { z } from "zod";
+import { mcpGrantsSchema, type McpGrant } from "../shared/mcp.js";
 
 interface TaskSubmission {
   prompt: string;
@@ -17,6 +18,7 @@ export const taskFormDraftSchema = z.strictObject({
   filePath: z.string(),
   fileText: z.string(),
   files: z.array(inputFileSchema),
+  mcpGrants: mcpGrantsSchema.default([]),
 });
 export type TaskFormDraft = z.infer<typeof taskFormDraftSchema>;
 type SubmissionState =
@@ -31,6 +33,7 @@ interface FormState {
   filePath: string;
   fileText: string;
   files: InputFile[];
+  mcpGrants: McpGrant[];
   submission: SubmissionState;
 }
 interface FormOptions {
@@ -47,6 +50,7 @@ export function openTaskForm(options: FormOptions) {
     filePath: "",
     fileText: "",
     files: [],
+    mcpGrants: [],
     ...options.initial,
   } satisfies TaskFormDraft;
   let state: FormState = {
@@ -65,6 +69,7 @@ export function openTaskForm(options: FormOptions) {
       filePath: next.filePath,
       fileText: next.fileText,
       files: next.files,
+      mcpGrants: next.mcpGrants,
     });
     for (const listener of listeners) listener();
   }
@@ -113,6 +118,15 @@ export function openTaskForm(options: FormOptions) {
         submission: { status: "editing" },
       });
     },
+    setMcpGrants(grants: McpGrant[]) {
+      if (state.submission.status === "submitting") return;
+      const parsed = mcpGrantsSchema.safeParse(grants);
+      if (!parsed.success) {
+        fail("Choose at most 8 connections and 32 unique tools per connection.");
+        return;
+      }
+      publish({ ...state, mcpGrants: parsed.data, submission: { status: "editing" } });
+    },
     fail,
     async submit() {
       if (state.submission.status === "submitting") return;
@@ -128,6 +142,7 @@ export function openTaskForm(options: FormOptions) {
           .map((path) => path.trim())
           .filter(Boolean),
         timeoutMs: Number(state.timeoutSeconds) * 1000,
+        mcpGrants: state.mcpGrants,
       });
       if (!parsed.success) {
         fail(parsed.error.issues[0]!.message);
@@ -136,7 +151,7 @@ export function openTaskForm(options: FormOptions) {
       publish({ ...state, submission: { status: "submitting" } });
       try {
         const agentId = await options.create({ prompt: state.prompt, options: parsed.data });
-        publish({ ...state, submission: { status: "created", agentId } });
+        publish({ ...state, mcpGrants: [], submission: { status: "created", agentId } });
       } catch (error) {
         fail(error instanceof Error ? error.message : "Could not create the sandbox task.");
       }

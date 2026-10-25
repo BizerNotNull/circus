@@ -9,7 +9,7 @@
 
 use crate::runtime::{ProcessCleanup, ProcessError};
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::os::unix::process::ExitStatusExt;
 use std::{
     ffi::OsString,

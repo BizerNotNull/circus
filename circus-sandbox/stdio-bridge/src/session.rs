@@ -33,8 +33,9 @@ pub async fn serve(
     else {
         return Err("invalid_state");
     };
+    let grants = request.mcp_grants.clone();
     let task = runner
-        .start(request.into_task()?)
+        .start_with_mcp(request.into_task()?, grants)
         .map_err(|_| "invalid_request")?;
     let accepted = Response::Accepted {
         v: VERSION,

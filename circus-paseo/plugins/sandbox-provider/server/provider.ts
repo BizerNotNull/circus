@@ -14,12 +14,13 @@ import { ArtifactStore } from "./artifacts.js";
 import { SandboxProviderError } from "./errors.js";
 import { SandboxSession, safeError } from "./session.js";
 import { SANDBOX_HOST_MODEL_ID, SANDBOX_PROVIDER_ID } from "../shared/task.js";
+import { readMcpCatalog } from "./mcp-catalog.js";
 
 const capabilities = ["prompt.message", "timeline.plugin"] as const;
 const hostConfiguredModel = {
   id: SANDBOX_HOST_MODEL_ID,
   label: "Host configured",
-  description: "The host runner selects the configured Codex model",
+  description: "The host runner selects the configured agent and model",
   isDefault: true,
 } as const;
 const modes = [
@@ -33,24 +34,28 @@ const modes = [
 
 export class SandboxProvider {
   private readonly sessions = new Set<SandboxSession>();
+  private configFile: string | null = null;
 
   constructor(private readonly artifacts: ArtifactStore) {}
 
   registration(): ProviderRegistration {
     return {
       id: SANDBOX_PROVIDER_ID,
-      label: "Sandbox (Codex)",
+      label: "Sandbox",
       icon: "icon.svg",
       requiresConfiguration: true,
-      description: "One Codex task in a disposable sandbox, using only explicitly supplied files",
+      description:
+        "One agent task in a disposable sandbox, using explicitly supplied files and tools",
       command: ["circus-stdio-bridge"],
       status: async ({ launch }) => {
         try {
           const config = launchConfig(launch);
           await access(config.executable, constants.X_OK);
           await access(config.configFile, constants.R_OK);
+          this.configFile = config.configFile;
           return { available: true };
         } catch {
+          this.configFile = null;
           return {
             available: false,
             diagnostic:
@@ -62,12 +67,17 @@ export class SandboxProvider {
         if (!request.versions.includes(1))
           throw new SandboxProviderError("version", "Provider protocol version 1 is required");
         const config = launchConfig(request.launch);
+        this.configFile = config.configFile;
         return this.connect(
           config,
           negotiateProviderCapabilities(request.capabilities, capabilities),
         );
       },
     };
+  }
+
+  mcpCatalog() {
+    return readMcpCatalog(this.configFile);
   }
 
   async retryCleanup(taskId: string) {

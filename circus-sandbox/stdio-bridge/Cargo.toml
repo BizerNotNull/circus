@@ -10,9 +10,11 @@ description = "Bounded single-task stdio transport for the Circus Agent runner."
 circus-agent-runner = { version = "0.1.0", path = "../agent-runner" }
 circus-sandbox = { version = "0.1.0", path = ".." }
 base64 = "0.22"
+cap-std = { version = "=4.0.3", default-features = false }
+cap-fs-ext = { version = "=4.0.3", default-features = false }
 serde = { version = "1", features = ["derive"] }
 sonic-rs = "0.5"
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "signal", "process", "io-util"] }
 
 [dev-dependencies]
 tempfile.workspace = true

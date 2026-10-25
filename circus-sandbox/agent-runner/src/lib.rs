@@ -1,4 +1,4 @@
-//! A single Codex task over the public Circus sandbox interface.
+//! A single Codex or Claude Code task over the public Circus sandbox interface.
 //!
 //! The caller supplies configuration, input bytes and requested artifact paths.
 //! [`AgentRunner::start`] returns an owned [`AgentTask`]: consume events while
@@ -7,16 +7,20 @@
 //! Dropping the handle requests cancellation; keep it and await `wait` when cleanup
 //! must be observed. Runtime/process shutdown is not a durable cleanup guarantee.
 //!
-//! This crate is a caller of `circus-sandbox`; Codex protocol and model policy do
+//! This crate is a caller of `circus-sandbox`; agent protocols and model policy do
 //! not belong to the sandbox core. It does not expose HTTP or a Paseo transport.
 
+mod agent;
 mod config;
 mod events;
+mod mcp;
 mod model;
 mod process;
 mod runner;
 
+pub use agent::AgentKind;
 pub use config::{ModelConfig, RunnerConfig, TaskRequest};
+pub use mcp::{McpConnection, McpGrant, McpToolPolicy};
 pub use model::{
     CleanupHandle, ModelFailure, TaskError, TaskEvent, TaskFailure, TaskOutcome, TaskOutput,
     TaskPhase, ToolPhase,

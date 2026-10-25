@@ -1,8 +1,7 @@
-use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use circus_agent_runner::{AgentRunner, ModelConfig, RunnerConfig};
+use crate::secrets::{KeychainRef, read_bounded, read_secret};
+use circus_agent_runner::{AgentKind, AgentRunner, ModelConfig, RunnerConfig};
 use circus_sandbox::{BackendConfig, ResourceLimits};
 use serde::Deserialize;
 
@@ -10,11 +9,23 @@ use serde::Deserialize;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Config {
     version: u8,
+    #[serde(default)]
+    agent: Agent,
     docker_endpoint: String,
     agent_image: String,
     python: PathBuf,
     resources: Resources,
     model: Model,
+    #[serde(default)]
+    mcp_connections: Vec<crate::mcp_config::Connection>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum Agent {
+    #[default]
+    Codex,
+    ClaudeCode,
 }
 
 #[derive(Deserialize)]
@@ -32,35 +43,26 @@ struct Resources {
 struct Model {
     base_url: String,
     model: String,
-    api_key_file: PathBuf,
+    api_key_file: Option<PathBuf>,
+    api_key_keychain: Option<KeychainRef>,
     ca_file: Option<PathBuf>,
 }
 
-fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, ()> {
-    if !path.is_absolute() {
-        return Err(());
-    }
-    let file = File::open(path).map_err(|_| ())?;
-    if !file.metadata().map_err(|_| ())?.is_file() {
-        return Err(());
-    }
-    let mut bytes = Vec::new();
-    file.take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| ())?;
-    if bytes.len() as u64 > limit {
-        return Err(());
-    }
-    Ok(bytes)
-}
-
-pub fn load(path: &Path) -> Result<AgentRunner, ()> {
-    let config: Config = sonic_rs::from_slice(&read_bounded(path, 64 * 1024)?).map_err(|_| ())?;
+pub async fn load(path: &Path) -> Result<AgentRunner, ()> {
+    let config: Config =
+        sonic_rs::from_slice(&read_bounded(path, 64 * 1024).await?).map_err(|_| ())?;
     if config.version != 1 || !config.python.is_absolute() {
         return Err(());
     }
-    let credential =
-        String::from_utf8(read_bounded(&config.model.api_key_file, 4098)?).map_err(|_| ())?;
+    let credential = String::from_utf8(
+        read_secret(
+            config.model.api_key_file.as_deref(),
+            config.model.api_key_keychain.as_ref(),
+            4098,
+        )
+        .await?,
+    )
+    .map_err(|_| ())?;
     let mut model = ModelConfig::new(
         config.model.base_url,
         config.model.model,
@@ -82,11 +84,19 @@ pub fn load(path: &Path) -> Result<AgentRunner, ()> {
         r.max_file_bytes,
     )
     .map_err(|_| ())?;
+    let connections = crate::mcp_config::load(config.mcp_connections).await?;
     AgentRunner::new(RunnerConfig {
         backend: BackendConfig::docker(config.docker_endpoint, config.agent_image, "runc"),
         resources,
         model,
         python: config.python,
+    })
+    .and_then(|runner| runner.with_mcp_connections(connections))
+    .map(|runner| {
+        runner.with_agent(match config.agent {
+            Agent::Codex => AgentKind::Codex,
+            Agent::ClaudeCode => AgentKind::ClaudeCode,
+        })
     })
     .map_err(|_| ())
 }

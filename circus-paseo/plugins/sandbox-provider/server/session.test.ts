@@ -24,7 +24,7 @@ const config: ProviderSessionConfig = {
   },
 };
 
-function fixture(events: CircusTaskEvent[] = []) {
+function fixture(events: CircusTaskEvent[] = [], sessionConfig = config) {
   let complete!: (result: CircusTaskResult) => void;
   const result = new Promise<CircusTaskResult>((resolve) => {
     complete = resolve;
@@ -64,7 +64,7 @@ function fixture(events: CircusTaskEvent[] = []) {
   };
   const session = new SandboxSession({
     id: "session-1",
-    config,
+    config: sessionConfig,
     client,
     artifacts: new ArtifactStore(),
     emit(event) {
@@ -103,6 +103,7 @@ test("runs once, passes only supplied bytes and reports success after confirmed 
       inputFiles: { "answer.py": Buffer.from("print(42)") },
       outputPaths: ["result.txt"],
       timeoutMs: 60_000,
+      mcpGrants: [],
     },
   ]);
   expect(
@@ -124,6 +125,21 @@ test("runs once, passes only supplied bytes and reports success after confirmed 
     type: "session.prompt_result",
     result: { type: "failed", error: { code: "single_task" } },
   });
+});
+
+test("forwards only explicit MCP grants and leaves ambient host MCP behind", async () => {
+  const mcpGrants = [{ connectionId: "github", tools: ["issue_read"] }];
+  const f = fixture([], { ...config, providerOptions: { ...config.providerOptions, mcpGrants } });
+  f.prompt();
+  expect(f.requests[0]).toEqual({
+    prompt: "Fix the project",
+    inputFiles: { "answer.py": Buffer.from("print(42)") },
+    outputPaths: ["result.txt"],
+    timeoutMs: 60_000,
+    mcpGrants,
+  });
+  f.complete({ status: "succeeded", cleanup: "confirmed", artifacts: {} });
+  await f.finished;
 });
 
 test("Stop waits for cancellation outcome and refuses unconfirmed cleanup", async () => {

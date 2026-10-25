@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { mcpGrantsSchema } from "../../shared/mcp.js";
 
 export const PROTOCOL_VERSION = 1;
 export const MAX_FRAME_BYTES = 12 * 1024 * 1024;
@@ -53,6 +54,7 @@ export const TaskRequestSchema = z.strictObject({
     .max(32)
     .refine((values) => new Set(values).size === values.length),
   timeoutMs: z.number().int().min(1).max(3_600_000),
+  mcpGrants: mcpGrantsSchema.optional(),
 });
 
 export const TaskEventSchema = z.discriminatedUnion("kind", [

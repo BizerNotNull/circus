@@ -60,10 +60,16 @@ See [Custom providers](/docs/custom-providers) for command and environment overr
 
 ## Sandbox (Codex)
 
-Circus's sandbox provider is opt-in. Install the Circus Rust bridge on the daemon host and
-configure its Docker endpoint, pinned Codex image, resource limits and model channel. The bridge
-configuration uses an explicit model API key file; Paseo does not read your Codex login or forward
-your home directory, proxy settings, MCP servers, system prompt or agent environment to the task.
+Circus's **Sandbox** provider is opt-in. The host configuration selects Codex or Claude Code and
+its matching pinned image and model protocol. On macOS, open the local desktop host settings and
+use **Sandbox setup** to detect prerequisites, prepare Codex, test the model connection and save its
+API key in Keychain. This source-checkout workflow requires Docker Desktop and build prerequisites;
+it is not a bundled installer. Browser and remote clients must configure the desktop host first.
+
+For manual setup or Claude Code, install the Circus Rust bridge on the daemon host and configure
+its Docker endpoint, matching agent image, resource limits and model channel. A credential can be
+an explicit private key file or macOS Keychain reference. Personal Agent logins, home directories,
+proxy settings, ambient MCP servers, system prompts and agent environments are not imported.
 
 Add this entry to the daemon configuration, replacing both absolute paths:
 
@@ -81,12 +87,21 @@ Add this entry to the daemon configuration, replacing both absolute paths:
 }
 ```
 
-Choose **Sandbox (Codex)** for a prompt-only task. To supply files, open the workspace's
+Choose **Sandbox** for a prompt-only task. To supply files, open the workspace's
 **Sandbox task** panel. Choose files on web/desktop, or paste text with an explicit relative path;
 review the list, enter each file to export and set a deadline. Browser selection imports the chosen
 bytes, including current unsaved changes only if you explicitly paste them. It does not scan the
 project directory. Duplicate names are rejected; nested paths can be supplied through the pasted
 file control or the SDK's `options.inputFiles`.
+
+The **Tool permissions** section lists host-configured MCP connections, tools and fixed resources.
+Select only the tools this task needs; an empty selection grants none. Connection credentials stay
+on the host, and task requests cannot change endpoints or fixed arguments. The list describes host
+policy, not a live service connection check. The desktop GitHub preset authenticates and discovers
+`issue_read` before saving a connection, fixing `method=get`, owner and repository. Runtime access
+still depends on that service and account. This release supports HTTPS Streamable HTTP tools;
+OAuth login, arbitrary local stdio MCP programs and full MCP feature compatibility remain outside
+this implementation.
 
 The normal task timeline shows text, tool output and progress through export and cleanup.
 **Stop** waits for the running task's cancellation result. Successful completion requires confirmed

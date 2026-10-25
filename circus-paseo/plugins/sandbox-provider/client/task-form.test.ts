@@ -1,6 +1,33 @@
 import { expect, test } from "vitest";
 import { openTaskForm } from "./task-form.js";
 
+test("MCP access requires explicit tool selection and clearing removes every grant", async () => {
+  const submitted: unknown[] = [];
+  const form = openTaskForm({
+    create: async (input) => {
+      submitted.push(input.options);
+      return "task";
+    },
+  });
+  expect(form.getState().mcpGrants).toEqual([]);
+  form.set("prompt", "Read the approved issue");
+  form.setMcpGrants([{ connectionId: "github", tools: ["issue_read"] }]);
+  await form.submit();
+  expect(submitted[0]).toMatchObject({
+    mcpGrants: [{ connectionId: "github", tools: ["issue_read"] }],
+  });
+  expect(form.getState().mcpGrants).toEqual([]);
+  await form.submit();
+  expect(submitted[1]).toMatchObject({ mcpGrants: [] });
+});
+
+test("rejects duplicate tool grants before the provider sees a task", () => {
+  const form = openTaskForm({ create: async () => "task" });
+  form.setMcpGrants([{ connectionId: "github", tools: ["issue_read", "issue_read"] }]);
+  expect(form.getState().submission.status).toBe("failed");
+  expect(form.getState().mcpGrants).toEqual([]);
+});
+
 test("creates a task using reviewed files, output paths and deadline", async () => {
   const submitted: unknown[] = [];
   const form = openTaskForm({
@@ -22,6 +49,7 @@ test("creates a task using reviewed files, output paths and deadline", async () 
         inputFiles: [{ path: "answer.py", text: "print(41)" }],
         outputPaths: ["answer.py", "result.txt"],
         timeoutMs: 300_000,
+        mcpGrants: [],
       },
     },
   ]);
