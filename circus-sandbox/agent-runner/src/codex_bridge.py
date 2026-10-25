@@ -233,7 +233,10 @@ class HostController:
         self.seen.add(request_id)
         return request_id, encoded
 
-    def model_request(self, message):
+    def model_request(self, message, response_deadline=None):
+        # Capture before validation serializes the request body.
+        if response_deadline is None:
+            response_deadline = time.monotonic() + 34
         # A new HTTP request can arrive just after the prior worker emitted EOF.
         # Give that worker a bounded chance to release the single-request slot.
         if self.worker and self.worker.is_alive():
@@ -241,7 +244,6 @@ class HostController:
         if self.finished or self.revoked.is_set() or (self.worker and self.worker.is_alive()):
             raise BridgeError("model channel is unavailable or busy")
         request_id, body = self.validate_request(message)
-        response_deadline = time.monotonic() + 34
         started = False
 
         def emit(kind, chunk):

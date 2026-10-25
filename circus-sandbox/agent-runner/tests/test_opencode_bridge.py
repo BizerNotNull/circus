@@ -61,6 +61,7 @@ class OpenCodeTests(unittest.TestCase):
                 patch.object(bridge.time, "monotonic", side_effect=[0, 100, 100]):
             self.controller.model_request(request)
             self.controller.worker.join(2)
+        self.assertEqual(self.controller.response_deadline, 34)
         self.assertEqual(sent, [])
 
     def test_simultaneous_summary_and_user_requests_are_serialized_and_correlated(self):
