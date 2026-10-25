@@ -140,9 +140,7 @@ test("commits the runner and Keychain credential after successful save", async (
   const runner = JSON.parse(await readFile(runnerPath, "utf8"));
   expect(runner.agent).toBe("claude-code");
   expect(
-    f.secrets.get(
-      `${runner.model.apiKeyKeychain.service}:${runner.model.apiKeyKeychain.account}`,
-    ),
+    f.secrets.get(`${runner.model.apiKeyKeychain.service}:${runner.model.apiKeyKeychain.account}`),
   ).toBe(model.apiKey);
   expect(await f.service.snapshot()).toMatchObject({
     settings: { agent: "claude-code", hasCredential: true, credentialStorage: "keychain" },
