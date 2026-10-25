@@ -198,6 +198,7 @@ jobs:
     steps:
       - &server_capacity
         name: Log runner capacity
+        working-directory: ${{ github.workspace }}
         run: |
           node -e "const os = require('node:os'); console.log(JSON.stringify({cpus: os.cpus().length, model: os.cpus()[0].model, ramGiB: os.totalmem() / 2 ** 30}))"
 
@@ -458,6 +459,7 @@ jobs:
       PLAYWRIGHT_ARTIFACT: "1"
     steps: &playwright_test_steps
       - name: Log runner capacity
+        working-directory: ${{ github.workspace }}
         run: |
           node -e "const os = require('node:os'); console.log(JSON.stringify({cpus: os.cpus().length, model: os.cpus()[0].model, ramGiB: os.totalmem() / 2 ** 30}))"
 
