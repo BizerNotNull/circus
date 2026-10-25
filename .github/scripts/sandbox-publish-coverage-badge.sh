@@ -5,8 +5,8 @@
 #   bash .github/scripts/sandbox-publish-coverage-badge.sh \
 #     <lcov.info> <badge-file.json> <label>
 #
-# Computes line coverage from lcov LF/LH records, writes endpoint JSON, and
-# force-updates only that file on `badges`. Does not modify other branches.
+# Computes line coverage from lcov LF/LH records and upserts the endpoint JSON
+# on `badges` via the GitHub Contents API (no interactive git credentials).
 # Display only: not a coverage gate and not isolation evidence.
 set -euo pipefail
 
@@ -66,32 +66,10 @@ color=$(
   }'
 )
 
-workdir=$(mktemp -d)
-trap 'rm -rf "${workdir}"' EXIT
+payload_file=$(mktemp)
+trap 'rm -f "${payload_file}"' EXIT
 
-remote_url="https://github.com/${GITHUB_REPOSITORY}.git"
-auth_header="AUTHORIZATION: bearer ${GITHUB_TOKEN}"
-clone_dir="${workdir}/repo"
-
-git_auth() {
-  git -c "http.https://github.com/.extraheader=${auth_header}" "$@"
-}
-
-if git_auth ls-remote --exit-code --heads "${remote_url}" badges >/dev/null 2>&1; then
-  git_auth clone --depth 1 --branch badges "${remote_url}" "${clone_dir}"
-else
-  git_auth clone --depth 1 "${remote_url}" "${clone_dir}"
-  git -C "${clone_dir}" checkout --orphan badges
-  # Drop the default-branch tree so badges only carries endpoint JSON.
-  git -C "${clone_dir}" rm -rf --ignore-unmatch . >/dev/null 2>&1 || true
-  find "${clone_dir}" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-fi
-
-cd "${clone_dir}"
-git config user.name "github-actions[bot]"
-git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-python3 - "${badge_file}" "${label}" "${message}" "${color}" <<'PY'
+python3 - "${payload_file}" "${label}" "${message}" "${color}" <<'PY'
 import json
 import sys
 
@@ -107,12 +85,106 @@ with open(path, "w", encoding="utf-8") as handle:
     handle.write("\n")
 PY
 
-git add -- "${badge_file}"
-if git diff --cached --quiet; then
-  echo "badge unchanged: ${badge_file} (${message})"
-  exit 0
+api="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${badge_file}"
+auth=(
+  -H "Authorization: Bearer ${GITHUB_TOKEN}"
+  -H "Accept: application/vnd.github+json"
+  -H "X-GitHub-Api-Version: 2022-11-28"
+)
+
+# Ensure the badges branch exists (orphan with no other files is fine).
+branch_code=$(
+  curl -sS -o /dev/null -w "%{http_code}" "${auth[@]}" \
+    "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/badges"
+)
+if [[ "${branch_code}" == "404" ]]; then
+  main_sha=$(
+    curl -sS "${auth[@]}" \
+      "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])'
+  )
+  empty_tree=$(
+    curl -sS "${auth[@]}" \
+      -X POST "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/trees" \
+      -d '{"tree":[]}' \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])'
+  )
+  commit_sha=$(
+    curl -sS "${auth[@]}" \
+      -X POST "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/commits" \
+      -d "$(python3 -c "import json; print(json.dumps({
+        'message': 'chore(badges): created empty badges branch',
+        'tree': '${empty_tree}',
+        'parents': []
+      }))")" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])'
+  )
+  curl -sS "${auth[@]}" \
+    -X POST "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/refs" \
+    -d "$(python3 -c "import json; print(json.dumps({
+      'ref': 'refs/heads/badges',
+      'sha': '${commit_sha}'
+    }))")" >/dev/null
+  echo "created badges branch"
+elif [[ "${branch_code}" != "200" ]]; then
+  echo "failed to query badges branch (HTTP ${branch_code})" >&2
+  exit 1
 fi
 
-git commit -m "chore(badges): updated ${badge_file} to ${message}"
-git_auth push origin HEAD:refs/heads/badges
+existing_sha=""
+existing_code=$(
+  curl -sS -o "${payload_file}.meta" -w "%{http_code}" "${auth[@]}" \
+    "${api}?ref=badges"
+)
+if [[ "${existing_code}" == "200" ]]; then
+  existing_sha=$(
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["sha"])' \
+      "${payload_file}.meta"
+  )
+  existing_message=$(
+    python3 -c '
+import base64, json, sys
+meta = json.load(open(sys.argv[1], encoding="utf-8"))
+print(json.loads(base64.b64decode(meta["content"]).decode("utf-8")).get("message", ""))
+' "${payload_file}.meta"
+  )
+  if [[ "${existing_message}" == "${message}" ]]; then
+    echo "badge unchanged: ${badge_file} (${message})"
+    exit 0
+  fi
+elif [[ "${existing_code}" != "404" ]]; then
+  echo "failed to query ${badge_file} on badges (HTTP ${existing_code})" >&2
+  cat "${payload_file}.meta" >&2 || true
+  exit 1
+fi
+
+content_b64=$(python3 -c 'import base64, pathlib, sys; print(base64.b64encode(pathlib.Path(sys.argv[1]).read_bytes()).decode("ascii"))' "${payload_file}")
+body=$(
+  python3 - "${badge_file}" "${message}" "${content_b64}" "${existing_sha}" <<'PY'
+import json
+import sys
+
+path, message, content_b64, existing_sha = sys.argv[1:5]
+payload = {
+    "message": f"chore(badges): updated {path} to {message}",
+    "content": content_b64,
+    "branch": "badges",
+}
+if existing_sha:
+    payload["sha"] = existing_sha
+print(json.dumps(payload))
+PY
+)
+
+put_code=$(
+  curl -sS -o "${payload_file}.put" -w "%{http_code}" "${auth[@]}" \
+    -X PUT "${api}" \
+    -d "${body}"
+)
+if [[ "${put_code}" != "200" && "${put_code}" != "201" ]]; then
+  echo "failed to publish ${badge_file} (HTTP ${put_code})" >&2
+  cat "${payload_file}.put" >&2 || true
+  exit 1
+fi
+
 echo "published ${badge_file}: ${label} ${message}"
