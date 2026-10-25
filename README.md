@@ -16,6 +16,7 @@
   <a href="#从桌面开始"><img src="https://img.shields.io/badge/status-source_preview-218D76?style=flat-square" alt="Status: source preview"></a>
   <a href="circus-sandbox/Cargo.toml"><img src="https://img.shields.io/badge/core-Rust_1.99.1-D66B35?style=flat-square&amp;logo=rust&amp;logoColor=white" alt="Core: Rust 1.99.1"></a>
   <a href="https://github.com/BizerNotNull/circus/actions/workflows/sandbox-rust.yml?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/BizerNotNull/circus/sandbox-rust.yml?branch=main&amp;style=flat-square&amp;label=Rust%20CI" alt="Rust CI on main"></a>
+  <a href="https://github.com/BizerNotNull/circus/actions/workflows/sandbox-rust.yml?query=branch%3Amain"><img src="https://img.shields.io/badge/coverage-CI_summary-218D76?style=flat-square" alt="circus-sandbox coverage summary in Sandbox Rust CI"></a>
   <a href="https://github.com/BizerNotNull/circus/actions/workflows/sandbox-security.yml?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/BizerNotNull/circus/sandbox-security.yml?branch=main&amp;style=flat-square&amp;label=Security%20CI" alt="Security CI on main"></a>
   <a href="circus-sandbox/LICENSE"><img src="https://img.shields.io/badge/sandbox-Apache--2.0-526963?style=flat-square" alt="Sandbox license: Apache-2.0"></a>
   <a href="https://github.com/BizerNotNull/circus/stargazers"><img src="https://img.shields.io/github/stars/BizerNotNull/circus?style=flat-square&amp;color=218D76&amp;label=Stars" alt="GitHub stars"></a>
