@@ -9,11 +9,12 @@
 
 <p align="center">
   <strong>桌面级 AI Agent 安全沙箱</strong><br>
-  密钥留在本机 · 权限按任务授予 · 结果由你掌控
+  Rust 控制面校验边界 · 真实密钥不进沙箱 · 权限按任务授予
 </p>
 
 <p align="center">
   <a href="#从桌面开始"><img src="https://img.shields.io/badge/status-source_preview-218D76?style=flat-square" alt="Status: source preview"></a>
+  <a href="circus-sandbox/Cargo.toml"><img src="https://img.shields.io/badge/core-Rust_1.99.1-D66B35?style=flat-square&amp;logo=rust&amp;logoColor=white" alt="Core: Rust 1.99.1"></a>
   <a href="https://github.com/BizerNotNull/circus/actions/workflows/sandbox-rust.yml?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/BizerNotNull/circus/sandbox-rust.yml?branch=main&amp;style=flat-square&amp;label=Rust%20CI" alt="Rust CI on main"></a>
   <a href="https://github.com/BizerNotNull/circus/actions/workflows/sandbox-security.yml?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/BizerNotNull/circus/sandbox-security.yml?branch=main&amp;style=flat-square&amp;label=Security%20CI" alt="Security CI on main"></a>
   <a href="circus-sandbox/LICENSE"><img src="https://img.shields.io/badge/sandbox-Apache--2.0-526963?style=flat-square" alt="Sandbox license: Apache-2.0"></a>
@@ -22,23 +23,54 @@
 
 <p align="center">
   <a href="#从桌面开始">桌面上手</a> ·
+  <a href="#rust-安全控制面">Rust 核心</a> ·
   <a href="#一次任务从修复代码到取回产物">任务示例</a> ·
   <a href="#架构">架构</a> ·
   <a href="#快速上手">命令行</a> ·
   <a href="circus-sandbox/docs/secure-desktop-verification.md">验证</a>
 </p>
 
-选择文件、描述任务、勾选工具权限，让 Codex 或 Claude Code 在受限容器中工作，再取回结果。
+<p align="center">
+  <img src="docs/assets/circus-desktop-overview.png" alt="Circus 桌面总览：Paseo 选择任务边界，Rust 控制面执行任务契约，Docker 和 runc 隔离 Agent" width="100%">
+</p>
+
+<p align="center"><sub>开发态 Paseo 工作台：输入文件、导出路径与工具权限均由当前任务显式选择。</sub></p>
+
+**Paseo 负责交互，Rust 控制面负责把桌面任务边界落实到执行路径。** 当前 Agent 链路由三个 first-party Rust crate 校验有界任务协议、显式授权与后端策略，并统一拥有创建、取消、产物读取与清理确认；Docker + runc 执行当前进程、网络与资源隔离。
 模型与 MCP 的真实凭据由宿主代理持有；Agent 通过受控通道访问获准服务，无需在沙箱中填写密钥或密码。
 
 ## 安全与易用性
 
 从导入文件到取回结果，文件范围、工具权限、资源预算与回收状态贯穿每次任务：
 
-- **凭据留在宿主**：macOS 向导将密钥存入 Keychain，模型与 MCP 代理代为认证。真实凭据不写入沙箱配置、环境或文件。
+- **真实凭据不进沙箱**：macOS 向导将密钥存入 Keychain，模型与 MCP 代理代为认证。真实凭据不写入沙箱配置、环境或文件。
 - **文件与工具按任务授权**：只复制选定文件，容器禁网；每次任务勾选工具，宿主限制服务地址与仓库等资源参数。
-- **通过桌面完成配置**：检测运行环境、测试模型连接、保存凭据并选择资源预算。工具权限默认关闭。
+- **通过 macOS 桌面配置 Codex**：检测运行环境、测试模型连接、保存凭据并选择资源预算。工具权限默认关闭。
 - **结果与回收状态可查看**：查看进度、下载产物、停止任务。成功包含确认回收，清理未完成时保留状态供核查与重试。
+
+![Circus 安全任务流程：宿主保存凭据，任务显式授权，结束时返回产物和清理状态](docs/assets/circus-security-flow.png)
+
+_界面使用受控 provider fixture 展示授权与 cleanup state；真实 Docker + runc、Agent、模型与回收证据见[验收记录](circus-sandbox/docs/secure-desktop-verification.md)。_
+
+### Rust 安全控制面
+
+当前桌面 Agent 任务链路依次经过三个 first-party Rust crate，每一层都失败即拒绝：
+
+| Rust 安全关口                                                                       | 失败即拒绝的约束                                                          |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| **01 · 协议入口** · [`circus-stdio-bridge`](circus-sandbox/stdio-bridge/Cargo.toml) | 版本化且有界的 NDJSON；拒绝超大帧、重复输入、非法路径与无效期限           |
+| **02 · 任务契约** · [`circus-agent-runner`](circus-sandbox/agent-runner/Cargo.toml) | 在分配前校验文件、产物预算、期限与 MCP grant；编排单任务 Agent 和最终结果 |
+| **03 · 生命周期** · [`circus-sandbox`](circus-sandbox/Cargo.toml)                   | 创建后逐项核验实际生效的后端策略；统一拥有状态、失败回收与销毁责任        |
+
+实现可直接审计：[协议边界](circus-sandbox/stdio-bridge/src/protocol.rs)、[任务结果与清理](circus-sandbox/agent-runner/src/runner.rs)、[Docker 生效策略核验](circus-sandbox/src/infrastructure/engine_policy.rs)，以及[真实 Docker hardening 测试](circus-sandbox/tests/docker_hardening.rs)。
+
+**先请求，再验真。** `circus-sandbox` 不把发给 Docker 的配置当作隔离已经生效的证据：容器创建后会再次 inspect，核对 runtime、内存 / CPU / PID 限制、只读根、`network=none`、capability、mount / device、tmpfs 与 namespace 等实际策略；缺项或不一致即失败，并保留资源回收责任。
+
+因此，超限输入、未授权工具、固定参数覆盖和未确认清理都不能被包装成成功；即使取消、超时或事件背压，任务 worker 仍保留回收责任。
+
+另一个 workspace Rust crate [`circus-sandbox-exec`](circus-sandbox/sandbox-exec/README.md) 是独立接入入口，不是上述链路的第四道串行关口。它把既有 provider 命令的原始 stdio 代理进 owned sandbox，在新建实例前恢复旧孤儿，使用有界归档保存工作区，并在退出时确认清理；它不提供模型 / MCP 代理、凭据注入、任务协议或 UI，使用方不得通过 `agent.env` 放入宿主凭据。
+
+上述四个 first-party crate 均使用 Rust 1.99.1 / edition 2024，并设置 `unsafe_code = "forbid"`。这是 first-party 源码约束，不覆盖依赖、Python 宿主连接器、Agent CLI、Docker + runc 或 Linux 内核，也不是端到端安全证明。当前桌面 Agent 安全边界由 Rust 生命周期控制、宿主连接器与 Linux Docker + runc 共同组成；runc 容器共享宿主内核。
 
 当前为源码开发版，macOS 桌面向导支持 Codex；Claude Code 可通过宿主配置使用。
 完整信任边界见[安全设计](docs/hackathon-security.md)。
@@ -53,9 +85,14 @@
 2. 填写模型服务地址、模型名和 API key，测试连接、选择资源预算，点击 **Save and enable sandbox**。密钥保存在本机 Keychain，配置通过重新加载生效。
 3. 需要 GitHub 工具时，填写 MCP 连接、凭据及允许访问的仓库。创建任务时再显式勾选工具权限；默认不授权。
 
+<details>
+<summary>查看完整桌面环境检测与模型连接界面</summary>
+
 ![桌面环境检测与模型连接设置](docs/assets/sandbox-setup.png)
 
 _开发态界面，字段使用演示配置；截图已裁去本机标识。_
+
+</details>
 
 <details>
 <summary>其他平台或 Claude Code：手动配置宿主</summary>
@@ -129,19 +166,22 @@ _结果卡片来自受控 provider 的 UI 验收；真实模型与真实容器�
 
 ## 架构
 
-![Circus 架构：Paseo 经 AgentRunner 调用 Rust 沙箱；Codex 或 Claude 在禁网容器执行，模型与 MCP 请求经宿主凭据代理](docs/assets/architecture.svg)
+![Circus 架构：Paseo 经 Rust bridge、AgentRunner 与 sandbox lifecycle 管理任务；Docker 和 runc 执行隔离，模型与 MCP 请求经宿主凭据代理](docs/assets/architecture.svg)
 
 [打开架构图源文件](docs/assets/architecture.svg) · [下载 HTML 展示版](docs/assets/architecture.html)（本地打开；PNG / PDF 导出工具需联网加载）
 
-### 三层职责
+下图聚焦当前 Paseo sandbox provider 的单任务链路；独立的 `circus-sandbox-exec` 进程代理复用 `circus-sandbox`，不经过 `circus-stdio-bridge` 或 `circus-agent-runner`。
 
-| 层           | 组件                                         | 职责                                                                        |
-| ------------ | -------------------------------------------- | --------------------------------------------------------------------------- |
-| 交互层       | Paseo 客户端、Node daemon、sandbox provider  | 选择输入、提交任务、展示事件、停止任务、预览和下载产物                      |
-| Agent 调用层 | `circus-stdio-bridge`、`circus-agent-runner` | 有界 NDJSON、Codex / Claude 驱动、宿主模型与 MCP 代理、任务期限、产物和清理 |
-| 执行层       | `circus-sandbox`                             | 统一 API、生命周期与资源回收、工作区、后端适配和运行时配置                  |
+### 四层职责
 
-Rust 调用方可以直接使用运行器或沙箱库。Codex 协议位于 Agent 调用层，沙箱核心通过 `api → lifecycle → infrastructure` 管理后端；**状态转换与销毁始终由 lifecycle 拥有**。
+| 层              | 组件                                                           | 职责                                                           |
+| --------------- | -------------------------------------------------------------- | -------------------------------------------------------------- |
+| 交互层          | Paseo 客户端、Node daemon、sandbox provider                    | 选择输入、提交任务、展示事件、停止任务、预览和下载产物         |
+| Rust 安全控制面 | `circus-stdio-bridge`、`circus-agent-runner`、`circus-sandbox` | 有界协议、任务校验、显式授权、后端策略、生命周期和最终结果契约 |
+| 宿主连接层      | Python 模型连接器与 MCP broker                                 | 持有凭据，固定服务地址与资源参数，代理获准 HTTPS 请求          |
+| 运行时隔离层    | Linux Docker Engine + runc                                     | 执行非 root、只读根、禁网及资源限制                            |
+
+Rust 调用方可以直接使用运行器或沙箱库。运行器编排 Codex / Claude 驱动与宿主代理，沙箱核心通过 `api → lifecycle → infrastructure` 管理后端；**状态转换与销毁始终由 lifecycle 拥有**。
 
 当前 Agent 链路使用 **Docker + runc**。沙箱库另有 containerd 与 Kubernetes workload 适配；独立 HTTP API 当前提供 Docker 沙箱操作，尚未提供 Agent 任务接口。
 
