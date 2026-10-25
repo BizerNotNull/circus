@@ -40,6 +40,7 @@ impl GuestStdin<'_> {
     }
 }
 
+#[cfg(any(all(unix, feature = "containerd"), feature = "kubernetes"))]
 /// Per-stream allowances for one exec with stdin.
 pub(crate) struct ExecIo<'a> {
     pub stdin: GuestStdin<'a>,

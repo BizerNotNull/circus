@@ -14,6 +14,7 @@ import queue
 import ssl
 import subprocess
 import sys
+import time
 import threading
 from urllib.parse import urlsplit
 
@@ -232,7 +233,10 @@ class HostController:
         self.seen.add(request_id)
         return request_id, encoded
 
-    def model_request(self, message):
+    def model_request(self, message, response_deadline=None):
+        # Capture before validation serializes the request body.
+        if response_deadline is None:
+            response_deadline = time.monotonic() + 34
         # A new HTTP request can arrive just after the prior worker emitted EOF.
         # Give that worker a bounded chance to release the single-request slot.
         if self.worker and self.worker.is_alive():
@@ -240,10 +244,16 @@ class HostController:
         if self.finished or self.revoked.is_set() or (self.worker and self.worker.is_alive()):
             raise BridgeError("model channel is unavailable or busy")
         request_id, body = self.validate_request(message)
+        started = False
 
         def emit(kind, chunk):
+            nonlocal started
             if self.revoked.is_set():
-                raise BridgeError("task credential revoked")
+                return
+            if not started:
+                if kind != "http_start" or time.monotonic() >= response_deadline:
+                    return
+                started = True
             response = {"channel": kind, "id": request_id}
             if chunk is not None:
                 self.total += len(chunk)
@@ -258,10 +268,11 @@ class HostController:
             except Exception as error:
                 if not self.revoked.is_set():
                     failure(error)
-                    try:
-                        send({"channel": "http_error", "id": request_id})
-                    except OSError:
-                        pass
+                    if started or time.monotonic() < response_deadline:
+                        try:
+                            send({"channel": "http_error", "id": request_id})
+                        except OSError:
+                            pass
 
         self.worker = threading.Thread(target=forward, daemon=True)
         self.worker.start()

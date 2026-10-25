@@ -96,10 +96,15 @@ impl AgentRunner {
         mcp_config: String,
     ) -> Result<AgentTask, TaskError> {
         request.validate(self.config.resources.max_file_bytes())?;
-        if request.agent_session.is_some() && self.agent != AgentKind::Codex {
+        if request.agent_session.is_some()
+            && !matches!(self.agent, AgentKind::Codex | AgentKind::OpenCode)
+        {
             return Err(TaskError::Invalid(
                 "agent session resume is unsupported for this agent",
             ));
+        }
+        if self.agent == AgentKind::OpenCode && !valid_opencode_model_id(&self.config.model.model) {
+            return Err(TaskError::Invalid("OpenCode model id"));
         }
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| TaskError::NoRuntime)?;
         let id = uuid::Uuid::new_v4().to_string();
@@ -131,6 +136,16 @@ impl AgentRunner {
         });
         Ok(task)
     }
+}
+
+fn valid_opencode_model_id(model: &str) -> bool {
+    let bytes = model.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 256
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(byte))
 }
 
 /// One owned task. `wait` is repeatable and cancellation-safe. Dropping the task
