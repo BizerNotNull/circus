@@ -150,6 +150,7 @@ enum Agent {
     #[default]
     Codex,
     ClaudeCode,
+    OpenCode,
 }
 
 #[derive(Deserialize)]
@@ -225,7 +226,26 @@ pub async fn load(path: &Path) -> Result<AgentRunner, ()> {
         runner.with_agent(match config.agent {
             Agent::Codex => AgentKind::Codex,
             Agent::ClaudeCode => AgentKind::ClaudeCode,
+            Agent::OpenCode => AgentKind::OpenCode,
         })
     })
     .map_err(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_selects_opencode_without_changing_default_agent() {
+        let base = r#"{"version":1,"dockerEndpoint":"unix:///unused/docker.sock","agentImage":"image","python":"/usr/bin/python3","resources":{"memoryBytes":1,"cpuMillis":1,"maxProcesses":1,"workspaceBytes":1,"maxFileBytes":1},"model":{"baseUrl":"https://example.invalid/v1","model":"gpt-4.1"}}"#;
+        let default: Config = sonic_rs::from_str(base).unwrap();
+        assert!(matches!(default.agent, Agent::Codex));
+
+        let selected: Config = sonic_rs::from_str(
+            &base.replace(r#""version":1"#, r#""version":1,"agent":"open-code""#),
+        )
+        .unwrap();
+        assert!(matches!(selected.agent, Agent::OpenCode));
+    }
 }
