@@ -102,21 +102,70 @@ async fn docker_linux_runc_lifecycle() -> Result<(), Box<dyn std::error::Error>>
     f.sandbox().create_dir_all("staged").await?;
     f.sandbox().start().await?;
     let status = f.sandbox().status().await?;
-    let enforcement = status.enforcement.expect("Docker enforcement evidence");
-    assert_eq!(enforcement.runtime.as_deref(), Some("runc"));
-    assert_eq!(enforcement.memory_bytes, Some(64 * 1024 * 1024));
-    assert_eq!(enforcement.nano_cpus, Some(100_000_000));
-    assert_eq!(enforcement.pids_limit, Some(i64::from(TEST_PIDS)));
-    assert_eq!(enforcement.readonly_root, Some(true));
-    assert_eq!(enforcement.network_mode.as_deref(), Some("none"));
-    assert_eq!(enforcement.bind_count, Some(0));
+    assert_eq!(status.phase, SandboxPhase::Running);
+    let observed = status
+        .enforcement
+        .as_ref()
+        .expect("running sandbox exposes inspected evidence");
+    assert_eq!(observed.runtime.as_deref(), Some("runc"));
+    assert_eq!(observed.memory_bytes, Some(64 * 1024 * 1024));
+    assert_eq!(observed.nano_cpus, Some(100_000_000));
+    assert_eq!(observed.pids_limit, Some(i64::from(TEST_PIDS)));
+    assert_eq!(observed.readonly_root, Some(true));
+    assert_eq!(observed.network_mode.as_deref(), Some("none"));
+    assert_eq!(observed.bind_count, Some(0));
     assert!(
-        enforcement
+        observed
+            .cap_drop
+            .as_ref()
+            .is_some_and(|caps| caps.iter().any(|cap| cap == "ALL"))
+    );
+    assert!(
+        observed
+            .security_opt
+            .as_ref()
+            .is_some_and(|options| options.iter().any(|option| matches!(
+                option.as_str(),
+                "no-new-privileges" | "no-new-privileges:true" | "no-new-privileges=true"
+            )))
+    );
+    let workspace = observed
+        .tmpfs_workspace
+        .as_deref()
+        .expect("effective workspace tmpfs");
+    for option in [
+        "rw",
+        "nosuid",
+        "nodev",
+        "uid=65534",
+        "gid=65534",
+        "mode=0755",
+        "size=8388608",
+    ] {
+        assert!(
+            workspace.split(',').any(|value| value == option),
+            "{workspace}"
+        );
+    }
+    let observed = status
+        .enforcement
+        .as_ref()
+        .expect("running sandbox exposes inspected evidence");
+    assert_eq!(observed.runtime.as_deref(), Some("runc"));
+    assert_eq!(observed.memory_bytes, Some(64 * 1024 * 1024));
+    assert_eq!(observed.nano_cpus, Some(100_000_000));
+    assert_eq!(observed.pids_limit, Some(i64::from(TEST_PIDS)));
+    assert_eq!(observed.readonly_root, Some(true));
+    assert_eq!(observed.network_mode.as_deref(), Some("none"));
+    assert_eq!(observed.bind_count, Some(0));
+    assert!(
+        observed
             .cap_drop
             .as_ref()
             .is_some_and(|caps| caps.iter().any(|c| c == "ALL"))
     );
     let security = f.sandbox().exec(py(&["-c", r###"from pathlib import Path; s=Path('/proc/self/status').read_text(); print(next(x for x in s.splitlines() if x.startswith('NoNewPrivs:'))); print(next(x for x in s.splitlines() if x.startswith('CapEff:')))"###])).await?;
+    assert_eq!(security.exit_code, 0);
     let security_text = String::from_utf8(security.stdout)?;
     assert!(
         security_text
@@ -128,6 +177,39 @@ async fn docker_linux_runc_lifecycle() -> Result<(), Box<dyn std::error::Error>>
             .lines()
             .any(|line| line.contains("CapEff:") && line.ends_with("0000000000000000"))
     );
+    let guest = f
+        .sandbox()
+        .exec(py(&[
+            "-c",
+            r###"
+import errno, os
+from pathlib import Path
+assert (os.getuid(), os.getgid()) == (65534, 65534)
+assert set(os.listdir('/sys/class/net')) == {'lo'}
+mounts = [line.split() for line in Path('/proc/self/mountinfo').read_text().splitlines()]
+root = next(m for m in mounts if m[4] == '/')
+assert 'ro' in root[5].split(',')
+workspace = next(m for m in mounts if m[4] == '/workspace')
+assert workspace[workspace.index('-') + 1] == 'tmpfs'
+assert {'rw', 'nosuid', 'nodev'} <= set(workspace[5].split(','))
+assert os.statvfs('/workspace').f_frsize * os.statvfs('/workspace').f_blocks == 8388608
+try:
+    Path('/isolation-write-probe').write_bytes(b'no')
+except OSError as error:
+    assert error.errno in (errno.EROFS, errno.EACCES)
+else:
+    raise AssertionError('root filesystem accepted a write')
+print('guest isolation verified')
+"###,
+        ]))
+        .await?;
+    assert_eq!(
+        guest.exit_code,
+        0,
+        "{}",
+        String::from_utf8_lossy(&guest.stderr)
+    );
+    assert_eq!(guest.stdout, b"guest isolation verified\n");
     let limits = f.sandbox().exec(py(&["-c", r###"from pathlib import Path; root=Path('/sys/fs/cgroup'); print((root/'memory.max').read_text().strip()); print((root/'pids.max').read_text().strip()); print((root/'cpu.max').read_text().strip())"###])).await?;
     let limit_text = String::from_utf8(limits.stdout)?;
     assert_eq!(limit_text.lines().next(), Some("67108864"));
@@ -264,6 +346,64 @@ async fn docker_linux_runc_exec_abort_destroys_only_owner() -> Result<(), Box<dy
         survivor.sandbox().status().await?.phase,
         SandboxPhase::Destroyed
     );
+    destroy(&mut victim).await?;
+    destroy(&mut survivor).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit real Linux Docker Engine"]
+async fn docker_linux_runc_exec_aggregate_output_budget() -> Result<(), Box<dyn std::error::Error>>
+{
+    enabled();
+    let mut victim = Fixture::new().await?;
+    let mut survivor = Fixture::new().await?;
+    victim.sandbox().start().await?;
+    survivor.sandbox().start().await?;
+    let mut boundary = py(&[
+        "-c",
+        "import os; os.write(1, b'x'*32); os.write(2, b'y'*32)",
+    ]);
+    boundary.output_limit_bytes = 64;
+    let output = victim.sandbox().exec(boundary).await?;
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout, b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+    assert_eq!(output.stderr, b"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy");
+    assert_eq!(output.stdout.len() + output.stderr.len(), 64);
+    assert_eq!(
+        victim.sandbox().status().await?.phase,
+        SandboxPhase::Running
+    );
+
+    let mut overflow = py(&[
+        "-c",
+        "import os; os.write(1, b'x'*33); os.write(2, b'y'*32)",
+    ]);
+    overflow.output_limit_bytes = 64;
+    let overflow_result = victim.sandbox().exec(overflow).await;
+    assert!(
+        matches!(
+            &overflow_result,
+            Err(SandboxError::OutputLimit {
+                limit: 64,
+                ownership: circus_sandbox::Ownership::ConfirmedAbsent,
+                ..
+            })
+        ),
+        "expected aggregate output overflow with confirmed owner removal, got {overflow_result:?}"
+    );
+    let status = victim.sandbox().status().await?;
+    assert_eq!(status.phase, SandboxPhase::Destroyed);
+    assert!(status.instance_id.is_none());
+    assert_eq!(
+        survivor.sandbox().status().await?.phase,
+        SandboxPhase::Running
+    );
+    let output = survivor
+        .sandbox()
+        .exec(py(&["-c", "print('alive')"]))
+        .await?;
+    assert_eq!(output.stdout, b"alive\n");
     destroy(&mut victim).await?;
     destroy(&mut survivor).await?;
     Ok(())

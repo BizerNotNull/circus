@@ -27,8 +27,6 @@ pub(crate) use recovery::{OwnerCheck, Recovered, RemovalControl, recover_with};
 mod process;
 pub(crate) use process::{EngineProcess, ProcessChunk, ProcessSpec};
 
-use std::future::Future;
-
 use futures_util::StreamExt;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -36,8 +34,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::observability::events;
 
 use super::guest_transport::{
-    ExecIo, GuestFileMode, GuestStdin, TRANSFER_CHUNK_BYTES, helper_argv, helper_failure,
-    helper_limits,
+    GuestFileMode, GuestStdin, TRANSFER_CHUNK_BYTES, helper_argv, helper_failure, helper_limits,
 };
 
 /// One bounded host-to-guest copy buffer is shared with the guest helper.
@@ -136,6 +133,13 @@ struct FileRequest<'a> {
     max_bytes: usize,
     /// Only `list` carries one; it becomes the helper's entry bound.
     max_entries: Option<usize>,
+}
+
+struct ExecIo<'a> {
+    stdin: GuestStdin<'a>,
+    stdout_limit: usize,
+    stderr_limit: usize,
+    combined_limit: usize,
 }
 
 impl Engine {
@@ -270,18 +274,7 @@ impl Engine {
                 create_id: Some(created_id.clone()),
                 ..map_err(err)
             })?;
-        let Some(host) = inspected.host_config else {
-            return Err(EngineError {
-                create_id: Some(created_id),
-                ..PolicyMismatch {
-                    field: "host_config",
-                    expected: "reported by engine".to_string(),
-                    actual: "not reported".to_string(),
-                }
-                .error()
-            });
-        };
-        let report = policy::report_from(Some(host));
+        let report = policy::report_from(inspected.host_config);
         if let Err(mismatch) = policy::verify(spec, &report) {
             return Err(EngineError {
                 create_id: Some(created_id),
@@ -709,10 +702,10 @@ impl Engine {
                 match item.map_err(map_err)? {
                     bollard::container::LogOutput::StdOut { message }
                     | bollard::container::LogOutput::Console { message } => {
-                        collector.push(OutputPhase::Stdout, &message)?;
+                        collector.push(output::OutputPhase::Stdout, &message)?;
                     }
                     bollard::container::LogOutput::StdErr { message } => {
-                        collector.push(OutputPhase::Stderr, &message)?;
+                        collector.push(output::OutputPhase::Stderr, &message)?;
                     }
                     bollard::container::LogOutput::StdIn { .. } => {}
                 }
@@ -826,7 +819,6 @@ impl RemovalControl for Engine {
         async move { Engine::force_remove(self, id).await }
     }
 }
-
 pub(crate) fn engine_error_kind(err: &EngineError) -> &'static str {
     if err.policy.is_some() {
         return "policy_mismatch";
@@ -950,4 +942,99 @@ fn is_not_found(err: &bollard::errors::Error) -> bool {
             ..
         }
     )
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::*;
+    use bollard::models::{ContainerConfig, ContainerInspectResponse};
+
+    fn fixture() -> (CreateSpec, ContainerInspectResponse) {
+        let spec = CreateSpec {
+            image: "local-image".into(),
+            runtime: "runc".into(),
+            memory: 64 * 1024 * 1024,
+            nano_cpus: 100_000_000,
+            pids: 8,
+            workspace_path: "/workspace".into(),
+            workspace_bytes: 8 * 1024 * 1024,
+            guest_uid: 65534,
+            guest_gid: 65534,
+            owner_label: "owned".into(),
+        };
+        let body = create_body("sandbox", &spec);
+        let inspected = ContainerInspectResponse {
+            config: Some(ContainerConfig {
+                user: body.user,
+                working_dir: body.working_dir,
+                network_disabled: body.network_disabled,
+                volumes: body.volumes,
+                ..Default::default()
+            }),
+            host_config: body.host_config,
+            ..Default::default()
+        };
+        (spec, inspected)
+    }
+
+    #[test]
+    fn accepts_safe_policy_and_engine_normalization() {
+        let (spec, mut inspected) = fixture();
+        let host = inspected.host_config.as_mut().unwrap();
+        host.cap_add = None;
+        host.binds = None;
+        host.mounts = None;
+        host.cap_drop = Some(vec!["all".into()]);
+        host.tmpfs.as_mut().unwrap().insert(
+            spec.workspace_path.clone(),
+            "size=8388608,mode=0755,gid=65534,uid=65534,nodev,nosuid,rw".into(),
+        );
+        for option in [
+            "no-new-privileges",
+            "no-new-privileges:true",
+            "no-new-privileges=true",
+        ] {
+            inspected.host_config.as_mut().unwrap().security_opt = Some(vec![option.into()]);
+            let report = policy::report_from(inspected.host_config.clone());
+            assert!(policy::verify(&spec, &report).is_ok(), "{option}");
+        }
+    }
+
+    #[test]
+    fn rejects_effective_host_policy_deviations() {
+        type Change = fn(&mut bollard::models::HostConfig);
+        let changes: &[(&str, Change)] = &[
+            ("memory", |h| h.memory = Some(0)),
+            ("swap", |h| h.memory_swap = Some(-1)),
+            ("cpu", |h| h.nano_cpus = None),
+            ("pids", |h| h.pids_limit = Some(-1)),
+            ("root", |h| h.readonly_rootfs = Some(false)),
+            ("init", |h| h.init = None),
+            ("runtime", |h| h.runtime = Some("other".into())),
+            ("network", |h| h.network_mode = Some("host".into())),
+            ("caps added", |h| h.cap_add = Some(vec!["SYS_ADMIN".into()])),
+            ("caps retained", |h| h.cap_drop = None),
+            ("nnp absent", |h| h.security_opt = None),
+            ("nnp false", |h| {
+                h.security_opt = Some(vec!["no-new-privileges:false".into()])
+            }),
+            ("bind", |h| h.binds = Some(vec!["/:/host".into()])),
+            ("mount", |h| h.mounts = Some(vec![Default::default()])),
+            ("device", |h| h.devices = Some(vec![Default::default()])),
+            ("ipc", |h| h.ipc_mode = Some("host".into())),
+            ("tmpfs absent", |h| h.tmpfs = None),
+        ];
+        for (name, change) in changes {
+            let (spec, mut inspected) = fixture();
+            change(inspected.host_config.as_mut().unwrap());
+            let report = policy::report_from(inspected.host_config);
+            assert!(policy::verify(&spec, &report).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn rejects_missing_effective_policy() {
+        let (spec, _) = fixture();
+        assert!(policy::verify(&spec, &policy::HostReport::default()).is_err());
+    }
 }
