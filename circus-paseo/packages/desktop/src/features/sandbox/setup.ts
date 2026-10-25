@@ -661,7 +661,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
             },
           },
         });
-        applied = true;
+        activeAgent = input.agent;
         try {
           await deps.reload();
         } catch {

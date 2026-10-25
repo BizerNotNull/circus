@@ -184,6 +184,29 @@ test("prepares a first-run runtime while the model fields are still blank", asyn
   ).resolves.toMatchObject({ ok: true });
 });
 
+test("saving Codex after Claude preparation keeps snapshots on the persisted agent", async () => {
+  const f = await fixture();
+  const source = join(f.home, "source");
+  for (const agent of ["codex", "claude-code"]) {
+    const imageDirectory = join(source, `circus-sandbox/images/${agent}`);
+    await mkdir(imageDirectory, { recursive: true });
+    await writeFile(join(imageDirectory, "Dockerfile"), "");
+  }
+  await f.service.selectSource(source);
+  await expect(
+    f.service.prepare({ agent: "claude-code", baseUrl: "", model: "", preset: "compact" }),
+  ).resolves.toMatchObject({ ok: true });
+  await expect(f.service.save({ ...model, agent: "codex" })).resolves.toMatchObject({ ok: true });
+  await expect(f.service.snapshot()).resolves.toMatchObject({ settings: { agent: "codex" } });
+
+  await expect(
+    f.service.save({ ...model, agent: "codex", apiKey: "", model: "updated-codex-model" }),
+  ).resolves.toMatchObject({ ok: true });
+  await expect(f.service.snapshot()).resolves.toMatchObject({
+    settings: { agent: "codex", model: "updated-codex-model" },
+  });
+});
+
 test("resaves an existing Claude Code configuration", async () => {
   const f = await fixture();
   const claudeModel = { ...model, agent: "claude-code" as const };
