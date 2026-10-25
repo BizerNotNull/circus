@@ -142,7 +142,7 @@ pub struct TaskRequest {
     pub timeout: Duration,
     /// Durable workspace for sequential turns. Each task still owns a new sandbox.
     pub workspace: Option<TaskWorkspace>,
-    /// Native agent thread to resume. Codex only; Claude Code fails closed.
+    /// Native agent session to resume. Supported by Codex and OpenCode; Claude Code fails closed.
     pub agent_session: Option<String>,
 }
 

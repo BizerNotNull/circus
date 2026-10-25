@@ -4,6 +4,7 @@ pub enum AgentKind {
     #[default]
     Codex,
     ClaudeCode,
+    OpenCode,
 }
 
 impl AgentKind {
@@ -15,6 +16,11 @@ impl AgentKind {
                 crate::runner::BRIDGE,
                 include_str!("claude_bridge.py")
             ),
+            Self::OpenCode => format!(
+                "{}\n{}",
+                crate::runner::BRIDGE,
+                include_str!("opencode_bridge.py")
+            ),
         }
     }
 
@@ -22,6 +28,7 @@ impl AgentKind {
         let entry = match self {
             Self::Codex => "main_host",
             Self::ClaudeCode => "main_claude_host",
+            Self::OpenCode => "main_opencode_host",
         };
         format!(
             "{}\n{}\n{entry}()\n",
@@ -34,6 +41,7 @@ impl AgentKind {
         let entry = match self {
             Self::Codex => "main_guest",
             Self::ClaudeCode => "main_claude_guest",
+            Self::OpenCode => "main_opencode_guest",
         };
         format!("{}\n{entry}()\n", self.source())
     }

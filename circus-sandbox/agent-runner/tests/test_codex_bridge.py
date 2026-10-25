@@ -85,6 +85,52 @@ class ModelPolicyTests(unittest.TestCase):
         self.assertEqual(sent, [{"channel": "http_error", "id": 1}])
         events.assert_called_once_with("failure", code="controller", status=None)
 
+    def test_expired_initial_response_suppresses_late_frames(self):
+        class DelayedProvider:
+            def forward(self, _body, emit):
+                emit("http_start", None)
+                emit("http_chunk", b"late")
+                emit("http_end", None)
+
+        self.controller.provider = DelayedProvider()
+        sent = []
+        with patch.object(bridge, "send", sent.append), \
+                patch.object(bridge.time, "monotonic", side_effect=[0, 35]):
+            self.controller.model_request(self.request())
+            self.controller.worker.join(timeout=2)
+        self.assertEqual(sent, [])
+
+    def test_stream_frames_continue_after_initial_response_deadline(self):
+        class SlowStreamProvider:
+            def forward(self, _body, emit):
+                emit("http_start", None)
+                emit("http_chunk", b"after deadline")
+                emit("http_end", None)
+
+        self.controller.provider = SlowStreamProvider()
+        sent = []
+        with patch.object(bridge, "send", sent.append), \
+                patch.object(bridge.time, "monotonic", side_effect=[0, 0, 35]):
+            self.controller.model_request(self.request())
+            self.controller.worker.join(timeout=2)
+        self.assertEqual([message["channel"] for message in sent],
+                         ["http_start", "http_chunk", "http_end"])
+        self.assertEqual(sent[1]["body"], base64.b64encode(b"after deadline").decode())
+
+    def test_expired_initial_error_does_not_emit_unknown_response(self):
+        class DelayedFailureProvider:
+            def forward(self, _body, emit):
+                raise TimeoutError("upstream did not respond")
+
+        self.controller.provider = DelayedFailureProvider()
+        sent = []
+        with patch.object(bridge, "send", sent.append), \
+                patch.object(bridge, "event"), \
+                patch.object(bridge.time, "monotonic", side_effect=[0, 35]):
+            self.controller.model_request(self.request())
+            self.controller.worker.join(timeout=2)
+        self.assertEqual(sent, [])
+
     def test_guest_config_keeps_dynamic_port_as_data(self):
         config = tomllib.loads(bridge.guest_config(12345))
         self.assertEqual(config["model_provider"], "circus")

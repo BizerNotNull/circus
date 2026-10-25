@@ -195,3 +195,52 @@ fn claude_agent_session_is_rejected_without_creating_a_sandbox() {
         ))
     ));
 }
+
+#[test]
+fn opencode_rejects_unsupported_model_ids_before_allocation() {
+    let runner = AgentRunner::new(RunnerConfig {
+        image_preparation: None,
+        backend: BackendConfig::docker("unix:///unused/docker.sock", "unused-image", "runc"),
+        resources: ResourceLimits::new(1024 * 1024, 1000, 32, 1024 * 1024, 4096).unwrap(),
+        model: ModelConfig::new(
+            "https://unused.invalid/v1".into(),
+            "provider/model".into(),
+            "unused-key".into(),
+        )
+        .unwrap(),
+        python: "python3".into(),
+    })
+    .unwrap()
+    .with_agent(AgentKind::OpenCode);
+    assert!(matches!(
+        runner.start_controller(request(), "unused".into()),
+        Err(TaskError::Invalid("OpenCode model id"))
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn opencode_accepts_a_native_session_and_cancels_before_allocation() {
+    let runner = AgentRunner::new(RunnerConfig {
+        image_preparation: None,
+        backend: BackendConfig::docker("unix:///unused/docker.sock", "unused-image", "runc"),
+        resources: ResourceLimits::new(1024 * 1024, 1000, 32, 1024 * 1024, 4096).unwrap(),
+        model: ModelConfig::new(
+            "https://unused.invalid/v1".into(),
+            "gpt-4.1".into(),
+            "unused-key".into(),
+        )
+        .unwrap(),
+        python: "python3".into(),
+    })
+    .unwrap()
+    .with_agent(AgentKind::OpenCode);
+    let mut request = request();
+    request.agent_session = Some("ses_abc123".into());
+    let task = runner.start_controller(request, "unused".into()).unwrap();
+    task.cancel();
+    let outcome = task.wait().await;
+    assert!(matches!(
+        outcome.as_ref(),
+        Err(failure) if matches!(&failure.error, TaskError::Cancelled)
+    ));
+}
