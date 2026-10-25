@@ -14,6 +14,7 @@ import queue
 import ssl
 import subprocess
 import sys
+import time
 import threading
 from urllib.parse import urlsplit
 
@@ -199,6 +200,7 @@ class HostController:
         self.total = 0
         self.worker = None
         self.revoked = threading.Event()
+        self.response_deadline = None
         self.text_seen = set()
         self.output_seen = set()
         self.mcp = None
@@ -242,8 +244,10 @@ class HostController:
         request_id, body = self.validate_request(message)
 
         def emit(kind, chunk):
-            if self.revoked.is_set():
-                raise BridgeError("task credential revoked")
+            if (self.revoked.is_set()
+                    or (self.response_deadline is not None
+                        and time.monotonic() >= self.response_deadline)):
+                return
             response = {"channel": kind, "id": request_id}
             if chunk is not None:
                 self.total += len(chunk)

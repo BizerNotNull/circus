@@ -40,6 +40,29 @@ class OpenCodeTests(unittest.TestCase):
         self.assertEqual(self.provider.key, "host-secret")
 
 
+    def test_expired_model_response_does_not_emit_late_http_start(self):
+        sent = []
+
+        class DelayedProvider:
+            def forward(_self, _body, emit):
+                time.sleep(0.02)
+                emit("http_start", None)
+                emit("http_end", None)
+
+        self.controller.provider = DelayedProvider()
+        self.controller.response_deadline = time.monotonic() - 1
+        request = {
+            "id": 1, "method": "POST", "path": "/v1/responses", "token": "task-token",
+            "body": base64.b64encode(json.dumps({
+                "model": "gpt-4.1", "stream": True,
+            }).encode()).decode(),
+        }
+        with patch.object(bridge, "send", side_effect=lambda message: sent.append(message)), \
+                patch.object(bridge.time, "monotonic", side_effect=[0, 100, 100]):
+            self.controller.model_request(request)
+            self.controller.worker.join(2)
+        self.assertEqual(sent, [])
+
     def test_simultaneous_summary_and_user_requests_are_serialized_and_correlated(self):
         requests = []
         entered = threading.Event()

@@ -73,10 +73,11 @@ class OpenCodeHostController(HostController):
         raise BridgeError("unsupported OpenCode event")
 
     def model_request(self, message):
-        # OpenCode may issue the summary request while its user turn is still
-        # active. The host provider channel only supports one stream at a time.
+        # Keep serialization plus the provider's 30-second header wait inside
+        # the guest's 35-second pending-response window.
+        self.response_deadline = time.monotonic() + 34
         if self.worker and self.worker.is_alive():
-            self.worker.join(timeout=30)
+            self.worker.join(timeout=4)
         if self.worker and self.worker.is_alive():
             raise BridgeError("model channel is unavailable or busy", "timeout")
         super().model_request(message)
