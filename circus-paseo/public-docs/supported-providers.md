@@ -71,7 +71,7 @@ its Docker endpoint, matching agent image, resource limits and model channel. A 
 an explicit private key file or macOS Keychain reference. Personal Agent logins, home directories,
 proxy settings, ambient MCP servers, system prompts and agent environments are not imported.
 
-Add this entry to the daemon configuration, replacing both absolute paths:
+Add this entry to the daemon configuration, replacing all three absolute paths:
 
 ```json
 {
@@ -80,7 +80,10 @@ Add this entry to the daemon configuration, replacing both absolute paths:
       "sandbox": {
         "enabled": true,
         "command": ["/absolute/path/to/circus-stdio-bridge"],
-        "env": { "CIRCUS_RUNNER_CONFIG": "/absolute/path/to/runner.json" }
+        "env": {
+          "CIRCUS_RUNNER_CONFIG": "/absolute/path/to/runner.json",
+          "CIRCUS_SANDBOX_STATE_DIR": "/absolute/path/to/state"
+        }
       }
     }
   }
@@ -114,11 +117,23 @@ web/desktop. Files are held in a bounded, in-memory daemon cache (64 MiB, 256 fi
 the daemon restarts. Download them before restarting. No automatic patch application, project
 overwrite, Git commit or workspace cleanup is performed.
 
-Each sandbox accepts one prompt and is destroyed at the end. Creating a new task starts with a new
-filesystem; it does not retain the previous conversation, files or running processes. Follow-up
-prompts, steering, resume, host tools and image prompts are unavailable. The host configuration
-selects the model. A future retained-session runner must add explicit resume and workspace
-ownership semantics before enabling continuation here.
+Sandbox sessions are sequential. Each prompt runs in a fresh sandbox restored from the session's
+plaintext workspace archive in `CIRCUS_SANDBOX_STATE_DIR`, then captures that archive back before
+destroying the sandbox. Codex resumes the native thread returned by the previous completed turn,
+so follow-up prompts retain completed files and conversation. Running processes, in-flight turns
+and unsandboxed host state are not preserved; a turn that is still running cannot be recovered
+after a restart. Archive paths are derived from the session ID, are never accepted from prompts or
+attachments, and are not encrypted, so they stay inside the trusted host state directory. Persistence
+contains only the versioned Codex thread handle; reopening after a daemon restart uses the same
+session ID and state directory to find the archive.
+
+Steering, host tools, image prompts and automatic patch application are unavailable. Only one turn
+may run at a time. **Stop** cancels the active turn and waits for its cleanup; a pending or unknown
+cleanup blocks the next prompt until **Retry cleanup** confirms it. Claude Code remains single-turn
+and fails closed if a resumed thread is requested. This implementation uses Docker on Linux only.
+The host configuration selects the model. Provider options `workspaceMaxTotalBytes` (default 64 MiB,
+maximum 512 MiB) and `workspaceMaxEntries` (default 65,536, maximum 1,000,000) bound each archive
+load and capture.
 
 ## ACP catalog
 

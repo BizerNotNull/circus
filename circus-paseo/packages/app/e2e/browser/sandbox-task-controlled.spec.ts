@@ -43,7 +43,10 @@ test.use({
         sandbox: {
           enabled: true,
           command: [bridge],
-          env: { CIRCUS_RUNNER_CONFIG: runnerConfig },
+          env: {
+            CIRCUS_RUNNER_CONFIG: runnerConfig,
+            CIRCUS_SANDBOX_STATE_DIR: join(fixtureDirectory, "state"),
+          },
         },
       },
     },
@@ -60,7 +63,7 @@ async function openSandboxTask(page: Page, workspaceId: string) {
   const command = await openCommandCenter(page);
   await command.getByTestId("command-center-input").fill("New sandbox task");
   await command.getByRole("button", { name: "New sandbox task", exact: true }).click();
-  await expect(page.getByText(/This sandbox accepts one task/)).toBeVisible();
+  await expect(page.getByText(/Sandbox sessions continue completed turns only/)).toBeVisible();
 }
 
 test("creates through agents.create with a controlled stdio provider fixture", async ({

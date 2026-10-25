@@ -1,14 +1,15 @@
-# 单任务 stdio 桥接
+# stdio 桥接
 
 `circus-stdio-bridge` 是 `circus-agent-runner` 的同机子进程入口。Node 客户端位于
 `circus-paseo/plugins/sandbox-provider/server/bridge/stdio-client.ts`，只依赖 Paseo 插件 SDK、
 Zod 与 Node 内置模块。它不启动 HTTP 服务，不注册 provider，也不增加另一套沙箱生命周期。
 Provider 与 UI 由 [Paseo sandbox provider](../../circus-paseo/public-docs/supported-providers.md#sandbox-codex) 提供；运行器能力和限制见 [Agent 运行器](codex-agent.md)。
 
-每个客户端启动一个 Rust 进程，只提交一个任务。结束后创建新客户端；不保留多轮会话、不恢复
-已退出进程的任务，也没有跨连接按 taskId 查询或取消的入口。库层的调用方可以通过
-`TaskWorkspace` 归档和 `agent_session` 串起多轮（见 [Agent 运行器](codex-agent.md)），但 v1
-stdio 协议不暴露这两个字段，保持既有单轮线格式；接入多轮需要后续协议评审，不在本版隐式启用。
+每个客户端进程只提交一个任务。Paseo provider 通过调用方拥有的明文工作区归档和 Codex
+原生线程 ID 串起顺序多轮：每次提示启动新的 bridge 进程，任务开始时恢复归档，结束时在沙箱
+销毁前保存归档，并在成功结果中返回 `agentSession`。这只延续已完成轮次，不保留运行中的
+进程、进行中的 turn 或 bridge 进程内状态；也没有跨连接按 taskId 查询或取消的入口。
+Claude Code 仍为单轮并拒绝 `agentSession`。
 
 ## 宿主配置
 
@@ -70,7 +71,7 @@ Rust 通过固定 `/usr/bin/security` 读取，输出有容量限制，10 秒内
 `CircusTaskEvent`、`CircusTaskResult`、`CleanupStatus`、`CircusBridgeError`。
 
 ```typescript
-const client = new CircusStdioClient({ executable, configFile, env });
+const client = new CircusStdioClient({ executable, configFile, stateDir, env });
 try {
   const task = await client.start({
     prompt: "Fix answer.py and export result.txt",
@@ -91,8 +92,14 @@ try {
 `cancel()` 等待取消请求确认，终止和清理结论仍须等待 `result`。成功结果包含原始产物字节，
 桥接不自动写回宿主。输入与产物路径只是沙箱项目相对名称，不能赋予宿主文件访问权限。
 
-任务失败/取消在 `result` 中返回 `failed` / `cancelled` 和安全错误类别；协议、断流、进程退出、
-消费拥塞等传输失败以 `CircusBridgeError` 拒绝 Promise。传输错误的 `cleanup` 为 `unknown`。
+顺序多轮时，调用方为每次提示创建新的 `CircusStdioClient`，重复传入同一个绝对
+`workspaceArchive` 和预算，并把上一次成功结果的 `agentSession` 传给下一次请求。每次任务仍是
+新沙箱；归档在任务结束且沙箱销毁前保存。不要从提示词、附件或远端消息生成归档路径。
+
+`stateDir` 是调用方拥有的宿主状态目录，用于派生工作区归档路径；它只参与组装请求，
+不会传给 Rust 进程。桥接也不读取该目录中的其他文件。任务失败/取消在 `result` 中返回
+`failed` / `cancelled` 和安全错误类别；协议、断流、进程退出、消费拥塞等传输失败以
+`CircusBridgeError` 拒绝 Promise。传输错误的 `cleanup` 为 `unknown`。
 `close()` 发送 EOF 并等待进程收尾，默认 120 秒，允许显式设置 1..300000 毫秒。
 超时才强制结束进程并拒绝，不能把强杀当作已清理。调用者需要处理 `close()` 的错误。
 
@@ -105,7 +112,7 @@ TypeScript 的严格 Zod schema 位于 `bridge/protocol.ts`，Rust 模型位于 
 | 方向        | type             | 字段与语义                                                                         |
 | ----------- | ---------------- | ---------------------------------------------------------------------------------- |
 | Rust → Node | `ready`          | `maxFrameBytes: 12582912`，配置完成，尚未创建任务                                  |
-| Node → Rust | `start`          | `requestId`、`request: { prompt, inputFiles, outputPaths, timeoutMs, mcpGrants? }` |
+| Node → Rust | `start`          | `requestId`、`request: { prompt, inputFiles, outputPaths, timeoutMs, mcpGrants?, workspaceArchive?, workspaceMaxTotalBytes?, workspaceMaxEntries?, agentSession? }` |
 | Rust → Node | `accepted`       | `requestId`、Rust 分配的 `taskId`                                                  |
 | Rust → Node | `event`          | `requestId`、`taskId`、从 1 连续递增的 `seq`、`event`                              |
 | Node → Rust | `cancel`         | `requestId`、`taskId`，只作用于本连接任务                                          |
@@ -116,14 +123,17 @@ TypeScript 的严格 Zod schema 位于 `bridge/protocol.ts`，Rust 模型位于 
 | Rust → Node | `error`          | `code`、静态 `message`，连接失败并退出非零                                         |
 
 Wire 文件使用 `{ "path": "relative/name", "data": "canonical padded base64" }` 数组，
-拒绝重复路径。请求没有命令、宿主 cwd、模型端点、环境、凭证或可复用沙箱标识字段。
+拒绝重复路径。请求没有命令、宿主 cwd、模型端点、环境或凭证字段。归档路径和
+`agentSession` 只能由可信调用方提供，Rust 在分配沙箱前校验。
 `requestId` / `taskId` 只允许 1..64 个 ASCII 字母、数字或连字符。
 
 事件 `kind` 为 `phase`、`sandbox_created`、`text_delta`、`tool` 或 `tool_output`。
 `tool.exitCode` 是整数或 null。事件和产物都是不可信内容；展示或下载不等于执行权限。
 
 `result.status` 为 `succeeded`、`failed` 或 `cancelled`。成功时 `cleanup` 必须是 `confirmed`，
-并且 `artifacts` 与请求的输出集合完全一致；失败/取消包含 `error: { code, message }`。
+并且 `artifacts` 与请求的输出集合完全一致；请求携带 `workspaceArchive` 或 `agentSession`
+时，成功结果还包含可选的 `agentSession`，供下一次任务续接；旧单轮客户端不携带这两个字段，
+结果线格式保持不变。失败/取消包含 `error: { code, message }`。
 `cleanup` 可为 `confirmed`、`pending` 或 `unknown`。`pending` 保留运行器清理句柄，客户端可以
 显式重试。EOF 时也尝试一次重试；仍未确认则退出非零。`WorkerGone` 不被当作清理成功。
 重试不会把原任务失败改成成功。
@@ -133,6 +143,10 @@ Wire 文件使用 `{ "path": "relative/name", "data": "canonical padded base64" 
 - 每帧最多 12 MiB，不含 LF；事件帧最多 512 KiB，覆盖 JSON 转义开销。
 - prompt 最多 64 KiB；输入最多 64 个文件、解码后合计 8 MiB；产物最多 32 个，合计 8 MiB。
   每文件另受宿主资源配置限制。项目路径最多 1024 个 UTF-8 字节，拒绝路径越界和不可移植形式。
+- `workspaceArchive` 必须是宿主绝对路径，最多 4096 字节且不含控制字符。预算
+  `workspaceMaxTotalBytes` 为 1..512 MiB，`workspaceMaxEntries` 为 1..1000000，只能在提供
+  归档时出现；省略时使用 64 MiB / 65536。`agentSession` 只允许 1..128 个 ASCII 字母、数字、
+  `-` 或 `_`。
 - 任务期限 1..3600000 毫秒。Node 就绪等待 10 秒；任务响应预算为任务期限加收尾预算。
 - Rust 输入队列与输出队列各最多一帧，stdout 单次写入等待最多 5 秒。Node 事件队列最多
   256 项且最多 8 MiB；消费超限会关闭连接并请求取消，最终结果不能冒充成功。
@@ -149,8 +163,8 @@ cargo clippy --locked -p circus-stdio-bridge --all-targets -- -D warnings
 ```
 
 Rust 默认测试包含真实 stdio 二进制进程及不可用后端路径。Node 的
-`framing.test.ts` 和 `stdio-client.posix.test.ts` 验证有界帧、子进程断流、任务关联、取消、
-清理重试和二进制文件往返；后者使用脚本协议对端，不是沙箱端到端验收。
+`framing.test.ts`、`protocol.test.ts` 和 `stdio-client.posix.test.ts` 验证有界帧、子进程断流、任务关联、取消、
+清理重试、工作区路径/预算/会话字段边界和二进制文件往返；后者使用脚本协议对端，不是沙箱端到端验收。
 
 真实 Docker 的取消与 EOF 用例在收到任务自己的实例标识后触发收尾，并独立 inspect 确认删除。
 它不访问模型，必须显式提供后端、已验证镜像和宿主 Python：

@@ -547,7 +547,11 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
               ...provider,
               enabled: true,
               command: [bridge],
-              env: { ...provider?.env, CIRCUS_RUNNER_CONFIG: managedConfig },
+              env: {
+                ...provider?.env,
+                CIRCUS_RUNNER_CONFIG: managedConfig,
+                CIRCUS_SANDBOX_STATE_DIR: join(directory, "sandbox-state"),
+              },
             },
           },
         });

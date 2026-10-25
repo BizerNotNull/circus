@@ -1,5 +1,11 @@
 import { expect, test } from "vitest";
-import { taskOptionsSchema } from "./task.js";
+import {
+  DEFAULT_WORKSPACE_MAX_ENTRIES,
+  DEFAULT_WORKSPACE_MAX_TOTAL_BYTES,
+  MAX_WORKSPACE_ENTRIES,
+  MAX_WORKSPACE_TOTAL_BYTES,
+  taskOptionsSchema,
+} from "./task.js";
 
 test("accepts only explicit project-relative files and bounded task settings", () => {
   expect(
@@ -13,7 +19,15 @@ test("accepts only explicit project-relative files and bounded task settings", (
     outputPaths: ["result.txt"],
     timeoutMs: 60_000,
     mcpGrants: [],
+    workspaceMaxTotalBytes: DEFAULT_WORKSPACE_MAX_TOTAL_BYTES,
+    workspaceMaxEntries: DEFAULT_WORKSPACE_MAX_ENTRIES,
   });
+  for (const workspaceMaxTotalBytes of [0, MAX_WORKSPACE_TOTAL_BYTES + 1]) {
+    expect(taskOptionsSchema.safeParse({ workspaceMaxTotalBytes }).success).toBe(false);
+  }
+  for (const workspaceMaxEntries of [0, MAX_WORKSPACE_ENTRIES + 1]) {
+    expect(taskOptionsSchema.safeParse({ workspaceMaxEntries }).success).toBe(false);
+  }
   for (const path of [
     "/etc/passwd",
     "../secret",

@@ -1,5 +1,6 @@
-import { access, constants } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { createHash } from "node:crypto";
+import { access, constants, mkdir } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import {
   negotiateProviderCapabilities,
   requireProviderCapabilities,
@@ -7,36 +8,59 @@ import {
   type ProviderEvent,
   type ProviderInput,
   type ProviderLaunch,
+  type ProviderPersistence,
   type ProviderRegistration,
 } from "@getpaseo/plugin/server/provider";
+import { z } from "zod";
 import { CircusStdioClient, type CircusClientConfig } from "./bridge/stdio-client.js";
+import { isAbsoluteHostPath } from "./bridge/protocol.js";
 import { ArtifactStore } from "./artifacts.js";
 import { SandboxProviderError } from "./errors.js";
-import { SandboxSession, safeError } from "./session.js";
+import { SandboxSession, safeError, type TaskClient } from "./session.js";
 import { SANDBOX_HOST_MODEL_ID, SANDBOX_PROVIDER_ID } from "../shared/task.js";
 import { readMcpCatalog } from "./mcp-catalog.js";
 
-const capabilities = ["prompt.message", "timeline.plugin"] as const;
+const capabilities = ["prompt.message", "timeline.plugin", "session.persistence"] as const;
+const modes = [
+  {
+    id: "sandbox",
+    label: "Sequential sandbox",
+    description:
+      "Sequential turns: each prompt recreates the sandbox from completed turns only; running processes and in-flight turns are not preserved",
+    isUnattended: true,
+  },
+];
 const hostConfiguredModel = {
   id: SANDBOX_HOST_MODEL_ID,
   label: "Host configured",
   description: "The host runner selects the configured agent and model",
   isDefault: true,
 } as const;
-const modes = [
-  {
-    id: "single-task",
-    label: "Single task",
-    description: "New sandbox; no conversation or workspace continuation",
-    isUnattended: true,
-  },
-];
+const persistenceSchema = z.strictObject({
+  version: z.literal(1),
+  data: z.strictObject({
+    agentSession: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]{1,128}$/)
+      .optional(),
+  }),
+});
+type PersistenceData = z.infer<typeof persistenceSchema>["data"];
+
+export type ClientFactory = (config: CircusClientConfig) => TaskClient;
+export type StateDirPreparer = (path: string) => Promise<void>;
 
 export class SandboxProvider {
   private readonly sessions = new Set<SandboxSession>();
   private configFile: string | null = null;
 
-  constructor(private readonly artifacts: ArtifactStore) {}
+  constructor(
+    private readonly artifacts: ArtifactStore,
+    private readonly createClient: ClientFactory = (config) => new CircusStdioClient(config),
+    private readonly prepareStateDir: StateDirPreparer = async (path) => {
+      await mkdir(path, { recursive: true, mode: 0o700 });
+    },
+  ) {}
 
   registration(): ProviderRegistration {
     return {
@@ -45,7 +69,7 @@ export class SandboxProvider {
       icon: "icon.svg",
       requiresConfiguration: true,
       description:
-        "One agent task in a disposable sandbox, using explicitly supplied files and tools",
+        "Sequential Codex turns in disposable sandboxes, each restored from the session's completed workspace and native thread",
       command: ["circus-stdio-bridge"],
       status: async ({ launch }) => {
         try {
@@ -59,7 +83,7 @@ export class SandboxProvider {
           return {
             available: false,
             diagnostic:
-              "Configure the sandbox provider with an absolute circus-stdio-bridge command and CIRCUS_RUNNER_CONFIG pointing to a readable host configuration file.",
+              "Configure the sandbox provider with an absolute circus-stdio-bridge command, CIRCUS_RUNNER_CONFIG pointing to a readable host configuration file, and CIRCUS_SANDBOX_STATE_DIR pointing to an absolute host state directory.",
           };
         }
       },
@@ -106,7 +130,7 @@ export class SandboxProvider {
             models: [hostConfiguredModel],
             modes,
             defaultModel: SANDBOX_HOST_MODEL_ID,
-            defaultMode: "single-task",
+            defaultMode: "sandbox",
           },
         });
         return;
@@ -114,11 +138,7 @@ export class SandboxProvider {
       if (input.type === "session.open") {
         if (sessions.has(input.sessionId))
           throw new SandboxProviderError("duplicate", "Sandbox session already exists");
-        if (input.persistence)
-          throw new SandboxProviderError(
-            "unsupported",
-            "Sandbox tasks cannot be resumed. Create a new task.",
-          );
+        const restored = readPersistence(input.persistence);
         if (input.config.toolPolicy)
           throw new SandboxProviderError(
             "unsupported",
@@ -129,23 +149,48 @@ export class SandboxProvider {
             "unsupported",
             `Sandbox model must be ${SANDBOX_HOST_MODEL_ID}; the host runner selects the real model`,
           );
+        const archive = workspaceArchive(config.stateDir, input.sessionId);
+        if (!isAbsoluteHostPath(archive))
+          throw new SandboxProviderError(
+            "configuration",
+            "CIRCUS_SANDBOX_STATE_DIR must yield a bounded absolute workspace archive path.",
+          );
+        await this.prepareStateDir(config.stateDir);
+        if (restored.agentSession !== undefined) {
+          try {
+            await access(archive, constants.R_OK);
+          } catch {
+            throw new SandboxProviderError(
+              "invalid_persistence",
+              "The persisted sandbox workspace is missing; open a new sandbox session.",
+            );
+          }
+        }
         const session = new SandboxSession({
           id: input.sessionId,
           config: input.config,
+          createClient: () => this.createClient(config),
+          archive,
+          agentSession: restored.agentSession,
           artifacts: this.artifacts,
-          client: new CircusStdioClient(config),
           emit,
         });
         sessions.set(input.sessionId, session);
         this.sessions.add(session);
+        const persistence: ProviderPersistence = {
+          version: 1,
+          data: restored.agentSession === undefined ? {} : { agentSession: restored.agentSession },
+        };
         emit({
           type: "session.opened",
           requestId: input.requestId,
           sessionId: input.sessionId,
           capabilities: negotiated,
           restoration: "core",
+          persistence,
           cwd: input.config.cwd,
         });
+        emit({ type: "session.persistence", sessionId: input.sessionId, persistence });
         emit({
           type: "session.config",
           sessionId: input.sessionId,
@@ -153,7 +198,7 @@ export class SandboxProvider {
             model: SANDBOX_HOST_MODEL_ID,
             models: [hostConfiguredModel],
             modes,
-            mode: "single-task",
+            mode: "sandbox",
             thinkingOptions: [],
             settings: [],
           },
@@ -226,18 +271,43 @@ export class SandboxProvider {
   }
 }
 
+/** Deterministic archive path; session ids cannot inject path segments. */
+export function workspaceArchive(stateDir: string, sessionId: string): string {
+  const digest = createHash("sha256").update(sessionId).digest("hex");
+  return join(stateDir, `${digest}.snapshot`);
+}
+
+function readPersistence(persistence: ProviderPersistence | undefined): PersistenceData {
+  if (!persistence) return {};
+  if (persistence.version !== 1)
+    throw new SandboxProviderError(
+      "unsupported",
+      "Sandbox persistence version 1 is required to resume a session.",
+    );
+  const parsed = persistenceSchema.safeParse(persistence);
+  if (!parsed.success)
+    throw new SandboxProviderError(
+      "invalid_persistence",
+      "Sandbox persistence data is invalid; open a new sandbox session.",
+    );
+  return parsed.data.data;
+}
+
 export function launchConfig(launch: ProviderLaunch | undefined): CircusClientConfig {
   const configFile = launch?.env.CIRCUS_RUNNER_CONFIG;
+  const stateDir = launch?.env.CIRCUS_SANDBOX_STATE_DIR;
   if (
     !launch ||
     !configFile ||
     !isAbsolute(configFile) ||
+    !stateDir ||
+    !isAbsoluteHostPath(stateDir) ||
     !isAbsolute(launch.command) ||
     launch.args.length !== 0
   ) {
     throw new SandboxProviderError(
       "configuration",
-      "Set an absolute bridge executable and CIRCUS_RUNNER_CONFIG; command arguments are not supported.",
+      "Set an absolute bridge executable, CIRCUS_RUNNER_CONFIG and CIRCUS_SANDBOX_STATE_DIR; command arguments are not supported.",
     );
   }
   const env: Record<string, string> = {};
@@ -246,5 +316,5 @@ export function launchConfig(launch: ProviderLaunch | undefined): CircusClientCo
     const value = launch.env[key];
     if (value !== undefined) env[key] = value;
   }
-  return { executable: launch.command, configFile, env };
+  return { executable: launch.command, configFile, stateDir, env };
 }
