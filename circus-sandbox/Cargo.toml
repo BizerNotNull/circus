@@ -63,8 +63,8 @@ name = "containerd_image_environment"
 required-features = ["containerd"]
 
 [workspace]
-members = ["agent-runner", "stdio-bridge"]
-default-members = [".", "agent-runner", "stdio-bridge"]
+members = ["agent-runner", "sandbox-exec", "stdio-bridge"]
+default-members = [".", "agent-runner", "sandbox-exec", "stdio-bridge"]
 resolver = "3"
 
 [workspace.dependencies]

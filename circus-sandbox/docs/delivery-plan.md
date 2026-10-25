@@ -14,6 +14,7 @@
 - 已有 `Workspace::capture_code_snapshot`、`CodeSnapshot`、预算与新工作区恢复，是进程内存中的代码文件快照；`CodeSnapshot::save_file`/`load_file` 另提供显式、有界、版本化的普通文件/目录归档，宿主路径由调用方提供并负责存储、保留与租户范围。它不是容器/VM 快照、进程/内存检查点、工作区总配额、加密或保留策略，也不是池。文件库、资源请求校验也不等于总配额执行或宿主隔离。
 - Docker + runc、containerd + runc 与 Kubernetes workload（B02 的创建/就绪/exec/交互进程/文件/删除切片，S03-kr 工作区快照，P02 池租约）已实现；Kubernetes 真正 pause/resume provider（B03）、containerd+gVisor/Kata、gVisor、Kata、Firecracker、OCI 环境准备、Git 工作区、运行时快照（进程/客户机内存检查点）和运行指标仍待实现；HTTP/认证/OpenAPI（H01–H02）已在 `src/http` 与 `docs/http-api.md` 实现，仍需以 CI 和真实后端运行证据为准。Kubernetes workload 不实现 RuntimeClass 选择、NetworkPolicy 或节点 cgroup 读回，因此 B02 中“网络/RuntimeClass 实际生效”的验收仍未完成。Docker 现有路径还需要下文审计正确性切片；局部…
 - 当前检出在统一 API 上增加调用方持久化的 `RecoveryId` 与 `Sandbox::recover_orphan`：恢复只连接所选后端，不准备镜像或创建实例，删除前仍由后端校验 owner label，绝不按名称单独删除；没有 list-all API 或持久化注册表。合并、运行与真实后端证据以对应 PR 为准。
+- 工作区成员 `circus-sandbox-exec` 提供独立本地进程代理：宿主把既有 Paseo provider 的启动命令指向该二进制，剩余参数作为 guest argv 原样传入；代理以严格配置连接 Docker/containerd/Kubernetes，恢复持久化孤儿、在创建前加载有界工作区归档、转发原始 stdio，并在退出时捕获归档、确认销毁或保留 state 供下次恢复。它不修改 `circus-paseo/`，不是 provider、模型代理、TTY 或运行中快照；Paseo 接入仍未完成。
 - 本地 Docker 测试、工具安装或宿主资源可达只证明各自观察，不能证明七领域交付完成。具体命令、环境、提交和运行结果保留在产生证据的 PR/报告，不为本计划编辑预填 CI 或合并结果。
 
 ## 完成定义与范围
