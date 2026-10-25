@@ -54,11 +54,13 @@
 
 前提：已构建 [Codex Agent 镜像](../images/codex/README.md)、显式可用的本地 Linux Docker Engine、宿主 Python 3.11+（含可信 CA）和支持 Codex 工具调用的 Responses SSE 服务。仅兼容 Chat Completions 的网关不适用。`CIRCUS_HOST_PYTHON` 可指定宿主 Python，默认 `python3`；`CIRCUS_MODEL_CA_FILE` 可指定 PEM CA 文件。
 
-在 `circus-sandbox/` 运行以下 Bash 示例，替换地址和模型名。密钥经终端输入，示例不读取个人登录文件。
+先用 `docker --host "$CIRCUS_DOCKER_ENDPOINT" image inspect circus-agent-codex:0.164.0 --format '{{.Id}}'` 获取本地镜像的不可变 ID。以下 `CIRCUS_AGENT_IMAGE` 使用该 `sha256:` ID，与 stdio 配置一致；验收不依赖可变 tag 解析。
+
+在 `circus-sandbox/` 运行以下 Bash 示例，替换镜像 ID、地址和模型名。密钥经终端输入，示例不读取个人登录文件。
 
 ```bash
 export CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock
-export CIRCUS_AGENT_IMAGE=circus-agent-codex:0.164.0
+export CIRCUS_AGENT_IMAGE=sha256:REPLACE_WITH_VERIFIED_IMAGE_ID
 export CIRCUS_MODEL_BASE_URL=https://your-approved-gateway.example/v1
 export CIRCUS_MODEL=your-approved-model
 read -r -s -p 'Model API key: ' CIRCUS_MODEL_API_KEY
@@ -85,8 +87,8 @@ python3 -B -m unittest discover -s agent-runner/tests -p 'test_codex_*.py' -v
 ```bash
 CIRCUS_DOCKER_SANDBOX=1 \
 CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
-CIRCUS_AGENT_IMAGE=circus-agent-codex:0.164.0 \
-  cargo test --locked -p circus-agent-runner tests::docker -- --ignored --nocapture
+CIRCUS_AGENT_IMAGE=sha256:REPLACE_WITH_VERIFIED_IMAGE_ID \
+  cargo test --locked -p circus-agent-runner tests::docker -- --ignored --nocapture --test-threads=1
 ```
 
 这些测试覆盖并发任务输入隔离、修改已有代码、真实工具执行、事件和产物；检查容器没有启用的非 loopback 接口及对外路由、宿主 key 未进入任何工具环境值，并按每个任务自己的实例标识确认回收。另覆盖 HTTP 拒绝、产物缺失、主动取消、超时和句柄 Drop。脚本对端仅由私有测试入口注入，公开运行器没有假模型开关。实际网关用上方 example 单独验收；其他平台、长任务和高并发需另外验证。
