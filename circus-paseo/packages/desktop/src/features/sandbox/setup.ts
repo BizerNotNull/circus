@@ -14,6 +14,7 @@ import {
 } from "@getpaseo/protocol/sandbox-setup";
 import { createKeychain, type KeychainReference } from "./keychain.js";
 import {
+  CLAUDE_CODE_IMAGE,
   CODEX_IMAGE,
   exists,
   inspectEnvironment,
@@ -22,11 +23,14 @@ import {
 } from "./environment.js";
 import type { RunCommand } from "./command.js";
 import { probeGithub } from "./mcp.js";
-import { acceptedResponse } from "./model.js";
+import { acceptedModelResponse } from "./model.js";
 
 export class SandboxSetupError extends Error {}
 
-const referenceSchema = z.strictObject({ service: z.string(), account: z.string() });
+const referenceSchema = z.strictObject({
+  service: z.string(),
+  account: z.string(),
+});
 const connectionSchema = z.strictObject({
   id: z.string(),
   url: z.string(),
@@ -88,6 +92,12 @@ const runnerSchema = z.strictObject({
   }),
   mcpConnections: z.array(connectionSchema).optional(),
 });
+const preparationInputSchema = z
+  .object({
+    agent: z.enum(["codex", "claude-code"]).optional(),
+  })
+  .passthrough();
+
 type RunnerConfig = z.infer<typeof runnerSchema>;
 const presets = {
   compact: {
@@ -155,10 +165,6 @@ function requireRuntime(environment: SandboxEnvironment) {
 }
 
 function selectResources(preset: SandboxSetupInput["preset"], config: RunnerConfig | null) {
-  if (config?.agent && config.agent !== "codex")
-    throw new SandboxSetupError(
-      "This setup currently manages Codex only. Your existing agent configuration has not been changed.",
-    );
   if (preset !== "custom") return presets[preset];
   if (!config) throw new SandboxSetupError("Choose a resource preset for the new environment.");
   return config.resources;
@@ -214,13 +220,17 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
   const keychain = createKeychain(deps.run);
   let saving = false;
 
+  let activeAgent: SandboxSetupInput["agent"] | undefined;
+
   function requirePlatform(): void {
     if (deps.platform !== "darwin")
       throw new SandboxSetupError("Desktop setup currently requires macOS Keychain.");
   }
 
   async function current() {
-    const persisted = readPersistedConfig(deps.home, { defaultsIfMissing: true });
+    const persisted = readPersistedConfig(deps.home, {
+      defaultsIfMissing: true,
+    });
     const candidate = persisted.agents?.providers?.sandbox;
     const provider = candidate ? ProviderOverrideSchema.parse(candidate) : undefined;
     const path = provider?.env?.CIRCUS_RUNNER_CONFIG;
@@ -246,13 +256,16 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
     return { config, provider, path, serialized };
   }
 
-  async function inspect() {
+  async function inspect(agent?: SandboxSetupInput["agent"]) {
     const stored = await current();
+    const selectedAgent = agent ?? activeAgent ?? stored.config?.agent ?? "codex";
     const candidates = [...deps.sourceCandidates];
     if (await exists(sourceFile)) {
       const selected = z.string().parse(JSON.parse(await readBounded(sourceFile, 8192)));
       candidates.unshift(selected);
     }
+    const sameConfiguredAgent = selectedAgent === (stored.config?.agent ?? "codex");
+    const defaultAgentImage = selectedAgent === "claude-code" ? CLAUDE_CODE_IMAGE : CODEX_IMAGE;
     const environment = await inspectEnvironment({
       platform: deps.platform,
       userHome: deps.userHome,
@@ -261,8 +274,12 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       binaryDirectories: deps.binaryDirectories,
       configured: stored.config ?? undefined,
       configuredBridge: stored.provider?.command?.[0],
+      agent: selectedAgent,
+      agentImage: sameConfiguredAgent
+        ? (stored.config?.backend.image ?? defaultAgentImage)
+        : defaultAgentImage,
     });
-    return { ...stored, environment };
+    return { ...stored, environment, agent: selectedAgent };
   }
 
   async function credential(
@@ -290,7 +307,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
 
   return {
     async snapshot(): Promise<SandboxSetupSnapshot> {
-      const { config, environment } = await inspect();
+      const { config, environment, agent } = await inspect();
       const supported = deps.platform === "darwin";
       const ready = environment.checks
         .filter((check) => check.id !== "source")
@@ -301,6 +318,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
         ready,
         checks: environment.checks,
         settings: {
+          agent,
           baseUrl: config?.model.baseUrl ?? "",
           model: config?.model.model ?? "",
           preset: config ? presetFor(config.resources) : "compact",
@@ -313,7 +331,8 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       requirePlatform();
       if (
         !isAbsolute(path) ||
-        !(await exists(join(path, "circus-sandbox/images/codex/Dockerfile")))
+        (!(await exists(join(path, "circus-sandbox/images/codex/Dockerfile"))) &&
+          !(await exists(join(path, "circus-sandbox/images/claude-code/Dockerfile"))))
       )
         throw new SandboxSetupError(
           "Select the Circus repository folder containing circus-sandbox.",
@@ -321,9 +340,16 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await atomicWrite(sourceFile, JSON.stringify(path));
     },
-    async prepare(): Promise<SandboxSetupResult> {
+    async prepare(raw?: unknown): Promise<SandboxSetupResult> {
       requirePlatform();
-      const { environment } = await inspect();
+      let agent: "codex" | "claude-code";
+      if (raw === undefined) {
+        agent = activeAgent ?? (await current()).config?.agent ?? "codex";
+      } else {
+        agent = preparationInputSchema.parse(raw).agent ?? "codex";
+      }
+      activeAgent = agent;
+      const { environment } = await inspect(agent);
       const { source, docker, endpoint } = environment;
       if (!source) return { ok: false, message: "Select the Circus source folder first." };
       if (!docker || !endpoint)
@@ -346,6 +372,8 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
           };
       }
       if (!environment.image) {
+        const imageTag = agent === "claude-code" ? CLAUDE_CODE_IMAGE : CODEX_IMAGE;
+        const imageDirectory = agent === "claude-code" ? "claude-code" : "codex";
         const built = await deps.run({
           executable: docker,
           args: [
@@ -355,16 +383,17 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
             "--platform",
             "linux/amd64",
             "--tag",
-            CODEX_IMAGE,
-            join(source, "circus-sandbox/images/codex"),
+            imageTag,
+            join(source, `circus-sandbox/images/${imageDirectory}`),
           ],
           timeoutMs: 600_000,
         });
         if (!built.ok)
           return {
             ok: false,
-            message:
-              "The Codex image build failed. Check Docker's internet access and available disk space, then retry.",
+            message: `The ${
+              agent === "claude-code" ? "Claude Code" : "Codex"
+            } image build failed. Check Docker's internet access and available disk space, then retry.`,
           };
       }
       return {
@@ -379,29 +408,52 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       const { config } = await current();
       const apiKey = await credential(input, config);
       try {
-        const response = await deps.request(`${baseUrl}/responses`, {
-          method: "POST",
-          redirect: "error",
-          signal: AbortSignal.timeout(20_000),
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-          body: JSON.stringify({
-            model: input.model,
-            input: "Reply with OK.",
-            max_output_tokens: 32,
-            stream: false,
-          }),
-        });
+        const isClaude = input.agent === "claude-code";
+        const response = await deps.request(
+          `${baseUrl}/${isClaude ? "messages?beta=true" : "responses"}`,
+          {
+            method: "POST",
+            redirect: "error",
+            signal: AbortSignal.timeout(20_000),
+            headers: isClaude
+              ? {
+                  "Content-Type": "application/json",
+                  "x-api-key": apiKey,
+                  "anthropic-version": "2023-06-01",
+                }
+              : {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${apiKey}`,
+                },
+            body: JSON.stringify(
+              isClaude
+                ? {
+                    model: input.model,
+                    max_tokens: 32,
+                    messages: [{ role: "user", content: "Reply with OK." }],
+                  }
+                : {
+                    model: input.model,
+                    input: "Reply with OK.",
+                    max_output_tokens: 32,
+                    stream: false,
+                  },
+            ),
+          },
+        );
         if (response.ok) {
-          if (await acceptedResponse(response))
+          if (await acceptedModelResponse(response, isClaude ? "messages" : "responses"))
             return {
               ok: true,
-              message:
-                "The model service accepted a small Responses API request. This checks the connection, not a complete sandbox task.",
+              message: `The model service accepted a small ${
+                isClaude ? "Messages" : "Responses"
+              } API request. This checks the connection, not a complete sandbox task.`,
             };
           return {
             ok: false,
-            message:
-              "The service did not return a supported Responses API result. Check the URL and model. Raw provider output is not shown.",
+            message: `The service did not return a supported ${
+              isClaude ? "Messages" : "Responses"
+            } API result. Check the URL and model. Raw provider output is not shown.`,
           };
         }
         await response.body?.cancel();
@@ -414,7 +466,9 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
         if (response.status === 404)
           return {
             ok: false,
-            message: "Responses API was not found. Check the service URL, including its /v1 path.",
+            message: `${
+              isClaude ? "Messages" : "Responses"
+            } API was not found. Check the service URL, including its /v1 path.`,
           };
         return {
           ok: false,
@@ -461,7 +515,10 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
         const checked = await probeGithub(input, deps.request);
         if (!checked.ok) return checked;
         added = {
-          service: `app.circus.mcp.${createHash("sha256").update(deps.home).digest("hex").slice(0, 16)}`,
+          service: `app.circus.mcp.${createHash("sha256")
+            .update(deps.home)
+            .digest("hex")
+            .slice(0, 16)}`,
           account: randomUUID(),
         };
         if (
@@ -479,7 +536,11 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
             {
               name: "issue_read",
               allowedArguments: ["issue_number"],
-              fixedArguments: { method: "get", owner: input.owner, repo: input.repo },
+              fixedArguments: {
+                method: "get",
+                owner: input.owner,
+                repo: input.repo,
+              },
             },
           ],
         };
@@ -489,7 +550,11 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
           );
         await atomicWrite(
           path,
-          `${JSON.stringify({ ...config, mcpConnections: [...connections, connection] }, null, 2)}\n`,
+          `${JSON.stringify(
+            { ...config, mcpConnections: [...connections, connection] },
+            null,
+            2,
+          )}\n`,
         );
         saved = true;
         try {
@@ -524,24 +589,33 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       try {
         const input = sandboxSetupInputSchema.parse(raw);
         const baseUrl = validateBaseUrl(input.baseUrl);
-        const { config, provider, environment, path, serialized } = await inspect();
+        const { config, provider, environment, path, serialized } = await inspect(input.agent);
         const { bridge, endpoint, image, python } = requireRuntime(environment);
         const apiKey = await credential(input, config);
         const resources = selectResources(input.preset, config);
         added = {
-          service: `app.circus.model.${createHash("sha256").update(deps.home).digest("hex").slice(0, 16)}`,
+          service: `app.circus.model.${createHash("sha256")
+            .update(deps.home)
+            .digest("hex")
+            .slice(0, 16)}`,
           account: randomUUID(),
         };
         if (!(await keychain.put(added, apiKey)))
           throw new SandboxSetupError(
             "Could not save the credential in macOS Keychain. Unlock your login keychain and retry.",
           );
-        const model = { ...config?.model, baseUrl, model: input.model, apiKeyKeychain: added };
+        const model = {
+          ...config?.model,
+          baseUrl,
+          model: input.model,
+          apiKeyKeychain: added,
+        };
         delete model.apiKeyFile;
         if (environment.modelCaFile) model.caFile = environment.modelCaFile;
         const next: RunnerConfig = {
           ...config,
           version: 1,
+          agent: input.agent,
           backend: { kind: "docker", endpoint, image, runtime: "runc" },
           image: {
             platform: { os: "linux", architecture: "amd64" },
@@ -561,7 +635,9 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
         await atomicWrite(managedConfig, `${JSON.stringify(next, null, 2)}\n`);
         wroteConfig = true;
         // Existing provider options and all other daemon settings remain owned by the daemon config API.
-        const latest = readPersistedConfig(deps.home, { defaultsIfMissing: true });
+        const latest = readPersistedConfig(deps.home, {
+          defaultsIfMissing: true,
+        });
         const latestCandidate = latest.agents?.providers?.sandbox;
         const latestProvider = latestCandidate
           ? ProviderOverrideSchema.parse(latestCandidate)
@@ -586,6 +662,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
           },
         });
         applied = true;
+        activeAgent = input.agent;
         try {
           await deps.reload();
         } catch {

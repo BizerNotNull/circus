@@ -129,6 +129,23 @@ const model = {
   preset: "compact" as const,
 };
 
+test("commits the runner and Keychain credential after successful save", async () => {
+  const f = await fixture();
+  await expect(f.service.save({ ...model, agent: "claude-code" })).resolves.toMatchObject({
+    ok: true,
+  });
+
+  const persisted = JSON.parse(await readFile(join(f.home, "config.json"), "utf8"));
+  const runnerPath = persisted.agents.providers.sandbox.env.CIRCUS_RUNNER_CONFIG;
+  const runner = JSON.parse(await readFile(runnerPath, "utf8"));
+  expect(runner.agent).toBe("claude-code");
+  expect(
+    f.secrets.get(`${runner.model.apiKeyKeychain.service}:${runner.model.apiKeyKeychain.account}`),
+  ).toBe(model.apiKey);
+  expect(await f.service.snapshot()).toMatchObject({
+    settings: { agent: "claude-code", hasCredential: true, credentialStorage: "keychain" },
+  });
+});
 test("saves a usable provider without storing a credential in config, argv, or snapshot", async () => {
   const f = await fixture();
   expect((await f.service.snapshot()).ready).toBe(true);
@@ -171,6 +188,53 @@ test("saves a usable provider without storing a credential in config, argv, or s
     ]),
   ).not.toContain("fixture-only-secret");
   expect(f.reloads()).toBe(1);
+});
+
+test("prepares a first-run runtime while the model fields are still blank", async () => {
+  const f = await fixture();
+  const source = join(f.home, "source");
+  await mkdir(join(source, "circus-sandbox/images/codex"), { recursive: true });
+  await writeFile(join(source, "circus-sandbox/images/codex/Dockerfile"), "");
+  await f.service.selectSource(source);
+  await expect(
+    f.service.prepare({ agent: "codex", baseUrl: "", model: "", preset: "compact" }),
+  ).resolves.toMatchObject({ ok: true });
+});
+
+test("saving Codex after Claude preparation keeps snapshots on the persisted agent", async () => {
+  const f = await fixture();
+  const source = join(f.home, "source");
+  for (const agent of ["codex", "claude-code"]) {
+    const imageDirectory = join(source, `circus-sandbox/images/${agent}`);
+    await mkdir(imageDirectory, { recursive: true });
+    await writeFile(join(imageDirectory, "Dockerfile"), "");
+  }
+  await f.service.selectSource(source);
+  await expect(
+    f.service.prepare({ agent: "claude-code", baseUrl: "", model: "", preset: "compact" }),
+  ).resolves.toMatchObject({ ok: true });
+  await expect(f.service.save({ ...model, agent: "codex" })).resolves.toMatchObject({ ok: true });
+  await expect(f.service.snapshot()).resolves.toMatchObject({ settings: { agent: "codex" } });
+
+  await expect(
+    f.service.save({ ...model, agent: "codex", apiKey: "", model: "updated-codex-model" }),
+  ).resolves.toMatchObject({ ok: true });
+  await expect(f.service.snapshot()).resolves.toMatchObject({
+    settings: { agent: "codex", model: "updated-codex-model" },
+  });
+});
+
+test("resaves an existing Claude Code configuration", async () => {
+  const f = await fixture();
+  const claudeModel = { ...model, agent: "claude-code" as const };
+  await f.service.save(claudeModel);
+  const reloaded = createSandboxSetup(f.dependencies);
+  await expect(
+    reloaded.save({ ...claudeModel, apiKey: "", model: "updated-claude-model" }),
+  ).resolves.toMatchObject({ ok: true });
+  const runner = JSON.parse(await readFile(join(f.home, "circus/runner.json"), "utf8"));
+  expect(runner.agent).toBe("claude-code");
+  expect(runner.model.model).toBe("updated-claude-model");
 });
 
 test("reloads saved settings and uses the stored credential for model checks and updates", async () => {

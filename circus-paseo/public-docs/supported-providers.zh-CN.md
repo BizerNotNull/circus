@@ -48,9 +48,9 @@ Paseo MCP 工具和引导功能不可用。你自己为 `agy` 配置的 MCP 服�
 
 命令和环境变量覆盖见[自定义 Provider](/docs/custom-providers)。
 
-## Sandbox (Codex) {#sandbox-codex}
+## Sandbox Codex
 
-Circus 的沙箱 Provider 需要显式启用。在 daemon 主机上安装 Circus Rust bridge，并配置 Docker 端点、固定的 Codex 镜像、资源限制和模型渠道。bridge 配置使用显式指定的模型 API 密钥文件；Paseo 不会读取你的 Codex 登录，也不会把主目录、代理设置、MCP 服务器、系统提示词或 Agent 环境变量传给任务。
+Circus 沙箱 Provider 需要显式启用。主机配置选择 Codex 或 Claude Code，并配置对应的固定镜像和模型协议。macOS 桌面端的 **Sandbox setup** 可选择 Agent、检查依赖、准备镜像、测试对应模型 API，并将 API key 保存到 Keychain。手动配置需要在 daemon 主机安装 Circus Rust bridge，配置 Docker 端点、资源限制和模型渠道。Paseo 不会读取个人 Agent 登录，也不会把主目录、代理设置、MCP 服务器、系统提示词或 Agent 环境变量传给任务。
 
 在 daemon 配置中添加以下条目，并替换其中三个绝对路径：
 
@@ -71,7 +71,7 @@ Circus 的沙箱 Provider 需要显式启用。在 daemon 主机上安装 Circus
 }
 ```
 
-只需提示词的任务可以直接选择 **Sandbox (Codex)**。要提供文件，请打开工作区的 **Sandbox task** 面板。在 Web 或桌面端选择文件，或粘贴文本并指定相对路径；检查文件列表，逐项填写要导出的文件路径，再设置任务期限。浏览器选取只导入所选文件的内容；尚未保存的修改需要显式粘贴才会纳入任务。它不会扫描项目目录。重名文件会被拒绝；嵌套路径可以通过粘贴文件控件或 SDK 的 `options.inputFiles` 提供。
+只需提示词的任务可以直接选择 **Sandbox**。要提供文件，请打开工作区的 **Sandbox task** 面板。在 Web 或桌面端选择文件，或粘贴文本并指定相对路径；检查文件列表，逐项填写要导出的文件路径，再设置任务期限。浏览器选取只导入所选文件的内容；尚未保存的修改需要显式粘贴才会纳入任务。它不会扫描项目目录。重名文件会被拒绝；嵌套路径可以通过粘贴文件控件或 SDK 的 `options.inputFiles` 提供。
 
 任务时间线显示文本、工具输出，以及导出和清理进度。**Stop** 会等待正在运行的任务返回取消结果。只有确认沙箱清理完成，任务才能成功结束。清理状态为 pending 的结果会提供 **Retry cleanup**。bridge 故障后若清理状态为 unknown，需要在主机上检查该运行器拥有的资源。
 

@@ -84,4 +84,4 @@ export function inputFileBytes(file: InputFile): number {
 }
 
 export const SANDBOX_SESSION_NOTICE =
-  "Sandbox sessions continue completed turns only. Each prompt runs in a fresh sandbox restored from this session's host-side workspace archive, and Codex resumes the previous thread. Running processes and in-flight turns are not preserved. Files added in the panel are staged with every prompt; only files you supply are imported, and your project is not changed. Exports are kept separately for download.";
+  "Sandbox sessions continue completed turns only. Each prompt runs in a fresh sandbox restored from this session's host-side workspace archive. Codex resumes the previous thread; Claude Code does not preserve conversations, so start a new Sandbox session for each prompt. Running processes and in-flight turns are not preserved. Files added in the panel are staged with every prompt; only files you supply are imported, and your project is not changed. Exports are kept separately for download.";

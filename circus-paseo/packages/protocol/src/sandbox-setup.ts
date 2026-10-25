@@ -11,6 +11,7 @@ export const sandboxSetupInputSchema = z.strictObject({
     .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/),
   apiKey: z.string().max(4096).optional(),
   preset: sandboxPresetSchema,
+  agent: z.enum(["codex", "claude-code"]).default("codex"),
 });
 
 export const sandboxCheckSchema = z.strictObject({
@@ -25,6 +26,7 @@ export const sandboxSetupSnapshotSchema = z.strictObject({
   ready: z.boolean(),
   checks: z.array(sandboxCheckSchema),
   settings: z.strictObject({
+    agent: z.enum(["codex", "claude-code"]).default("codex"),
     baseUrl: z.string(),
     model: z.string(),
     preset: sandboxPresetSchema,
