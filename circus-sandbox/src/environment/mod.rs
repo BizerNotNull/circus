@@ -1,6 +1,6 @@
-//! Explicit OCI image resolution against a local Docker Engine.
+//! Explicit OCI image resolution against local Docker and containerd daemons.
 //!
-//! Preparation is async and requires a Tokio runtime. An explicit local
+//! Docker preparation is async and requires a Tokio runtime. An explicit local
 //! endpoint, image reference, Linux platform, and whole-operation timeout are
 //! required; no Docker context, environment credentials, or Docker
 //! configuration authentication is loaded. Requests are local-only unless
@@ -17,6 +17,12 @@
 //! images. Pass [`PreparedImage::id`] to [`crate::BackendConfig::docker`] to avoid
 //! using a mutable tag; callers remain responsible for retaining the image.
 //!
+//! Unix builds with the `containerd` feature also expose separate containerd
+//! request/result/error types and preparation. They require an explicit socket,
+//! namespace, platform, and deadline; local-only may register immutable alias
+//! metadata but never contacts a registry. See the containerd preparation API
+//! for manifest/platform verification and daemon-transfer cancellation limits.
+//!
 //! [`EnvironmentPlan`] is a separate, explicitly ordered preparation plan. It
 //! requires a pinned version for every step, executes each step as a separate
 //! argv (never through a shell), records bounded output, and destroys its
@@ -24,6 +30,14 @@
 //! identity from the resolved image ID and repository digests, platform,
 //! ordered pinned steps, and a caller-supplied tenant security domain. Identity
 //! derivation has no cache, registry, persistence, or lookup behavior.
+
+#[cfg(all(unix, feature = "containerd"))]
+mod containerd;
+
+#[cfg(all(unix, feature = "containerd"))]
+pub use containerd::{
+    ContainerdImageError, ContainerdImageRequest, PreparedContainerdImage, prepare_containerd_image,
+};
 
 mod identity;
 mod plan;
@@ -44,9 +58,14 @@ use crate::infrastructure::{DockerEndpoint, Engine, EngineError, ImageInfo};
 /// Architecture names are Docker names such as `amd64` and `arm64`, not host
 /// aliases such as `x86_64` or `aarch64`. No host-platform default is inferred.
 /// [`ImagePlatform::new`] requests no variant; [`ImagePlatform::with_variant`]
-/// adds an explicit one, which is sent to Docker when a pull is enabled. Image
-/// inspection reports only OS and architecture, so a variant is carried into
-/// an [`EnvironmentId`] but is not verified against the inspected manifest.
+/// adds an explicit one, sent during explicitly enabled image acquisition.
+/// Docker inspection reports only OS/architecture, so its variant is carried
+/// into an [`EnvironmentId`] but not verified. Containerd always verifies OS
+/// and architecture. An unspecified variant accepts an inspected variant; an
+/// explicit variant must match config or selected-index metadata. An absent
+/// config variant may use the selected index's variant, but conflicting values
+/// are rejected. No variant is inferred from the host; a direct manifest with
+/// no variant evidence cannot satisfy an explicit variant request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImagePlatform {
     os: String,
@@ -139,7 +158,7 @@ impl ImagePlatform {
     }
 }
 
-/// Registry access permitted during explicit Docker image preparation.
+/// Registry access permitted during explicit image preparation.
 ///
 /// This policy does not change sandbox creation, which requires an image
 /// already present in the selected daemon.

@@ -8,13 +8,15 @@
 use std::collections::HashMap;
 
 use containerd_client::services::v1::{
-    GetImageRequest, ReadContentRequest,
+    CreateRequest as CreateLeaseRequest, DeleteRequest as DeleteLeaseRequest, GetImageRequest,
+    Info as ContentInfo, ReadContentRequest, UpdateRequest as UpdateContentRequest,
     content_client::ContentClient,
     diff_client::DiffClient,
     images_client::ImagesClient,
+    leases_client::LeasesClient,
     snapshots::{
-        CommitSnapshotRequest, MountsRequest, PrepareSnapshotRequest, RemoveSnapshotRequest,
-        StatSnapshotRequest, snapshots_client::SnapshotsClient,
+        CommitSnapshotRequest, PrepareSnapshotRequest, RemoveSnapshotRequest, StatSnapshotRequest,
+        snapshots_client::SnapshotsClient,
     },
 };
 use containerd_client::tonic::Request;
@@ -26,9 +28,15 @@ use super::containerd_grpc::map_status;
 use super::engine::{EngineError, EngineErrorKind, file_error};
 
 const MAX_METADATA_BYTES: usize = 8 * 1024 * 1024;
-const UNPACK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
-const UNPACK_POLL_ATTEMPTS: usize = 600;
-const INDEX_MEDIA_TYPES: [&str; 2] = [
+/// gRPC metadata header containerd reads to attach requests to a lease.
+const LEASE_HEADER: &str = "containerd-lease";
+/// Label linking the image config content to its unpacked chain snapshot. It is
+/// the same reference containerd's unpacker writes: without it a committed
+/// chain is unreferenced and the garbage collector may reclaim it while the
+/// daemon is unpacking later layers or the caller is still preparing a child
+/// snapshot.
+const SNAPSHOT_REF_LABEL_PREFIX: &str = "containerd.io/gc.ref.snapshot.";
+pub(super) const INDEX_MEDIA_TYPES: [&str; 2] = [
     "application/vnd.oci.image.index.v1+json",
     "application/vnd.docker.distribution.manifest.list.v2+json",
 ];
@@ -42,6 +50,7 @@ pub(crate) struct ChainLayer {
 pub(crate) struct ImageRootfs {
     pub chain_id: String,
     pub layers: Vec<ChainLayer>,
+    pub config: Descriptor,
 }
 
 // One unpack at a time inside this process: two sandboxes created
@@ -61,7 +70,7 @@ pub(crate) async fn image_exists(
     get_image(channel, namespace, image).await.map(|_| ())
 }
 
-async fn get_image(
+pub(super) async fn get_image(
     channel: &Channel,
     namespace: &str,
     image: &str,
@@ -115,6 +124,22 @@ pub(crate) async fn ensure_rootfs(
     if snapshot_committed(channel, namespace, snapshotter, &rootfs.chain_id).await? {
         return Ok(rootfs.chain_id);
     }
+    // containerd collects every resource that is neither referenced nor leased.
+    // The extraction snapshots only become referenced by the image config at
+    // the end, so a concurrent GC can reclaim them mid-apply without a lease.
+    let lease = create_unpack_lease(channel, namespace).await?;
+    let unpacked = unpack_layers(channel, namespace, snapshotter, &rootfs, &lease).await;
+    delete_lease_best_effort(channel, namespace, &lease).await;
+    unpacked.map(|()| rootfs.chain_id)
+}
+
+async fn unpack_layers(
+    channel: &Channel,
+    namespace: &str,
+    snapshotter: &str,
+    rootfs: &ImageRootfs,
+    lease: &str,
+) -> Result<(), EngineError> {
     let mut parent = String::new();
     for layer in &rootfs.layers {
         if !snapshot_committed(channel, namespace, snapshotter, &layer.chain_id).await? {
@@ -125,6 +150,7 @@ pub(crate) async fn ensure_rootfs(
                 &layer.chain_id,
                 &parent,
                 &layer.descriptor,
+                lease,
             )
             .await?;
         }
@@ -136,7 +162,9 @@ pub(crate) async fn ensure_rootfs(
             "image unpack completed without the final committed snapshot",
         ));
     }
-    Ok(rootfs.chain_id)
+    // Keep the committed chain reachable from the image config, exactly as
+    // containerd's unpacker does, before the lease is dropped.
+    reference_chain_from_config(channel, namespace, snapshotter, rootfs).await
 }
 
 async fn resolve_rootfs(
@@ -184,6 +212,7 @@ async fn resolve_rootfs(
     Ok(ImageRootfs {
         chain_id: chain_id_for(&diff_ids),
         layers,
+        config: parsed.config,
     })
 }
 
@@ -227,7 +256,7 @@ fn platform_matches(entry: &serde_json::Value, os: &str, architecture: &str) -> 
     matches("os", os) && matches("architecture", architecture)
 }
 
-fn descriptor_from_value(value: &serde_json::Value) -> Result<Descriptor, EngineError> {
+pub(super) fn descriptor_from_value(value: &serde_json::Value) -> Result<Descriptor, EngineError> {
     let media_type = value
         .get("mediaType")
         .and_then(serde_json::Value::as_str)
@@ -248,12 +277,12 @@ fn descriptor_from_value(value: &serde_json::Value) -> Result<Descriptor, Engine
     })
 }
 
-struct Manifest {
-    config: Descriptor,
-    layers: Vec<Descriptor>,
+pub(super) struct Manifest {
+    pub config: Descriptor,
+    pub layers: Vec<Descriptor>,
 }
 
-fn parse_manifest(bytes: &[u8]) -> Result<Manifest, EngineError> {
+pub(super) fn parse_manifest(bytes: &[u8]) -> Result<Manifest, EngineError> {
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|err| {
         file_error(
             EngineErrorKind::Other,
@@ -341,7 +370,7 @@ fn host_architecture() -> &'static str {
     }
 }
 
-async fn read_content(
+pub(super) async fn read_content(
     channel: &Channel,
     namespace: &str,
     descriptor: &Descriptor,
@@ -394,38 +423,57 @@ async fn unpack_layer(
     channel: &Channel,
     namespace: &str,
     snapshotter: &str,
-    key: &str,
+    chain_id: &str,
     parent: &str,
     descriptor: &Descriptor,
+    lease: &str,
 ) -> Result<(), EngineError> {
-    let mounts = prepare_snapshot(channel, namespace, snapshotter, key, parent).await?;
-    let applied = apply_diff(channel, namespace, descriptor, &mounts).await;
-    if let Err(error) = applied {
-        remove_snapshot_best_effort(channel, namespace, snapshotter, key).await;
+    // containerd commits the extraction snapshot under the chain id, so the
+    // active snapshot needs a distinct key. Sharing one string for both makes
+    // Commit fail with AlreadyExists after the layer has already been applied.
+    let key = format!("extract-{}", uuid::Uuid::new_v4());
+    let mounts = prepare_snapshot(channel, namespace, snapshotter, &key, parent, lease).await?;
+    if let Err(error) = apply_diff(channel, namespace, descriptor, &mounts).await {
+        remove_snapshot_best_effort(channel, namespace, snapshotter, &key).await;
         return Err(error);
     }
     let mut client = SnapshotsClient::new(channel.clone());
-    let request = with_namespace!(
-        CommitSnapshotRequest {
-            snapshotter: snapshotter.to_string(),
-            name: key.to_string(),
-            key: key.to_string(),
-            // Referencing the layer content keeps the committed snapshot alive
-            // under containerd's garbage collector; an unlabelled snapshot can
-            // be reclaimed while another sandbox is mounting it.
-            labels: HashMap::from([(
-                "containerd.io/gc.ref.content.0".to_string(),
-                descriptor.digest.clone(),
-            )]),
-        },
-        namespace
+    let request = with_lease(
+        with_namespace!(
+            CommitSnapshotRequest {
+                snapshotter: snapshotter.to_string(),
+                name: chain_id.to_string(),
+                key: key.clone(),
+                // The snapshot references its layer content so the blob is
+                // retained under containerd's garbage collector while the
+                // snapshot exists.
+                labels: HashMap::from([(
+                    "containerd.io/gc.ref.content.0".to_string(),
+                    descriptor.digest.clone(),
+                )]),
+            },
+            namespace
+        ),
+        lease,
     );
-    if let Err(status) = client.commit(request).await {
-        let error = map_status(status);
-        remove_snapshot_best_effort(channel, namespace, snapshotter, key).await;
-        return Err(error);
+    match client.commit(request).await {
+        Ok(_) => Ok(()),
+        Err(status) if status.code() == containerd_client::tonic::Code::AlreadyExists => {
+            // A concurrent unpacker committed this chain first. That committed
+            // chain is the resource we need; discard only our extraction
+            // snapshot.
+            remove_snapshot_best_effort(channel, namespace, snapshotter, &key).await;
+            if snapshot_committed(channel, namespace, snapshotter, chain_id).await? {
+                Ok(())
+            } else {
+                Err(map_status(status))
+            }
+        }
+        Err(status) => {
+            remove_snapshot_best_effort(channel, namespace, snapshotter, &key).await;
+            Err(map_status(status))
+        }
     }
-    Ok(())
 }
 
 async fn prepare_snapshot(
@@ -434,54 +482,94 @@ async fn prepare_snapshot(
     snapshotter: &str,
     key: &str,
     parent: &str,
+    lease: &str,
 ) -> Result<Vec<Mount>, EngineError> {
     let mut client = SnapshotsClient::new(channel.clone());
-    let request = with_namespace!(
-        PrepareSnapshotRequest {
-            snapshotter: snapshotter.to_string(),
-            key: key.to_string(),
-            parent: parent.to_string(),
-            labels: HashMap::new(),
-        },
-        namespace
-    );
-    match client.prepare(request).await {
-        Ok(response) => Ok(response.into_inner().mounts),
-        Err(status) if status.code() == containerd_client::tonic::Code::AlreadyExists => {
-            // Another process is unpacking this chain; wait for its commit and
-            // use the committed snapshot's mounts.
-            for _ in 0..UNPACK_POLL_ATTEMPTS {
-                if snapshot_committed(channel, namespace, snapshotter, key).await? {
-                    return snapshot_mounts(channel, namespace, snapshotter, key).await;
-                }
-                tokio::time::sleep(UNPACK_POLL_INTERVAL).await;
-            }
-            Err(map_status(status))
-        }
-        Err(status) => Err(map_status(status)),
-    }
-}
-
-async fn snapshot_mounts(
-    channel: &Channel,
-    namespace: &str,
-    snapshotter: &str,
-    key: &str,
-) -> Result<Vec<Mount>, EngineError> {
-    let mut client = SnapshotsClient::new(channel.clone());
-    let request = with_namespace!(
-        MountsRequest {
-            snapshotter: snapshotter.to_string(),
-            key: key.to_string(),
-        },
-        namespace
+    let request = with_lease(
+        with_namespace!(
+            PrepareSnapshotRequest {
+                snapshotter: snapshotter.to_string(),
+                key: key.to_string(),
+                parent: parent.to_string(),
+                labels: HashMap::new(),
+            },
+            namespace
+        ),
+        lease,
     );
     Ok(client
-        .mounts(request)
+        .prepare(request)
         .await
         .map_err(map_status)?
         .into_inner()
         .mounts)
+}
+
+async fn create_unpack_lease(channel: &Channel, namespace: &str) -> Result<String, EngineError> {
+    let id = format!("circus-unpack-{}", uuid::Uuid::new_v4());
+    let request = with_namespace!(
+        CreateLeaseRequest {
+            id: id.clone(),
+            labels: HashMap::new(),
+        },
+        namespace
+    );
+    LeasesClient::new(channel.clone())
+        .create(request)
+        .await
+        .map_err(map_status)?;
+    Ok(id)
+}
+
+async fn delete_lease_best_effort(channel: &Channel, namespace: &str, id: &str) {
+    let request = with_namespace!(
+        DeleteLeaseRequest {
+            id: id.to_string(),
+            sync: false,
+        },
+        namespace
+    );
+    let _ = LeasesClient::new(channel.clone()).delete(request).await;
+}
+
+/// Marks the image config as referencing the unpacked chain, the reference
+/// containerd's unpacker records so the chain survives garbage collection for
+/// as long as the image exists.
+async fn reference_chain_from_config(
+    channel: &Channel,
+    namespace: &str,
+    snapshotter: &str,
+    rootfs: &ImageRootfs,
+) -> Result<(), EngineError> {
+    let label = format!("{SNAPSHOT_REF_LABEL_PREFIX}{snapshotter}");
+    let request = with_namespace!(
+        UpdateContentRequest {
+            info: Some(ContentInfo {
+                digest: rootfs.config.digest.clone(),
+                size: rootfs.config.size,
+                created_at: None,
+                updated_at: None,
+                labels: HashMap::from([(label.clone(), rootfs.chain_id.clone())]),
+            }),
+            update_mask: Some(prost_types::FieldMask {
+                paths: vec![format!("labels.{label}")],
+            }),
+        },
+        namespace
+    );
+    ContentClient::new(channel.clone())
+        .update(request)
+        .await
+        .map_err(map_status)?;
+    Ok(())
+}
+
+fn with_lease<T>(mut request: Request<T>, lease: &str) -> Request<T> {
+    request.metadata_mut().insert(
+        LEASE_HEADER,
+        lease.parse().expect("lease id is a valid header value"),
+    );
+    request
 }
 
 async fn apply_diff(
@@ -559,6 +647,18 @@ mod tests {
         assert_eq!(
             digest,
             "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn unpack_requests_carry_the_lease_header() {
+        let request = with_lease(Request::new(()), "circus-unpack-test");
+        assert_eq!(
+            request
+                .metadata()
+                .get(LEASE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("circus-unpack-test")
         );
     }
 

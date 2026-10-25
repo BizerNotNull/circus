@@ -57,7 +57,7 @@ impl BackendConfig {
     ///
     /// `socket` must be an absolute path to a Unix socket. `namespace` scopes
     /// every containerd request. `image` must already exist in that namespace;
-    /// this crate never pulls. `runtime` must be `runc`, and `snapshotter` must
+    /// sandbox creation never pulls. `runtime` must be `runc`, and `snapshotter` must
     /// be `overlayfs`. The descriptor is validated before any container
     /// allocation; invalid values are reported by [`crate::Sandbox::create`]
     /// as [`BackendConfigError`].

@@ -24,6 +24,8 @@
 
 仍未实现，不得写成现有能力：Kubernetes 真正 pause/resume provider（B03）、pids 限制、RuntimeClass 选择、NetworkPolicy/CNI 隔离、gVisor、Kata Containers、Firecracker、RPC、registry 认证、容器/VM 运行时快照（进程、客户机内存检查点）、工作区总配额执行、宿主磁盘配额、Paseo 接入。已实现且可写为现有能力：`Workspace`、`CodeSource` 独立代码副本、进程内 `CodeSnapshot`、Docker/containerd/Kubernetes 工作区文件快照与执行、Kubernetes workload Pod 的创建/就绪/exec/有界文件传输/工作区快照/删除、固定提交 Git clone 与受控 worktree、本地 OCI 镜像解析、有界预启动租约池、交互进程会话、后端中立统一 API，以及默认启用 `http` feature 的认证 JSON HTTP 传输（端点见 [HTTP API](docs/http-api.md)）。`ImageRequest` 默认 `LocalOnly`，仅显式 `IfMissing` 允许 Docker inspect 确认缺失后一次无认证拉取；`EnvironmentPlan` 遵循该请求策略，sandbox/HTTP 创建仍不拉取。镜像解析不隐式读取 Docker config/context 或环境凭据，无回退或重试；全流程共用 deadline，共享 cache 即使失败/取消仍可能改变且不删除镜像。它们都不是隔离、持久化或聚合资源预留的证据。Kubernetes Pod 支持工作区文件快照，但会显式拒绝 `pause`/`resume` 与 `spawn_process`（类型化 `UnsupportedCapability`），不得用 Pod 重建冒充暂停。当前 Docker / containerd / Kubernetes slice 的范围和限制见 [Linux Docker + runc](docs/docker-linux-runc.md)、[containerd + runc](docs/containerd-runc.md)、[Kubernetes workload](docs/kubernetes-runc.md) 及 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。不修改 `../circus-paseo/`。
 
+Unix + `containerd` feature 另提供显式 `ContainerdImageRequest` / `prepare_containerd_image`，默认同样为 `LocalOnly`；只有 `IfMissing` 且 namespace 内 image record 缺失才允许一次无认证 daemon Transfer。连接、查询、可选 Transfer、元数据平台验证和不可变别名注册共用 deadline；不加载隐式凭据、不重试。Local-only 也可能注册 alias metadata；daemon Transfer/cache 可能在失败或取消后继续改变，库不删除共享镜像。该准备 API 不改变 sandbox/HTTP 创建仍不拉取的行为。
+
 用户说明见 [README.md](README.md)，工程命令与门禁边界见 [docs/engineering.md](docs/engineering.md)，完整目标及交付记录入口见 [docs/delivery-plan.md](docs/delivery-plan.md)，安全扫描约定见 [安全说明](../.github/sandbox-security.md)。当前检出已有 Workspace crate、许可证策略、元数据/质量/安全/Rust 工作流，但开发约定和工作流存在仍然不是“全部领域已交付”或检查已通过。
 
 ## Architecture & Data Flow

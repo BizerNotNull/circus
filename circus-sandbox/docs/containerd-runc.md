@@ -44,10 +44,39 @@ let backend = BackendConfig::containerd(
 
 - socket 必须是以 `/` 开头的绝对 Unix socket 路径；`unix://` URL 形式被类型化拒绝。
 - namespace 必须非空，仅允许 ASCII 字母数字、`.`、`_`、`-`。
-- image 是本地 reference；本 crate 从不 pull。熟悉短名会按 containerd 客户端约定回退查询：`python:3.12-slim` 先查原名，再查 `docker.io/library/python:3.12-slim`。`library/python:3.12-slim` 回退到 `docker.io/library/python:3.12-slim`；带 registry 前缀的名字不重写。
+- sandbox 创建只使用本地 reference，不会 pull。熟悉短名会按 containerd 客户端约定回退查询：`python:3.12-slim` 先查原名，再查 `docker.io/library/python:3.12-slim`。显式镜像准备 API 与此独立，见下节。
 - runtime 只接受 `runc`；`runsc`（gVisor）在本机不可用，返回 `BackendConfigError::RuntimeUnavailable`，不会静默替换。
 - snapshotter 只接受 `overlayfs`。
 - 校验在分配任何 snapshot/container/task 之前完成，错误变体为 `BackendConfigError::{InvalidSocketPath, InvalidNamespace, RuntimeUnavailable, UnsupportedSnapshotter, ImageRequired}`。
+
+## 显式镜像准备
+
+Unix 且启用 `containerd` feature 时，`environment::{ContainerdImageRequest, prepare_containerd_image}` 接受显式 socket、namespace、reference、`ImagePlatform` 和 timeout；库不读取环境变量。默认 `ImagePullPolicy::LocalOnly`，缺失返回 `ContainerdImageError::ImageNotFound`。只有调用方选择 `IfMissing` 且 image record 缺失时才进行一次无认证 daemon transfer；已有记录的平台不匹配、内容缺失或 daemon 失败不触发拉取。建议使用完整 registry/repository 名称。
+
+连接、Images.Get、可选 transfer、manifest/config 校验和别名注册共用一个 deadline。显式选择 Linux os/arch[/variant]，不强制宿主平台；读取实际元数据后返回 selected manifest digest、实际平台和同 namespace 的 digest-qualified image record alias。将 `PreparedContainerdImage::reference()` 传给 `BackendConfig::containerd`，而不是重新使用可变 tag。别名存在时 target 的 digest、media type 和 size 必须相同，否则返回 `AliasConflict`，不覆盖；annotations 不参与内容身份比较。
+
+OS/architecture 始终精确校验。请求 variant 为 `None` 表示不约束 variant，允许返回实际观察到的 variant；显式 variant 必须有 selected index/config 元数据证据且匹配。config variant 缺失或 null 时可使用所选 index descriptor 的 variant；两者同时存在但冲突则拒绝。不从宿主推断 variant，direct manifest 若 config 也没有 variant，则无法验证显式 variant 请求。已查询的记录本身就是目标 immutable alias 且直接指向已验证 manifest 时，不重复调用 Images.Create；其他路径仍可能注册 alias metadata。
+
+direct-manifest alias 不保留原 index 的 variant 证据；config 未声明 variant 而依赖 index 验证显式 variant 时，应重复原始 source request 来复用缓存。返回的 alias 仍可用于 `BackendConfig::containerd`，但不保证该 alias 单独重新准备时能满足显式 variant 校验。
+
+Local-only 也可能创建别名 metadata，但不访问 registry。不加载 Docker config、环境凭据或 registry 认证，不重试、不删除共享镜像、不创建容器或解包 snapshot。超时/取消停止客户端等待，不保证 daemon transfer 停止；失败后共享 content、image record 或 alias 仍可能存在。返回值不持有缓存租约，不能防止外部删除，也不保证非宿主平台可运行。sandbox 创建仍不自动拉取，Docker API/default 不变。
+
+示例要求 `CIRCUS_CONTAINERD=1`，且所有连接、镜像、平台、timeout 和 policy 均显式设置；`CIRCUS_CONTAINERD_VARIANT` 可选。`CIRCUS_CONTAINERD_OS` 必须为 `linux`，ARCH 使用 `amd64`/`arm64` 等规范名称，TIMEOUT_SECS 为非零整数，PULL_POLICY 只接受 `local-only` 或 `if-missing`。示例输出真实 alias/digest/platform，再以原始 source request 进行一次 local-only 查询并比较结果，演示源缓存复用：
+
+```bash
+# 在 Linux、circus-sandbox 目录执行；daemon 中应已有该 image record/content。
+CIRCUS_CONTAINERD=1 \
+CIRCUS_CONTAINERD_SOCKET=/run/containerd/containerd.sock \
+CIRCUS_CONTAINERD_NAMESPACE=default \
+CIRCUS_CONTAINERD_IMAGE=docker.io/library/python:3.12-slim \
+CIRCUS_CONTAINERD_OS=linux CIRCUS_CONTAINERD_ARCH=amd64 \
+CIRCUS_CONTAINERD_TIMEOUT_SECS=120 CIRCUS_CONTAINERD_PULL_POLICY=local-only \
+  cargo run --locked --features containerd --example containerd_image_environment
+```
+
+验收缺失拉取路径时，调用方须选一个目标 namespace 中初始不存在的公开镜像（不得删除共享镜像制造缺失），并将上述 IMAGE 替换为它、PULL_POLICY 改为 `if-missing`；需要 daemon 支持 transfer service 及访问目标 registry 的网络。不把命令列在此处当作已运行证据。
+
+协议依据：[containerd Images API](https://github.com/containerd/containerd/blob/v2.2.1/api/services/images/v1/images.proto)、[Transfer API](https://github.com/containerd/containerd/blob/v2.2.1/api/services/transfer/v1/transfer.proto)、[OCI descriptor](https://github.com/opencontainers/image-spec/blob/v1.1.1/descriptor.md) 与 [OCI platform](https://github.com/opencontainers/image-spec/blob/v1.1.1/image-index.md)。
 
 ## 创建与运行时语义
 
@@ -55,7 +84,7 @@ let backend = BackendConfig::containerd(
 
 `create_owned`：
 
-1. 解析镜像 manifest/config（OCI index 按 host 架构选择 `linux/<arch>`），读取 image config 的 `rootfs.diff_ids`，按 containerd 的 chain-id 规则计算每一层的 committed snapshot key。若目标 committed snapshot 不存在，使用本地 content + diff service 解包（`Snapshots.Prepare` → `Diff.Apply` → `Snapshots.Commit`）；不访问 registry。进程内用一把异步互斥锁串行化解包，避免并发 create 重复 apply。
+1. 解析镜像 manifest/config（OCI index 按 host 架构选择 `linux/<arch>`），读取 image config 的 `rootfs.diff_ids`，按 containerd 的 chain-id 规则计算每一层的 committed snapshot key。若目标 committed snapshot 不存在，使用本地 content + diff service 解包（`Snapshots.Prepare` → `Diff.Apply` → `Snapshots.Commit`）；不访问 registry。进程内用一把异步互斥锁串行化解包，避免并发 create 重复 apply。解包期间持有一个 namespace 级 lease（`containerd-lease` gRPC header），active snapshot 使用随机 `extract-<uuid>` key，commit 时以 chain id 命名；完成后在 image config content 上写入 `containerd.io/gc.ref.snapshot.<snapshotter>` 引用，使 committed chain 在 image 存在期间不被 GC 回收，最后 best-effort 删除 lease。
 2. 以容器名（`circus-sandbox-<uuid>`）为 snapshot key，从最终 chain snapshot prepare 一个 active snapshot，并写入 owner label。
 3. 以真实 OCI runtime-spec JSON 调用 `Containers.Create`：runtime handler `io.containerd.runc.v2`、`snapshotter=overlayfs`、`snapshot_key=<id>`。
 4. 用 `Snapshots.Prepare` 返回的 mounts 调用 `Tasks.Create`，**不启动** task；`Sandbox::start` 才调用 `Tasks.Start`。
@@ -90,12 +119,30 @@ exec 与交互进程通过 runc shim 的 FIFO：
 - containerd 的 API 不暴露 cgroup 控制器生效值。`SandboxStatus::enforcement` 只报告从**存储的 OCI spec** 读回的结构事实（runtime handler、readonly root、capability 全空、no-new-privileges、private network namespace、0 个 bind mount、workspace tmpfs 选项）。`memory_bytes`、`nano_cpus`、`pids_limit` 保持 `None`，不能当作内核已强制。
 - 没有 seccomp 过滤、user namespace、AppArmor/SELinux profile、TTY、进程组信号或 detached recovery。
 - 网络 namespace 为空，但没有 bandwith/连接审计；不能把它当作网络策略。
-- image 解包路径只在 committed snapshot 缺失时执行。本机测试使用已解包的 python 镜像；CI 中 `ctr images pull` 会解包，因此该路径在 CI 会执行，但本地未单独制造“缺 snapshot”场景。
-- 外部进程并发解包同一 chain 时，Prepare 返回 AlreadyExists 后只轮询等待 commit；没有跨进程锁。
-- 未验证 Kubernetes/CRI、Kata、Firecracker、gVisor（`runsc` 在本机不可用）、VM/内存检查点、registry 认证与 pull。
+- image 解包路径只在 committed snapshot 缺失时执行。真实 daemon 测试现在使用全新 namespace，实际执行 `Prepare`/`Diff.Apply`/`Commit`，并验证 guest 可启动、可 exec、清理后无 snapshot 残留。
+- 外部进程并发解包同一 chain 时，各进程使用独立的随机 extraction key；Commit 以 chain id 命名，先完成者胜出，后完成者的 `AlreadyExists` 被当作成功并只删除自己的 extraction snapshot。没有跨进程锁。
+- 未验证 Kubernetes/CRI、Kata、Firecracker、gVisor（`runsc` 在本机不可用）、VM/内存检查点与 registry 认证。显式 image transfer 的新行为需单独提供真实 daemon 验证，不沿用上面的旧运行记录。
 - Windows 主机不编译 containerd 适配器；在非 Unix 主机上选择 `BackendConfig::Containerd` 会在连接前返回 typed backend error。
 
 ## 测试
+
+新增镜像准备测试与下方历史运行记录分开验收。确定性 `containerd_image_policy` 使用 Unix + `containerd` feature 的具体本地 gRPC peer，不需要真实 daemon；它验证协议/策略边界，不是真实 registry 或隔离证据：
+
+```bash
+cargo test --locked --features containerd --test containerd_image_policy
+```
+
+`containerd_image_environment` 默认忽略，显式连接真实 daemon，创建测试自有的唯一 namespace（不使用共享的 `CIRCUS_CONTAINERD_NAMESPACE`），覆盖实际 pull、不可变 alias/local-only 缓存查询，以及用产物启动 sandbox、exec、destroy 和自有资源清理。它需要 daemon transfer service、registry 网络及可运行且包含 Python 3 的镜像：
+
+```bash
+CIRCUS_CONTAINERD=1 \
+CIRCUS_CONTAINERD_SOCKET=/run/containerd/containerd.sock \
+CIRCUS_CONTAINERD_IMAGE=docker.io/library/python:3.12-slim \
+  cargo test --locked --features containerd --test containerd_image_environment \
+  -- --ignored --test-threads=1
+```
+
+上述两条新测试命令尚未在本次修改中执行，不声明通过；真实套件自有资源清理不改变生产 API 不删除共享缓存的契约。
 
 四组集成测试默认忽略，只有显式设置 `CIRCUS_CONTAINERD=1` 才连接真实 daemon：
 
