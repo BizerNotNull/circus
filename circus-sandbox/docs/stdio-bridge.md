@@ -109,18 +109,18 @@ try {
 未知版本、空帧、无效 UTF-8、超限帧、EOF 中的半帧和非法消息状态。
 TypeScript 的严格 Zod schema 位于 `bridge/protocol.ts`，Rust 模型位于 `stdio-bridge/src/protocol.rs`。
 
-| 方向        | type             | 字段与语义                                                                         |
-| ----------- | ---------------- | ---------------------------------------------------------------------------------- |
-| Rust → Node | `ready`          | `maxFrameBytes: 12582912`，配置完成，尚未创建任务                                  |
+| 方向        | type             | 字段与语义                                                                                                                                                          |
+| ----------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rust → Node | `ready`          | `maxFrameBytes: 12582912`，配置完成，尚未创建任务                                                                                                                   |
 | Node → Rust | `start`          | `requestId`、`request: { prompt, inputFiles, outputPaths, timeoutMs, mcpGrants?, workspaceArchive?, workspaceMaxTotalBytes?, workspaceMaxEntries?, agentSession? }` |
-| Rust → Node | `accepted`       | `requestId`、Rust 分配的 `taskId`                                                  |
-| Rust → Node | `event`          | `requestId`、`taskId`、从 1 连续递增的 `seq`、`event`                              |
-| Node → Rust | `cancel`         | `requestId`、`taskId`，只作用于本连接任务                                          |
-| Rust → Node | `cancel_ack`     | 相同关联字段；仅确认请求，未确认回收                                               |
-| Rust → Node | `result`         | 相同关联字段和 `result`，一次且在全部事件之后                                      |
-| Node → Rust | `cleanup_retry`  | 相同关联字段，仅任务结束后可调用                                                   |
-| Rust → Node | `cleanup_result` | 相同关联字段、`cleanup`                                                            |
-| Rust → Node | `error`          | `code`、静态 `message`，连接失败并退出非零                                         |
+| Rust → Node | `accepted`       | `requestId`、Rust 分配的 `taskId`                                                                                                                                   |
+| Rust → Node | `event`          | `requestId`、`taskId`、从 1 连续递增的 `seq`、`event`                                                                                                               |
+| Node → Rust | `cancel`         | `requestId`、`taskId`，只作用于本连接任务                                                                                                                           |
+| Rust → Node | `cancel_ack`     | 相同关联字段；仅确认请求，未确认回收                                                                                                                                |
+| Rust → Node | `result`         | 相同关联字段和 `result`，一次且在全部事件之后                                                                                                                       |
+| Node → Rust | `cleanup_retry`  | 相同关联字段，仅任务结束后可调用                                                                                                                                    |
+| Rust → Node | `cleanup_result` | 相同关联字段、`cleanup`                                                                                                                                             |
+| Rust → Node | `error`          | `code`、静态 `message`，连接失败并退出非零                                                                                                                          |
 
 Wire 文件使用 `{ "path": "relative/name", "data": "canonical padded base64" }` 数组，
 拒绝重复路径。请求没有命令、宿主 cwd、模型端点、环境或凭证字段。归档路径和
