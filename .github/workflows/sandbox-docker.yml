@@ -11,6 +11,8 @@ name: Sandbox Docker
 # stays pending when a ruleset requires the check.
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -36,6 +38,9 @@ jobs:
   # fresh runner, so its containers cannot leak into a sibling suite.
   docker:
     name: docker (${{ matrix.suite }})
+    # PR evidence and manual runs. Skip on push to main so merge does not
+    # re-run the eight Engine suites; coverage-docker owns main reporting.
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -105,8 +110,13 @@ jobs:
   # Display/report only: no percentage gate. Not isolation evidence. Excludes
   # agent_image (custom image) and docker_image_pull (network pull opt-in), and
   # never enables containerd/kubernetes features.
+  #
+  # Skipped on pull_request: the eight docker(*) matrix jobs already provide
+  # per-suite Engine evidence on every PR; this merged coverage report is
+  # expensive under llvm-cov and is reserved for main and manual runs.
   coverage-docker:
     name: coverage-docker
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     defaults:
