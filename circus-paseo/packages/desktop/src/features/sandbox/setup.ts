@@ -27,49 +27,67 @@ import { acceptedResponse } from "./model.js";
 export class SandboxSetupError extends Error {}
 
 const referenceSchema = z.strictObject({ service: z.string(), account: z.string() });
-const connectionSchema = z
-  .object({
-    id: z.string(),
-    url: z.string(),
-    tools: z.array(
-      z.object({
-        name: z.string(),
-        allowedArguments: z.array(z.string()),
-        fixedArguments: z.record(z.string(), z.string()),
-      }),
-    ),
-    headersKeychain: referenceSchema.optional(),
-    headersFile: z.string().optional(),
+const connectionSchema = z.strictObject({
+  id: z.string(),
+  url: z.string(),
+  tools: z.array(
+    z.strictObject({
+      name: z.string(),
+      allowedArguments: z.array(z.string()),
+      fixedArguments: z.record(z.string(), z.string()),
+    }),
+  ),
+  headersKeychain: referenceSchema.optional(),
+  headersFile: z.string().optional(),
+  caFile: z.string().optional(),
+});
+const resourcesSchema = z.strictObject({
+  memoryBytes: z.number().int().nonnegative(),
+  cpuMillis: z.number().int().nonnegative(),
+  maxProcesses: z.number().int().nonnegative(),
+  workspaceBytes: z.number().int().nonnegative(),
+  maxFileBytes: z.number().int().nonnegative(),
+});
+const backendSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("docker"),
+    endpoint: z.string().min(1),
+    image: z.string().min(1),
+    runtime: z.string().min(1),
+  }),
+  z.strictObject({
+    kind: z.literal("containerd"),
+    socket: z.string().min(1),
+    namespace: z.string().min(1),
+    image: z.string().min(1),
+    runtime: z.string().min(1),
+    snapshotter: z.string().min(1),
+  }),
+]);
+const runnerSchema = z.strictObject({
+  version: z.literal(1),
+  agent: z.enum(["codex", "claude-code"]).optional(),
+  backend: backendSchema,
+  image: z.strictObject({
+    platform: z.strictObject({
+      os: z.string().min(1),
+      architecture: z.string().min(1),
+      variant: z.string().min(1).optional(),
+    }),
+    pullPolicy: z.enum(["local-only", "if-missing"]),
+    prepareTimeoutMs: z.number().int().positive(),
+  }),
+  python: z.string().refine(isAbsolute),
+  resources: resourcesSchema,
+  model: z.strictObject({
+    baseUrl: z.string(),
+    model: z.string(),
+    apiKeyFile: z.string().optional(),
+    apiKeyKeychain: referenceSchema.optional(),
     caFile: z.string().optional(),
-  })
-  .passthrough();
-const resourcesSchema = z
-  .object({
-    memoryBytes: z.number(),
-    cpuMillis: z.number(),
-    maxProcesses: z.number(),
-    workspaceBytes: z.number(),
-    maxFileBytes: z.number(),
-  })
-  .passthrough();
-const runnerSchema = z
-  .object({
-    version: z.literal(1),
-    dockerEndpoint: z.string(),
-    agentImage: z.string(),
-    python: z.string(),
-    resources: resourcesSchema,
-    model: z
-      .object({
-        baseUrl: z.string(),
-        model: z.string(),
-        apiKeyFile: z.string().optional(),
-        apiKeyKeychain: referenceSchema.optional(),
-        caFile: z.string().optional(),
-      })
-      .passthrough(),
-  })
-  .passthrough();
+  }),
+  mcpConnections: z.array(connectionSchema).optional(),
+});
 type RunnerConfig = z.infer<typeof runnerSchema>;
 const presets = {
   compact: {
@@ -119,7 +137,11 @@ function validateBaseUrl(value: string): string {
 
 function presetFor(resources: RunnerConfig["resources"]): SandboxSetupInput["preset"] {
   for (const name of ["compact", "balanced"] as const) {
-    if (Object.entries(presets[name]).every(([key, value]) => resources[key] === value))
+    if (
+      Object.entries(presets[name]).every(
+        ([key, value]) => resources[key as keyof typeof resources] === value,
+      )
+    )
       return name;
   }
   return "custom";
@@ -217,6 +239,10 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
         "The existing sandbox configuration could not be read. It has not been changed.",
       );
     }
+    if (config.backend.kind !== "docker")
+      throw new SandboxSetupError(
+        "This setup currently manages Docker only. Your existing backend configuration has not been changed.",
+      );
     return { config, provider, path, serialized };
   }
 
@@ -516,8 +542,12 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
         const next: RunnerConfig = {
           ...config,
           version: 1,
-          dockerEndpoint: endpoint,
-          agentImage: image,
+          backend: { kind: "docker", endpoint, image, runtime: "runc" },
+          image: {
+            platform: { os: "linux", architecture: "amd64" },
+            pullPolicy: "local-only",
+            prepareTimeoutMs: 30000,
+          },
           python,
           resources,
           model,

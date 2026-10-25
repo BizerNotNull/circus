@@ -40,9 +40,8 @@ impl BackendConfig {
     /// Builds an explicit Docker backend descriptor.
     ///
     /// `endpoint` must name an authorized local Unix socket or Windows named
-    /// pipe. `image` must already exist in the local daemon; this crate never
-    /// pulls. `runtime` must be `runc`. The descriptor is validated before any
-    /// container allocation; invalid values are reported by
+    /// pipe. `image` must already exist in the local daemon; sandbox creation
+    /// never pulls. `runtime` must be `runc`. The descriptor is validated before any container allocation; invalid values are reported by
     /// [`crate::Sandbox::create`] as [`BackendConfigError`].
     #[must_use]
     pub fn docker(

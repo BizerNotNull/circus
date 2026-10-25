@@ -1,5 +1,6 @@
 mod claude;
 mod docker;
+mod image_preparation;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -172,6 +173,7 @@ fn malformed_agent_session_wire_events_fail_closed() {
 #[test]
 fn claude_agent_session_is_rejected_without_creating_a_sandbox() {
     let runner = AgentRunner::new(RunnerConfig {
+        image_preparation: None,
         backend: BackendConfig::docker("unix:///unused/docker.sock", "unused-image", "runc"),
         resources: ResourceLimits::new(1024 * 1024, 1000, 32, 1024 * 1024, 4096).unwrap(),
         model: ModelConfig::new(

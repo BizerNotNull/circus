@@ -3,6 +3,9 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(all(unix, feature = "containerd"))]
+use circus_sandbox::environment::{ContainerdImageRequest, prepare_containerd_image};
+use circus_sandbox::environment::{ImageRequest, prepare_docker_image};
 use circus_sandbox::{
     CodeSnapshot, IoLimits, IsolationConfig, ProcessExit, ProcessRequest, ProcessSession, Sandbox,
     SandboxConfig, SandboxError, SandboxPhase, SnapshotError,
@@ -319,6 +322,78 @@ async fn persist_workspace(
     }
 }
 
+async fn prepare_backend(
+    config: &RunnerConfig,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Result<circus_sandbox::BackendConfig, TaskError> {
+    let Some(settings) = &config.image_preparation else {
+        return Ok(config.backend.clone());
+    };
+    if settings.timeout.is_zero()
+        || std::time::Instant::now()
+            .checked_add(settings.timeout)
+            .is_none()
+    {
+        return Err(TaskError::Invalid("image preparation timeout"));
+    }
+    match &config.backend {
+        circus_sandbox::BackendConfig::Docker(backend) => {
+            if backend.runtime() != "runc" {
+                return Err(TaskError::Invalid("Docker runtime"));
+            }
+            let request = ImageRequest::new(
+                backend.endpoint(),
+                backend.image(),
+                settings.platform.clone(),
+                settings.timeout,
+            )
+            .map_err(|_| TaskError::Invalid("Docker image preparation"))?
+            .with_pull_policy(settings.pull_policy);
+            let prepared = guarded(prepare_docker_image(request), deadline, cancel)
+                .await?
+                .map_err(|error| TaskError::ImagePreparation(error.to_string()))?;
+            Ok(circus_sandbox::BackendConfig::docker(
+                backend.endpoint(),
+                prepared.id(),
+                backend.runtime(),
+            ))
+        }
+        #[cfg(all(unix, feature = "containerd"))]
+        circus_sandbox::BackendConfig::Containerd(backend) => {
+            if backend.runtime() != "runc" || backend.snapshotter() != "overlayfs" {
+                return Err(TaskError::Invalid("containerd runtime or snapshotter"));
+            }
+            let request = ContainerdImageRequest::new(
+                backend.socket(),
+                backend.namespace(),
+                backend.image(),
+                settings.platform.clone(),
+                settings.timeout,
+            )
+            .map_err(|_| TaskError::Invalid("containerd image preparation"))?
+            .with_pull_policy(settings.pull_policy);
+            let prepared = guarded(prepare_containerd_image(request), deadline, cancel)
+                .await?
+                .map_err(|error| TaskError::ImagePreparation(error.to_string()))?;
+            Ok(circus_sandbox::BackendConfig::containerd(
+                backend.socket(),
+                backend.namespace(),
+                prepared.reference(),
+                backend.runtime(),
+                backend.snapshotter(),
+            ))
+        }
+        #[cfg(not(all(unix, feature = "containerd")))]
+        circus_sandbox::BackendConfig::Containerd(_) => Err(TaskError::Invalid(
+            "containerd image preparation unavailable",
+        )),
+        circus_sandbox::BackendConfig::Kubernetes(_) => Err(TaskError::Invalid(
+            "image preparation unavailable for Kubernetes",
+        )),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run(
     id: &str,
@@ -358,9 +433,24 @@ async fn run(
             cleanup: None,
         })?;
     let deadline = Instant::now() + request.timeout;
+    let backend = match prepare_backend(config, deadline, cancel).await {
+        Ok(backend) => backend,
+        Err(error) => {
+            return Err(TaskFailure {
+                error,
+                cleanup: None,
+            });
+        }
+    };
+    if let Err(error) = guarded(std::future::ready(()), deadline, cancel).await {
+        return Err(TaskFailure {
+            error,
+            cleanup: None,
+        });
+    }
     // Do not abandon create: its returned receipt is needed if ownership remains
     // uncertain. A cancellation/deadline is observed as soon as creation settles.
-    let sandbox = match Sandbox::create(config.backend.clone(), policy).await {
+    let sandbox = match Sandbox::create(backend, policy).await {
         Ok(sandbox) => Arc::new(sandbox),
         Err(source) => {
             let cleanup = match &source {

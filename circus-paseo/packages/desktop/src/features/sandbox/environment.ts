@@ -35,6 +35,17 @@ async function firstExecutable(candidates: string[]): Promise<string | null> {
   return null;
 }
 
+async function firstSupportedPython(candidates: string[], run: RunCommand): Promise<string | null> {
+  for (const candidate of candidates) {
+    const checked = await run({
+      executable: candidate,
+      args: ["-I", "-c", "import sys; raise SystemExit(sys.version_info < (3, 11))"],
+    });
+    if (checked.ok) return candidate;
+  }
+  return null;
+}
+
 async function findSource(candidates: string[]): Promise<string | null> {
   for (let candidate of candidates) {
     for (let depth = 0; depth < 6; depth += 1) {
@@ -54,8 +65,9 @@ interface InspectEnvironmentInput {
   run: RunCommand;
   configured?: {
     python: string;
-    dockerEndpoint: string;
-    agentImage: string;
+    backend:
+      | { kind: "docker"; endpoint: string; image: string }
+      | { kind: "containerd"; image: string };
     model?: { caFile?: string };
   };
   configuredBridge?: string;
@@ -65,6 +77,9 @@ interface InspectEnvironmentInput {
 export async function inspectEnvironment(
   input: InspectEnvironmentInput,
 ): Promise<SandboxEnvironment> {
+  const backend = input.configured?.backend;
+  if (backend && backend.kind !== "docker")
+    throw new Error("Desktop setup only inspects Docker backends.");
   const source = await findSource(input.sourceCandidates);
   const bridgeCandidates = input.binaryDirectories.map((directory) =>
     join(directory, "circus-stdio-bridge"),
@@ -78,17 +93,7 @@ export async function inspectEnvironment(
   const bridge = await firstExecutable(bridgeCandidates);
   const pythonCandidates = input.binaryDirectories.map((directory) => join(directory, "python3"));
   if (input.configured) pythonCandidates.unshift(input.configured.python);
-  let python: string | null = null;
-  for (const candidate of pythonCandidates) {
-    const checked = await input.run({
-      executable: candidate,
-      args: ["-I", "-c", "import sys; raise SystemExit(sys.version_info < (3, 11))"],
-    });
-    if (checked.ok) {
-      python = candidate;
-      break;
-    }
-  }
+  const python = await firstSupportedPython(pythonCandidates, input.run);
   const tls = await inspectPythonTrust({
     python,
     platform: input.platform,
@@ -98,13 +103,14 @@ export async function inspectEnvironment(
   const docker = await firstExecutable(
     input.binaryDirectories.map((directory) => join(directory, "docker")),
   );
-  const endpoints = [
-    "unix:///var/run/docker.sock",
-    `unix://${input.userHome}/.docker/run/docker.sock`,
-    `unix://${input.userHome}/.colima/default/docker.sock`,
-  ];
-  if (input.configured) endpoints.unshift(input.configured.dockerEndpoint);
-  const imageRef = input.configured?.agentImage ?? CODEX_IMAGE;
+  const endpoints = backend
+    ? [backend.endpoint]
+    : [
+        "unix:///var/run/docker.sock",
+        `unix://${input.userHome}/.docker/run/docker.sock`,
+        `unix://${input.userHome}/.colima/default/docker.sock`,
+      ];
+  const imageRef = backend?.image ?? CODEX_IMAGE;
   const { endpoint, image } = await inspectDocker({ docker, endpoints, imageRef, run: input.run });
   const supported = input.platform === "darwin";
   const checks: SandboxSetupSnapshot["checks"] = [

@@ -14,6 +14,7 @@ async fn claude_cancel_and_timeout_revoke_requests_and_confirm_container_cleanup
     assert_eq!(std::env::var("CIRCUS_DOCKER_SANDBOX").as_deref(), Ok("1"));
     let endpoint = std::env::var("CIRCUS_DOCKER_ENDPOINT")?;
     let runner = AgentRunner::new(RunnerConfig {
+        image_preparation: None,
         backend: BackendConfig::docker(
             endpoint.clone(),
             std::env::var("CIRCUS_CLAUDE_IMAGE")?,
