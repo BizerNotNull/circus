@@ -3,18 +3,19 @@
 //! Preparation is async and requires a Tokio runtime. An explicit local
 //! endpoint, image reference, Linux platform, and whole-operation timeout are
 //! required; no Docker context, environment credentials, or Docker
-//! configuration authentication is loaded. Nothing is pulled and no registry
-//! is contacted: a missing local image is a typed failure. A successful result
-//! identifies inspected image contents, not a complete dependency environment
-//! or a guarantee that sandbox creation will accept the image (for example, the
-//! guest Python requirement still applies).
+//! configuration authentication is loaded. Requests are local-only unless
+//! [`ImagePullPolicy::IfMissing`] is explicitly selected. Only a missing local
+//! image permits a pull; daemon failures and platform mismatches never do.
+//! A successful result identifies inspected image contents, not a complete
+//! dependency environment or a guarantee that sandbox creation will accept the
+//! image (for example, the guest Python requirement still applies).
 //!
 //! Dropping the preparation future or reaching its deadline stops observing the
-//! daemon request without spawning detached work. Docker owns its shared image
-//! cache: concurrent users may move tags or remove images. Pass
-//! [`PreparedImage::id`] to [`crate::BackendConfig::docker`] to avoid using a
-//! mutable tag; callers remain responsible for retaining the image in the
-//! daemon.
+//! daemon request without spawning detached work. A pull may continue inside
+//! Docker and mutate its shared cache even after failure or cancellation; this
+//! crate never deletes shared images. Concurrent users may move tags or remove
+//! images. Pass [`PreparedImage::id`] to [`crate::BackendConfig::docker`] to avoid
+//! using a mutable tag; callers remain responsible for retaining the image.
 //!
 //! [`EnvironmentPlan`] is a separate, explicitly ordered preparation plan. It
 //! requires a pinned version for every step, executes each step as a separate
@@ -43,9 +44,9 @@ use crate::infrastructure::{DockerEndpoint, Engine, EngineError, ImageInfo};
 /// Architecture names are Docker names such as `amd64` and `arm64`, not host
 /// aliases such as `x86_64` or `aarch64`. No host-platform default is inferred.
 /// [`ImagePlatform::new`] requests no variant; [`ImagePlatform::with_variant`]
-/// adds an explicit one. Docker image inspection reports only OS and
-/// architecture, so a variant is carried into an [`EnvironmentId`] but is not
-/// verified against the inspected manifest.
+/// adds an explicit one, which is sent to Docker when a pull is enabled. Image
+/// inspection reports only OS and architecture, so a variant is carried into
+/// an [`EnvironmentId`] but is not verified against the inspected manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImagePlatform {
     os: String,
@@ -138,6 +139,18 @@ impl ImagePlatform {
     }
 }
 
+/// Registry access permitted during explicit Docker image preparation.
+///
+/// This policy does not change sandbox creation, which requires an image
+/// already present in the selected daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImagePullPolicy {
+    /// Inspect only the local cache; a missing image is a typed failure.
+    LocalOnly,
+    /// Pull without registry credentials, but only after a local image miss.
+    IfMissing,
+}
+
 /// Validated immutable inputs for one image resolution operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageRequest {
@@ -145,17 +158,18 @@ pub struct ImageRequest {
     reference: String,
     platform: ImagePlatform,
     timeout: Duration,
+    pull_policy: ImagePullPolicy,
 }
 
 impl ImageRequest {
     /// Validates all inputs without connecting to Docker.
     ///
     /// `endpoint` must name an authorized local Unix socket or Windows named
-    /// pipe. `timeout` bounds connection/version negotiation and inspection as a
-    /// single operation. References must be nonempty and contain no
-    /// whitespace/control characters; Docker performs the remaining reference
-    /// syntax validation. No pull policy exists because registry access is not
-    /// implemented.
+    /// pipe. `timeout` bounds connection/version negotiation, inspection, any
+    /// explicitly enabled pull, and final inspection as a single operation.
+    /// References must be nonempty and contain no whitespace/control characters;
+    /// Docker performs the remaining reference syntax validation. The policy is
+    /// [`ImagePullPolicy::LocalOnly`]; use [`Self::with_pull_policy`] to opt in.
     ///
     /// # Errors
     ///
@@ -190,7 +204,25 @@ impl ImageRequest {
             reference,
             platform,
             timeout,
+            pull_policy: ImagePullPolicy::LocalOnly,
         })
+    }
+
+    /// Selects whether a local image miss may contact a registry.
+    ///
+    /// [`ImagePullPolicy::IfMissing`] never refreshes a cached image, never
+    /// retries daemon or platform failures, and does not load registry
+    /// credentials. An untagged repository pulls only `latest`, not all tags.
+    #[must_use]
+    pub fn with_pull_policy(mut self, policy: ImagePullPolicy) -> Self {
+        self.pull_policy = policy;
+        self
+    }
+
+    /// Explicit image preparation pull policy.
+    #[must_use]
+    pub fn pull_policy(&self) -> ImagePullPolicy {
+        self.pull_policy
     }
 
     /// Explicit local Docker endpoint.
@@ -256,7 +288,7 @@ impl PreparedImage {
     }
 }
 
-/// A resolution failure. None of these failures modify the daemon image cache.
+/// A resolution failure. An attempted pull may have changed Docker's shared cache.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EnvironmentError {
     #[error("image reference must be nonempty without whitespace or control characters")]
@@ -273,7 +305,7 @@ pub enum EnvironmentError {
         "platform variant must be nonempty without whitespace or control characters: {variant}"
     )]
     InvalidPlatformVariant { variant: String },
-    #[error("image {reference} is absent from the local daemon cache; this crate does not pull")]
+    #[error("image {reference} is absent from the local daemon cache")]
     ImageNotFound { reference: String },
     #[error(
         "image platform {actual_os}/{actual_architecture} does not match requested {expected:?}"
@@ -289,17 +321,25 @@ pub enum EnvironmentError {
     Timeout,
 }
 
-/// Resolves and inspects an explicitly referenced local image.
+/// Resolves an explicitly referenced image to its inspected immutable identity.
 ///
-/// The timeout includes connection negotiation and inspection. A missing image
-/// is [`EnvironmentError::ImageNotFound`]; no pull is attempted and no fallback
-/// image is selected. Platform mismatch is rejected after inspection. Dropping
-/// this future stops client observation; no daemon-side cache mutation occurs.
+/// The timeout includes connection negotiation, local inspection, any pull,
+/// and final inspection. The default [`ImagePullPolicy::LocalOnly`] returns
+/// [`EnvironmentError::ImageNotFound`] for a cache miss.
+/// [`ImagePullPolicy::IfMissing`] permits one unauthenticated pull after that
+/// miss, using the requested Linux platform. Cached images are never refreshed;
+/// daemon failures and platform mismatches never trigger a pull. No fallback
+/// image is selected.
+///
+/// Dropping this future stops client observation without spawning detached
+/// work. Docker may continue a pull and mutate its shared cache after failure,
+/// timeout, or cancellation; no shared image is deleted. The returned ID and
+/// OS/architecture come from final inspection, not pull progress messages.
 ///
 /// # Errors
 ///
-/// Returns [`EnvironmentError`] for endpoint/daemon failures, a missing local
-/// image, a platform mismatch, or expiration of the operation's timeout.
+/// Returns [`EnvironmentError`] for endpoint/daemon or pull failures, a missing
+/// local image, a platform mismatch, or expiration of the operation's timeout.
 pub async fn prepare_docker_image(
     request: ImageRequest,
 ) -> Result<PreparedImage, EnvironmentError> {
@@ -317,18 +357,27 @@ async fn prepare(request: &ImageRequest) -> Result<PreparedImage, EnvironmentErr
     let engine = Engine::connect(endpoint.socket_kind(), endpoint.path())
         .await
         .map_err(engine_error)?;
-    let info: ImageInfo = engine
-        .inspect_image(&request.reference)
-        .await
-        .map_err(|error| {
-            if error.not_found {
-                EnvironmentError::ImageNotFound {
-                    reference: request.reference.clone(),
-                }
-            } else {
-                engine_error(error)
-            }
-        })?;
+    let info: ImageInfo = match engine.inspect_image(&request.reference).await {
+        Ok(info) => info,
+        Err(error) if error.not_found && request.pull_policy == ImagePullPolicy::IfMissing => {
+            let platform = match request.platform.variant() {
+                Some(variant) => format!(
+                    "{}/{}/{variant}",
+                    request.platform.os, request.platform.architecture
+                ),
+                None => format!("{}/{}", request.platform.os, request.platform.architecture),
+            };
+            engine
+                .pull_image(&request.reference, &platform)
+                .await
+                .map_err(engine_error)?;
+            engine
+                .inspect_image(&request.reference)
+                .await
+                .map_err(|error| image_error(request, error))?
+        }
+        Err(error) => return Err(image_error(request, error)),
+    };
     if info.os != request.platform.os || info.architecture != request.platform.architecture {
         return Err(EnvironmentError::PlatformMismatch {
             expected: request.platform.clone(),
@@ -342,6 +391,16 @@ async fn prepare(request: &ImageRequest) -> Result<PreparedImage, EnvironmentErr
         os: info.os,
         architecture: info.architecture,
     })
+}
+
+fn image_error(request: &ImageRequest, error: EngineError) -> EnvironmentError {
+    if error.not_found {
+        EnvironmentError::ImageNotFound {
+            reference: request.reference.clone(),
+        }
+    } else {
+        engine_error(error)
+    }
 }
 
 fn engine_error(error: EngineError) -> EnvironmentError {

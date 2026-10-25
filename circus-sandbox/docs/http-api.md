@@ -66,7 +66,7 @@ curl -sS -H "$AUTH" -H "$TENANT" "$CIRCUS_BASE/healthz"
 
 ### 创建 sandbox
 
-请求直接映射 `BackendConfig` 与 `SandboxConfig`。`backend.kind` 只接受 `docker`，`backend.runtime` 只接受 `runc`；其他值返回 `501 unsupported_backend`。镜像必须已存在，本 crate 不会拉取。
+请求直接映射 `BackendConfig` 与 `SandboxConfig`。`backend.kind` 只接受 `docker`，`backend.runtime` 只接受 `runc`；其他值返回 `501 unsupported_backend`。镜像必须已存在，HTTP 创建不会拉取。
 
 ```bash
 curl -sS -X POST -H "$AUTH" -H "$TENANT" \
