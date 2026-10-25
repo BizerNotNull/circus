@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use super::{Workspace, WorkspaceError};
+use super::{PathRejectReason, Workspace, WorkspaceError};
 
 #[test]
 fn oversize_write_does_not_truncate_or_create() {
@@ -497,6 +497,21 @@ impl Drop for WriterDone<'_> {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
     }
+}
+
+#[test]
+fn path_reject_reason_display_names_every_variant() {
+    assert_eq!(PathRejectReason::Empty.to_string(), "empty");
+    assert_eq!(PathRejectReason::Absolute.to_string(), "absolute");
+    assert_eq!(
+        PathRejectReason::ParentComponent.to_string(),
+        "parent component"
+    );
+    assert_eq!(
+        PathRejectReason::WindowsPrefix.to_string(),
+        "Windows prefix"
+    );
+    assert_eq!(PathRejectReason::Backslash.to_string(), "backslash");
 }
 
 fn try_symlink(target: &Path, link: &Path) {
