@@ -102,6 +102,52 @@ class ModelPolicyTests(unittest.TestCase):
         with self.assertRaises(bridge.BridgeError):
             self.controller.model_request(self.request())
 
+    def test_thread_start_reports_agent_session_and_resume_uses_native_thread(self):
+        cases = [
+            (None, "thread/start",
+             {"model": "allowed-model", "modelProvider": "circus",
+              "cwd": "/workspace/project", "approvalPolicy": "never"},
+             {"thread": {"id": "thread-new"}}, "thread-new"),
+            ("thread-persisted_1", "thread/resume",
+             {"threadId": "thread-persisted_1"}, {}, "thread-persisted_1"),
+            ("thread-persisted_2", "thread/resume",
+             {"threadId": "thread-persisted_2"},
+             {"thread": {"id": "thread-persisted_2"}}, "thread-persisted_2"),
+        ]
+        for resume, method, expected, response, session in cases:
+            with self.subTest(resume=resume):
+                controller = bridge.HostController(
+                    None, "allowed-model", "task-token", "task", resume)
+                sent = []
+                with patch.object(bridge, "send", sent.append), \
+                        patch.object(bridge, "event") as emitted:
+                    controller.on_rpc({"id": 1, "result": {"userAgent": "codex"}})
+                    controller.on_rpc({"id": 2, "result": response})
+                requests = [message["message"] for message in sent]
+                assert requests[0] == {"method": "initialized", "params": {}}
+                assert requests[1] == {"method": method, "params": expected, "id": 2}
+                assert requests[2]["method"] == "turn/start"
+                assert requests[2]["params"]["threadId"] == session
+                assert emitted.call_args.args == ("agent_session",)
+                assert emitted.call_args.kwargs == {"id": session}
+        controller = bridge.HostController(
+            None, "allowed-model", "task-token", "task", "thread-persisted_3")
+        sent = []
+        with patch.object(bridge, "send", sent.append), patch.object(bridge, "event"):
+            controller.on_rpc({"id": 1, "result": {"userAgent": "codex"}})
+            sent.clear()
+            with self.assertRaises(bridge.BridgeError):
+                controller.on_rpc({"id": 2, "result": {"thread": {"id": "other"}}})
+        assert all(message["message"].get("method") != "turn/start" for message in sent)
+
+    def test_agent_thread_ids_are_bounded_and_path_free(self):
+        with self.assertRaises(bridge.BridgeError):
+            bridge.HostController(None, "allowed-model", "task-token", "task", "")
+        for invalid in ["/tmp/thread", "a b", "a" * 129, "thread\0", "thread/1"]:
+            with self.subTest(invalid=invalid), self.assertRaises(bridge.BridgeError):
+                bridge.thread_id(invalid)
+        assert bridge.thread_id("0199-abcd_EF") == "0199-abcd_EF"
+
     def test_completions_are_correlated_and_failures_are_not_success(self):
         self.controller.thread_id, self.controller.turn_id = "thread", "turn"
         for thread, turn, status in [("other", "turn", "completed"),

@@ -83,6 +83,17 @@ class ClaudeTests(unittest.TestCase):
                                        "mcp_servers": [{"name": "circus", "status": "connected"}]})
         emit.assert_called_once_with("running")
 
+    def test_resume_request_fails_closed_before_cli_start(self):
+        failures = []
+        with patch.dict(bridge.os.environ, {"CIRCUS_RESUME_THREAD": "thread-1"}), \
+                patch.object(bridge, "failure", failures.append), \
+                patch.object(bridge.subprocess, "Popen") as popen:
+            with self.assertRaises(SystemExit):
+                bridge.main_claude_host()
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], bridge.BridgeError)
+        popen.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

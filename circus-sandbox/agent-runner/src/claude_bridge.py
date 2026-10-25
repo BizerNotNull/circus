@@ -150,6 +150,10 @@ class ClaudeHostController(HostController):
 def main_claude_host(provider=None):
     controller = None
     try:
+        if os.environ.get("CIRCUS_RESUME_THREAD"):
+            # Claude runs with --no-session-persistence; a requested resume must
+            # fail closed instead of silently starting an unrelated turn.
+            raise BridgeError("Claude Code session resume is unsupported")
         model = required("CIRCUS_MODEL", 256)
         token = required("CIRCUS_TASK_TOKEN", 256)
         prompt = os.environ.get("CIRCUS_AGENT_PROMPT", "")

@@ -53,6 +53,9 @@ fn untracked_cleanup(error: &TaskError) -> bool {
         TaskError::WorkerGone | TaskError::HostCleanup(_) => true,
         TaskError::Cleanup {
             task: Some(task), ..
+        }
+        | TaskError::Workspace {
+            task: Some(task), ..
         } => untracked_cleanup(task),
         _ => false,
     }
@@ -66,6 +69,7 @@ fn code(error: &TaskError) -> &'static str {
         TaskError::EventBackpressure => "backpressure",
         TaskError::Sandbox { .. } => "sandbox",
         TaskError::HostIo(_) => "host_io",
+        TaskError::Workspace { .. } => "workspace",
         TaskError::AgentFailed => "agent_failed",
         TaskError::UnsupportedInteraction => "unsupported_interaction",
         TaskError::Protocol => "protocol",

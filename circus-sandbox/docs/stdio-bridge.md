@@ -6,7 +6,9 @@ Zod 与 Node 内置模块。它不启动 HTTP 服务，不注册 provider，也�
 Provider 与 UI 由 [Paseo sandbox provider](../../circus-paseo/public-docs/supported-providers.md#sandbox-codex) 提供；运行器能力和限制见 [Agent 运行器](codex-agent.md)。
 
 每个客户端启动一个 Rust 进程，只提交一个任务。结束后创建新客户端；不保留多轮会话、不恢复
-已退出进程的任务，也没有跨连接按 taskId 查询或取消的入口。
+已退出进程的任务，也没有跨连接按 taskId 查询或取消的入口。库层的调用方可以通过
+`TaskWorkspace` 归档和 `agent_session` 串起多轮（见 [Agent 运行器](codex-agent.md)），但 v1
+stdio 协议不暴露这两个字段，保持既有单轮线格式；接入多轮需要后续协议评审，不在本版隐式启用。
 
 ## 宿主配置
 
