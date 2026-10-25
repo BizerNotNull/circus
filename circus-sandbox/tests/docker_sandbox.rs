@@ -2,8 +2,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use circus_sandbox::{
-    CommandRequest, DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig, ResourceLimits,
-    RuntimeName, SandboxConfig, SandboxError, SandboxPhase,
+    BackendConfig, CommandRequest, IoLimits, IsolationConfig, Ownership, ResourceLimits, Sandbox,
+    SandboxConfig, SandboxError, SandboxPhase,
 };
 
 const PY: &str = "python3";
@@ -18,18 +18,17 @@ fn enabled() {
     );
 }
 
-fn endpoint() -> Result<DockerEndpoint, Box<dyn std::error::Error>> {
-    Ok(DockerEndpoint::parse(&std::env::var(
-        "CIRCUS_DOCKER_ENDPOINT",
-    )?)?)
+fn backend() -> BackendConfig {
+    BackendConfig::docker(
+        std::env::var("CIRCUS_DOCKER_ENDPOINT").expect("Docker endpoint"),
+        std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
+        "runc",
+    )
 }
 
 fn config() -> Result<SandboxConfig, Box<dyn std::error::Error>> {
     let limits = ResourceLimits::new(64 * 1024 * 1024, 100, TEST_PIDS, 8 * 1024 * 1024, 1024)?;
     Ok(SandboxConfig::new(
-        endpoint()?,
-        std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
-        RuntimeName::runc(),
         limits,
         IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
         IoLimits::new(64 * 1024, Duration::from_secs(3))?,
@@ -37,24 +36,33 @@ fn config() -> Result<SandboxConfig, Box<dyn std::error::Error>> {
 }
 
 struct Fixture {
-    sandbox: Option<DockerSandbox>,
-    endpoint: DockerEndpoint,
+    sandbox: Option<Sandbox>,
+    endpoint: String,
     id: Option<String>,
 }
 
 impl Fixture {
     async fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let ep = endpoint()?;
-        let sandbox = DockerSandbox::create(config()?).await?;
-        let id = sandbox.status().await?.container_id;
+        let backend = backend();
+        let endpoint = match &backend {
+            BackendConfig::Docker(docker) => docker.endpoint().to_string(),
+            _ => unreachable!("Docker fixture uses a Docker backend"),
+        };
+        let endpoint = if endpoint.starts_with('/') {
+            format!("unix://{endpoint}")
+        } else {
+            endpoint
+        };
+        let sandbox = Sandbox::create(backend, config()?).await?;
+        let id = sandbox.status().await?.instance_id;
         Ok(Self {
             sandbox: Some(sandbox),
-            endpoint: ep,
+            endpoint,
             id,
         })
     }
 
-    fn sandbox(&self) -> &DockerSandbox {
+    fn sandbox(&self) -> &Sandbox {
         self.sandbox.as_ref().expect("fixture is alive")
     }
 }
@@ -62,16 +70,12 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         if let Some(id) = &self.id {
-            let host = match &self.endpoint {
-                DockerEndpoint::UnixSocket { path } | DockerEndpoint::NamedPipe { path } => path,
-            };
             let _ = Command::new("docker")
-                .args(["--host", host, "rm", "-f", id])
+                .args(["--host", &self.endpoint, "rm", "-f", id])
                 .output();
         }
     }
 }
-
 async fn destroy(f: &mut Fixture) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(sandbox) = f.sandbox.take() {
         sandbox.destroy().await?;
@@ -98,13 +102,15 @@ async fn docker_linux_runc_lifecycle() -> Result<(), Box<dyn std::error::Error>>
     f.sandbox().create_dir_all("staged").await?;
     f.sandbox().start().await?;
     let status = f.sandbox().status().await?;
-    assert_eq!(status.phase, SandboxPhase::Running);
-    assert_eq!(status.runtime, "runc");
-    assert_eq!(status.memory_bytes, 64 * 1024 * 1024);
-    assert_eq!(status.nano_cpus, 100_000_000);
-    assert_eq!(status.pids_limit, i64::from(TEST_PIDS));
-    assert!(status.readonly_root && status.network_mode == "none");
-    assert!(status.bind_count == 0 && status.cap_drop.iter().any(|c| c == "ALL"));
+    let enforcement = status.enforcement.expect("Docker enforcement evidence");
+    assert_eq!(enforcement.runtime.as_deref(), Some("runc"));
+    assert_eq!(enforcement.memory_bytes, Some(64 * 1024 * 1024));
+    assert_eq!(enforcement.nano_cpus, Some(100_000_000));
+    assert_eq!(enforcement.pids_limit, Some(i64::from(TEST_PIDS)));
+    assert_eq!(enforcement.readonly_root, Some(true));
+    assert_eq!(enforcement.network_mode.as_deref(), Some("none"));
+    assert_eq!(enforcement.bind_count, Some(0));
+    assert!(enforcement.cap_drop.as_ref().is_some_and(|caps| caps.iter().any(|c| c == "ALL")));
     let security = f.sandbox().exec(py(&["-c", r###"from pathlib import Path; s=Path('/proc/self/status').read_text(); print(next(x for x in s.splitlines() if x.startswith('NoNewPrivs:'))); print(next(x for x in s.splitlines() if x.startswith('CapEff:')))"###])).await?;
     let security_text = String::from_utf8(security.stdout)?;
     assert!(
