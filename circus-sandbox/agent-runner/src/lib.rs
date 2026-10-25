@@ -1,4 +1,4 @@
-//! A single Codex or Claude Code task over the public Circus sandbox interface.
+//! A single Codex, Claude Code or OpenCode task over the public Circus sandbox interface.
 //!
 //! The caller supplies configuration, input bytes and requested artifact paths.
 //! [`AgentRunner::start`] returns an owned [`AgentTask`]: consume events while
@@ -8,10 +8,10 @@
 //! Dropping the handle requests cancellation; keep it and await `wait` when cleanup
 //! must be observed. Runtime/process shutdown is not a durable cleanup guarantee.
 //!
-//! Sequential Codex turns are caller-sequenced: pass a plaintext, caller-owned
-//! [`TaskRequest::workspace`] archive plus the previous
+//! Sequential Codex and OpenCode turns are caller-sequenced: pass a plaintext,
+//! caller-owned [`TaskRequest::workspace`] archive plus the previous
 //! [`TaskOutput::agent_session`]. Each task still creates and destroys its own
-//! sandbox; this is not in-flight turn recovery.
+//! sandbox; this is not in-flight turn recovery. Claude Code resume is unsupported.
 //!
 //! This crate is a caller of `circus-sandbox`; agent protocols and model policy do
 //! not belong to the sandbox core. It does not expose HTTP or a Paseo transport.
