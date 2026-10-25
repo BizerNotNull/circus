@@ -192,6 +192,8 @@ jobs:
     name: coverage
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: circus-sandbox
@@ -271,6 +273,22 @@ jobs:
           name: circus-sandbox-lcov
           path: ${{ runner.temp }}/circus-sandbox-lcov.info
           if-no-files-found: error
+
+      # README endpoint badge. Only refresh on main so PR runs do not write the
+      # shared badges branch. Display only; not a percentage gate.
+      - name: Publish coverage badge
+        if: ${{ !cancelled() && steps.coverage.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash .github/scripts/sandbox-publish-coverage-badge.sh \
+            "${RUNNER_TEMP}/circus-sandbox-lcov.info" \
+            coverage.json \
+            coverage
 
   codeql:
     name: codeql

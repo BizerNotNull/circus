@@ -114,6 +114,8 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: circus-sandbox
@@ -228,3 +230,17 @@ jobs:
           name: circus-sandbox-lcov-docker
           path: ${{ runner.temp }}/circus-sandbox-lcov-docker.info
           if-no-files-found: error
+
+      - name: Publish Docker coverage badge
+        if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash .github/scripts/sandbox-publish-coverage-badge.sh \
+            "${RUNNER_TEMP}/circus-sandbox-lcov-docker.info" \
+            coverage-docker.json \
+            coverage+docker
