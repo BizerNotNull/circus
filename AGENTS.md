@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心，`circus-paseo` 是尚未接入的前端调用方。沙箱目前提供 workspace 文件库、受预算约束的进程内代码快照及其版本化有界文件归档、资源请求校验、本地 OCI 镜像解析与有界预启动池、固定提交 Git clone/worktree、Docker 工作区文件快照，以及显式配置的本地 Linux Docker Engine + `runc` 异步后端（含每沙箱一个交互进程会话）；不要把完整交付规划写成现有能力。
+Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心，`circus-paseo` 是尚未接入的前端调用方。沙箱目前提供 workspace 文件库、受预算约束的进程内代码快照及其版本化有界文件归档、资源请求校验、本地 OCI 镜像解析与有界预启动池、固定提交 Git clone/worktree、Docker 工作区文件快照、调用方持久化恢复标识的孤儿恢复，以及显式配置的本地 Linux Docker Engine + `runc` 异步后端（含每沙箱一个交互进程会话）；不要把完整交付规划写成现有能力。
 
 - **当前开发阶段**：工作聚焦 `circus-sandbox` 的功能开发；现有工程门禁继续适用，不为新增功能重复建设工程基础设施。除非用户明确要求，不主动修改 `circus-paseo`。
 - **Paseo 暂不开发**：说明与开发规则见 [circus-paseo/CLAUDE.md](circus-paseo/CLAUDE.md)。除非任务明确要求，不修改其源码、依赖或配置。

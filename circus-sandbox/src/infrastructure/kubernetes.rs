@@ -19,7 +19,9 @@ use super::kubernetes_engine::KubernetesEngine;
 pub(crate) struct KubernetesBackend {
     engine: KubernetesEngine,
     config: KubernetesConfig,
-    spec: CommonSpec,
+    /// Retained for server-side dry-run validation during `prepare`, which has
+    /// no arguments of its own. Absent on recovery-only connections.
+    spec: Option<CommonSpec>,
 }
 
 impl KubernetesBackend {
@@ -30,6 +32,25 @@ impl KubernetesBackend {
     pub(crate) async fn connect(
         config: KubernetesConfig,
         spec: CommonSpec,
+        lifecycle_timeout: Duration,
+    ) -> Result<Self, Box<EngineError>> {
+        Self::connect_with_spec(config, Some(spec), lifecycle_timeout).await
+    }
+
+    /// Connects only enough to inspect and remove an orphan Pod.
+    ///
+    /// No image preparation or Pod creation is possible on this connection;
+    /// `prepare` reports that it is unavailable.
+    pub(crate) async fn connect_for_recovery(
+        config: KubernetesConfig,
+        lifecycle_timeout: Duration,
+    ) -> Result<Self, Box<EngineError>> {
+        Self::connect_with_spec(config, None, lifecycle_timeout).await
+    }
+
+    async fn connect_with_spec(
+        config: KubernetesConfig,
+        spec: Option<CommonSpec>,
         lifecycle_timeout: Duration,
     ) -> Result<Self, Box<EngineError>> {
         let engine = KubernetesEngine::connect(&config, lifecycle_timeout).await?;
@@ -59,8 +80,16 @@ impl Backend for KubernetesBackend {
 
     fn prepare(&self) -> impl Future<Output = Result<(), PrepareError>> + Send {
         async move {
+            let Some(spec) = self.spec.as_ref() else {
+                return Err(PrepareError::Engine(
+                    super::kubernetes_engine::engine_error(
+                        EngineErrorKind::Other,
+                        "Kubernetes backend was connected for recovery only",
+                    ),
+                ));
+            };
             self.engine
-                .prepare(&self.spec, self.config.service_account())
+                .prepare(spec, self.config.service_account())
                 .await
         }
     }
