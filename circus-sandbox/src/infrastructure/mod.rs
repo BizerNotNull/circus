@@ -2,5 +2,6 @@
 
 mod engine;
 pub(crate) use engine::{
-    CreateSpec, Engine, EngineError, EngineErrorKind, Recovered, SocketKind, StagedBytes,
+    AttachedExec, CreateSpec, Engine, EngineError, EngineErrorKind, OutputStream, Recovered,
+    SocketKind, StagedBytes,
 };

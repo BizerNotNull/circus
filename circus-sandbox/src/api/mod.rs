@@ -2,6 +2,6 @@
 
 pub use crate::lifecycle::{
     CleanupReport, CommandOutput, CommandRequest, ConfigError, DockerEndpoint, DockerSandbox,
-    IoLimits, IsolationConfig, OWNER_LABEL_KEY, Ownership, RuntimeName, SandboxConfig,
-    SandboxError, SandboxPhase, SandboxStatus,
+    IoLimits, IsolationConfig, OWNER_LABEL_KEY, Ownership, ProcessOutput, ProcessRequest,
+    ProcessSession, RuntimeName, SandboxConfig, SandboxError, SandboxPhase, SandboxStatus,
 };

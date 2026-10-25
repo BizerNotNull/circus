@@ -1,10 +1,11 @@
 //! Docker Engine calls. Bollard types stay in this module.
 
 use std::collections::HashMap;
+use std::pin::Pin;
 
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 const GUEST_FILES: &str = include_str!("guest_files.py");
 
@@ -95,6 +96,69 @@ pub(crate) struct HostReport {
     pub tmpfs_workspace: Option<String>,
 }
 
+impl AttachedExec {
+    pub(crate) async fn write_stdin(&mut self, bytes: &[u8]) -> Result<(), EngineError> {
+        let input = self
+            .input
+            .as_mut()
+            .ok_or_else(|| EngineError::new("exec stdin is closed"))?;
+        input
+            .write_all(bytes)
+            .await
+            .map_err(|err| EngineError::new(err.to_string()))
+    }
+
+    pub(crate) async fn close_stdin(&mut self) -> Result<(), EngineError> {
+        if let Some(mut input) = self.input.take() {
+            input
+                .shutdown()
+                .await
+                .map_err(|err| EngineError::new(err.to_string()))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn recv(&mut self) -> Result<Option<OutputChunk>, EngineError> {
+        loop {
+            if let Some((stream, mut bytes)) = self.pending.take() {
+                let rest = if bytes.len() > ATTACHED_CHUNK_BYTES {
+                    bytes.split_off(ATTACHED_CHUNK_BYTES)
+                } else {
+                    Vec::new()
+                };
+                if !rest.is_empty() {
+                    self.pending = Some((stream, rest));
+                }
+                return Ok(Some(OutputChunk { stream, bytes }));
+            }
+            let Some(item) = self.output.next().await else {
+                return Ok(None);
+            };
+            let (stream, bytes) = match item.map_err(map_err)? {
+                bollard::container::LogOutput::StdOut { message }
+                | bollard::container::LogOutput::Console { message } => {
+                    (OutputStream::Stdout, message)
+                }
+                bollard::container::LogOutput::StdErr { message } => {
+                    (OutputStream::Stderr, message)
+                }
+                bollard::container::LogOutput::StdIn { .. } => continue,
+            };
+            if !bytes.is_empty() {
+                self.pending = Some((stream, bytes.to_vec()));
+            }
+        }
+    }
+    pub(crate) async fn completion(&mut self) -> Result<Option<i64>, EngineError> {
+        let inspected = self
+            .docker
+            .inspect_exec(&self.exec_id)
+            .await
+            .map_err(map_err)?;
+        Ok(inspected.exit_code)
+    }
+}
+
 pub(crate) struct ExecDone {
     pub exit_code: i64,
     pub stdout: Vec<u8>,
@@ -112,6 +176,32 @@ struct ExecIo<'a> {
     stdin: Option<&'a [u8]>,
     output_limit: usize,
     stderr_limit: usize,
+}
+
+const ATTACHED_CHUNK_BYTES: usize = 16 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+pub(crate) struct OutputChunk {
+    pub stream: OutputStream,
+    pub bytes: Vec<u8>,
+}
+
+type ExecOutput = Pin<
+    Box<dyn Stream<Item = Result<bollard::container::LogOutput, bollard::errors::Error>> + Send>,
+>;
+type ExecInput = Pin<Box<dyn AsyncWrite + Send>>;
+
+pub(crate) struct AttachedExec {
+    docker: bollard::Docker,
+    exec_id: String,
+    output: ExecOutput,
+    input: Option<ExecInput>,
+    pending: Option<(OutputStream, Vec<u8>)>,
 }
 
 impl Engine {
@@ -426,6 +516,48 @@ impl Engine {
                 result.exit_code
             ),
         ))
+    }
+
+    pub(crate) async fn start_attached(
+        &self,
+        id: &str,
+        user: &str,
+        workdir: &str,
+        argv: &[String],
+    ) -> Result<AttachedExec, EngineError> {
+        let created = self
+            .docker
+            .create_exec(
+                id,
+                bollard::models::ExecConfig {
+                    attach_stdin: Some(true),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    cmd: Some(argv.to_vec()),
+                    user: Some(user.to_string()),
+                    working_dir: Some(workdir.to_string()),
+                    tty: Some(false),
+                    privileged: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(map_err)?;
+        let started = self
+            .docker
+            .start_exec(&created.id, None)
+            .await
+            .map_err(map_err)?;
+        let bollard::exec::StartExecResults::Attached { output, input } = started else {
+            return Err(EngineError::new("exec did not attach stdout"));
+        };
+        Ok(AttachedExec {
+            docker: self.docker.clone(),
+            exec_id: created.id,
+            output,
+            input: Some(input),
+            pending: None,
+        })
     }
 
     pub(crate) async fn exec(

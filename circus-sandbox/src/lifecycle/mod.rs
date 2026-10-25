@@ -1,6 +1,9 @@
 //! Lifecycle owner for one Linux Docker sandbox.
 
 mod config;
+mod process;
+
+pub use process::{ProcessOutput, ProcessRequest, ProcessSession};
 
 pub use config::{
     ConfigError, DockerEndpoint, IoLimits, IsolationConfig, OWNER_LABEL_KEY, RuntimeName,
@@ -164,6 +167,10 @@ enum Op {
         request: CommandRequest,
         reply: oneshot::Sender<Result<CommandOutput, SandboxError>>,
     },
+    OpenProcess {
+        request: ProcessRequest,
+        reply: oneshot::Sender<Result<ProcessSession, SandboxError>>,
+    },
     Status(oneshot::Sender<Result<SandboxStatus, SandboxError>>),
 }
 
@@ -233,6 +240,7 @@ impl DockerSandbox {
             phase: SandboxPhase::Created,
             shutdown: shutdown.clone(),
             create_unsettled: true,
+            active_session: None,
         };
         tokio::spawn(worker(state, rx, ready_tx));
         let mut guard = CommandGuard {
@@ -321,6 +329,20 @@ impl DockerSandbox {
         self.call(|reply| Op::Exec { request, reply }).await?
     }
 
+    /// Starts one attached argv process with bounded bidirectional streaming.
+    pub async fn open_process(
+        &self,
+        request: ProcessRequest,
+    ) -> Result<ProcessSession, SandboxError> {
+        if request.argv.is_empty() || request.timeout.is_zero() || request.output_limit_bytes == 0 {
+            return Err(SandboxError::RelativePath {
+                reason: "process requires argv, timeout, and output limit",
+            });
+        }
+        self.call(|reply| Op::OpenProcess { request, reply })
+            .await?
+    }
+
     pub async fn status(&self) -> Result<SandboxStatus, SandboxError> {
         self.call(Op::Status).await?
     }
@@ -366,6 +388,13 @@ struct State {
     phase: SandboxPhase,
     shutdown: CancellationToken,
     create_unsettled: bool,
+    active_session: Option<ActiveSession>,
+}
+
+struct ActiveSession {
+    cancel: CancellationToken,
+    task: tokio::task::JoinHandle<Result<(), SandboxError>>,
+    close_reply: oneshot::Sender<Result<(), SandboxError>>,
 }
 
 async fn worker(
@@ -413,6 +442,68 @@ async fn worker(
         }
     }
     loop {
+        if state.active_session.is_some() {
+            enum SessionEvent {
+                Shutdown,
+                Cancelled,
+                Finished(Result<(), SandboxError>),
+                Message(Option<Message>),
+            }
+            let event = {
+                let active = state
+                    .active_session
+                    .as_mut()
+                    .expect("active session checked");
+                tokio::select! {
+                    biased;
+                    () = state.shutdown.cancelled() => SessionEvent::Shutdown,
+                    () = active.cancel.cancelled() => SessionEvent::Cancelled,
+                    result = &mut active.task => SessionEvent::Finished(
+                        result.unwrap_or_else(|err| Err(SandboxError::WorkerGone {
+                            detail: err.to_string(),
+                        }))
+                    ),
+                    message = rx.recv() => SessionEvent::Message(message),
+                }
+            };
+            match event {
+                SessionEvent::Shutdown => {
+                    if let Some(active) = state.active_session.take() {
+                        active.cancel.cancel();
+                        let _ = active.task.await;
+                        let _ = destroy_state(&mut state).await;
+                        let _ = active.close_reply.send(Err(SandboxError::WorkerGone {
+                            detail: "sandbox shutdown cancelled process session".into(),
+                        }));
+                    }
+                    cleanup_until_done(&mut state).await;
+                    return;
+                }
+                SessionEvent::Cancelled => {
+                    if let Some(active) = state.active_session.take() {
+                        active.cancel.cancel();
+                        let _ = active.task.await;
+                        let cleanup = destroy_state(&mut state).await;
+                        let _ = active.close_reply.send(cleanup);
+                    }
+                }
+                SessionEvent::Finished(result) => {
+                    if let Some(active) = state.active_session.take() {
+                        let cleanup = if result.is_err() {
+                            destroy_state(&mut state).await
+                        } else {
+                            Ok(())
+                        };
+                        let _ = active.close_reply.send(cleanup);
+                    }
+                }
+                SessionEvent::Message(Some(message)) if !message.cancel.is_cancelled() => {
+                    dispatch(&mut state, message).await;
+                }
+                SessionEvent::Message(_) => {}
+            }
+            continue;
+        }
         let message = tokio::select! {
             biased;
             () = state.shutdown.cancelled() => None,
@@ -422,11 +513,9 @@ async fn worker(
             cleanup_until_done(&mut state).await;
             return;
         };
-        // A cancelled queued request must never reach an engine or workspace.
-        if message.cancel.is_cancelled() {
-            continue;
+        if !message.cancel.is_cancelled() {
+            dispatch(&mut state, message).await;
         }
-        dispatch(&mut state, message).await;
     }
 }
 
@@ -489,6 +578,7 @@ async fn dispatch(state: &mut State, message: Message) {
         }
         // Never cancel cleanup itself: a lost caller cannot relinquish ownership.
         Op::Destroy(reply) => {
+            let _ = stop_active_session(state).await;
             let _ = reply.send(destroy_state(state).await);
         }
         Op::Write { path, bytes, reply } => {
@@ -512,10 +602,86 @@ async fn dispatch(state: &mut State, message: Message) {
             let result = run!(exec(state, request), timeout);
             let _ = reply.send(result);
         }
+        Op::OpenProcess { request, reply } => {
+            let timeout = request.timeout;
+            let result = run!(open_process(state, request), timeout);
+            let _ = reply.send(result);
+        }
         Op::Status(reply) => {
             let result = run!(status(state), file_timeout);
             let _ = reply.send(result);
         }
+    }
+}
+
+async fn open_process(
+    state: &mut State,
+    request: ProcessRequest,
+) -> Result<ProcessSession, SandboxError> {
+    need(state, SandboxPhase::Running, "open process")?;
+    if state.active_session.is_some() {
+        return Err(SandboxError::Engine {
+            message: "a process session is already active".into(),
+        });
+    }
+    let id = required_id(state)?;
+    let exec = match state
+        .engine
+        .start_attached(
+            &id,
+            &state.user,
+            state.config.isolation().workspace_path(),
+            &request.argv,
+        )
+        .await
+    {
+        Ok(exec) => exec,
+        Err(err) => return cleanup_engine_error(state, err).await,
+    };
+    let cancel = CancellationToken::new();
+    let (command_tx, command_rx) = mpsc::channel(process::SESSION_QUEUE);
+    let (output_tx, output_rx) = mpsc::channel(process::SESSION_QUEUE);
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let (close_tx, close_rx) = oneshot::channel();
+    let task = tokio::spawn(process::run_attached(
+        exec,
+        command_rx,
+        output_tx,
+        completion_tx,
+        cancel.clone(),
+        request.timeout,
+        request.output_limit_bytes,
+    ));
+    state.active_session = Some(ActiveSession {
+        cancel: cancel.clone(),
+        task,
+        close_reply: close_tx,
+    });
+    Ok(ProcessSession {
+        commands: command_tx,
+        output: output_rx,
+        completion: Some(completion_rx),
+        cancel,
+        close_reply: Some(close_rx),
+        armed: true,
+    })
+}
+
+async fn stop_active_session(state: &mut State) -> Result<(), SandboxError> {
+    if let Some(active) = state.active_session.take() {
+        active.cancel.cancel();
+        let _ = active.task.await;
+        let result = destroy_state(state).await;
+        let reply = match &result {
+            Ok(()) => Ok(()),
+            Err(err) => Err(SandboxError::Engine {
+                message: err.to_string(),
+            }),
+        };
+        let _ = active.close_reply.send(reply);
+        result
+    } else {
+        Ok(())
     }
 }
 
@@ -781,6 +947,9 @@ async fn exec(state: &mut State, request: CommandRequest) -> Result<CommandOutpu
 }
 
 async fn destroy_for_cancel<T>(state: &mut State, detail: &str) -> Result<T, SandboxError> {
+    if state.active_session.is_some() {
+        let _ = stop_active_session(state).await;
+    }
     let report = destroy_report(state).await;
     Err(SandboxError::Cancelled {
         container_id: report.container_id,
