@@ -33,6 +33,24 @@ fn rejects_insecure_flags_and_io_bounds() {
     assert!(IoLimits::new(1, Duration::ZERO).is_err());
 }
 
+#[test]
+fn rejects_platform_maximum_output_limit() {
+    assert_eq!(
+        IoLimits::new(usize::MAX, Duration::from_secs(1)),
+        Err(ConfigError::InvalidOutputLimit {
+            output_limit_bytes: usize::MAX
+        })
+    );
+}
+
+#[test]
+fn rejects_relative_isolation_workspace_path() {
+    assert!(matches!(
+        IsolationConfig::linux_enforced(true, true, true, true, "workspace", 1000, 1000),
+        Err(ConfigError::InvalidWorkspacePath)
+    ));
+}
+
 #[tokio::test]
 async fn create_rejects_remote_endpoints_before_connecting() {
     let error = Sandbox::create(
@@ -93,4 +111,40 @@ fn accepts_valid_configuration_and_exposes_typed_values() {
         BackendConfig::Containerd(_) => panic!("expected a Docker descriptor"),
         BackendConfig::Kubernetes(_) => panic!("expected a Docker descriptor"),
     }
+}
+
+#[cfg(all(unix, feature = "containerd"))]
+#[tokio::test]
+async fn create_rejects_unsupported_containerd_snapshotter_before_connecting() {
+    let error = Sandbox::create(
+        BackendConfig::containerd(
+            "/run/containerd/containerd.sock",
+            "circus",
+            "python:3.12-slim",
+            "runc",
+            "native",
+        ),
+        config(3),
+    )
+    .await
+    .expect_err("unsupported snapshotters must be rejected");
+    assert!(matches!(
+        error,
+        SandboxError::BackendConfig(BackendConfigError::UnsupportedSnapshotter { .. })
+    ));
+}
+
+#[cfg(feature = "kubernetes")]
+#[tokio::test]
+async fn create_rejects_relative_kubeconfig_before_connecting() {
+    let error = Sandbox::create(
+        BackendConfig::kubernetes("relative.yaml", "sandboxes", "python:3.12-slim"),
+        config(3),
+    )
+    .await
+    .expect_err("relative kubeconfig paths must be rejected");
+    assert!(matches!(
+        error,
+        SandboxError::BackendConfig(BackendConfigError::InvalidKubeconfigPath { .. })
+    ));
 }

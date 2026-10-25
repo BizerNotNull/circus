@@ -290,6 +290,42 @@ fn in_cap_relative_symlink_reads_target_and_cleanup_keeps_outside_file() {
     assert_eq!(std::fs::read(outside.path()).unwrap(), b"secret");
 }
 
+/// `remove_file` unlinks the final component without following it, so workspace
+/// symlinks and Unix FIFOs are removed while their targets (and directories) stay.
+#[test]
+fn remove_file_unlinks_symlink_and_fifo_but_not_directory() {
+    let workspace = Workspace::new(32).unwrap();
+    workspace.write_file("target.txt", b"keep").unwrap();
+    let root = workspace.temp.as_ref().unwrap().path();
+    try_symlink(Path::new("target.txt"), &root.join("alias.txt"));
+    workspace.remove_file("alias.txt").unwrap();
+    assert!(
+        !root.join("alias.txt").exists(),
+        "symlink final component must be unlinked"
+    );
+    assert_eq!(workspace.read_file("target.txt").unwrap(), b"keep");
+
+    #[cfg(unix)]
+    {
+        let fifo = root.join("pipe");
+        let mkfifo = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap_or_else(|err| panic!("spawn mkfifo: {err}"));
+        assert!(mkfifo.success(), "mkfifo exited {mkfifo}");
+        workspace.remove_file("pipe").unwrap();
+        assert!(!fifo.exists(), "FIFO must be unlinked without opening");
+    }
+
+    workspace.create_dir_all("dir").unwrap();
+    assert!(
+        matches!(workspace.remove_file("dir"), Err(WorkspaceError::Io(_))),
+        "remove_file must not delete a directory"
+    );
+    workspace.write_file("dir/nested.txt", b"x").unwrap();
+    assert_eq!(workspace.read_file("dir/nested.txt").unwrap(), b"x");
+}
+
 /// Unix open of a FIFO blocks until the other end is open. A symlink hides
 /// that from `symlink_metadata`, and a blocking `open` never reaches the
 /// handle check. The probe runs in a child so a bad open cannot hang this
