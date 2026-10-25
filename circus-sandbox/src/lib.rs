@@ -1,12 +1,12 @@
-//! Backend-neutral workspace files, snapshots, image preparation, and two real
-//! Linux container backends.
+//! Backend-neutral workspace files, snapshots, image preparation, and three real
+//! Linux backends.
 //!
 //! [`Workspace`] confines file access to a directory it creates. [`Sandbox`] is
 //! a separate async API: it stages those files into a bounded tmpfs and runs
 //! commands in a Linux container through an explicitly selected local Docker
-//! Engine endpoint or containerd daemon, both with `runc`. Creation takes a
-//! [`BackendConfig`] and a backend-neutral [`SandboxConfig`]; callers do not
-//! name backend SDK types.
+//! Engine endpoint, containerd daemon, or Kubernetes Pod, all with `runc`.
+//! Creation takes a [`BackendConfig`] and a backend-neutral [`SandboxConfig`];
+//! callers do not name backend SDK types.
 //!
 //! [`CodeSource`] copies an explicitly authorized source directory into a fresh
 //! owned workspace. [`CodeSnapshot`] captures workspace contents in memory;
@@ -35,10 +35,12 @@
 //! notification, and cancellation independent, while files, status,
 //! pause/resume, and destroy remain usable. Cancellation, timeout, output
 //! overflow, transport failure, or dropping the session requests owned
-//! container cleanup; a normal exit preserves container and workspace. A
-//! session is not a TTY, process-group signal API, or detached recovery
-//! mechanism. Not implemented: Kubernetes, gVisor, Kata, Firecracker, and
-//! registry authentication.
+//! container cleanup; a normal exit preserves container and workspace. Docker,
+//! containerd, and Kubernetes attach through their native exec transports; the
+//! Kubernetes trampoline passes explicit environment values in argv because
+//! `pods/exec` has no environment option. A session is not a TTY, process-group
+//! signal API, or detached recovery mechanism. Not implemented: true
+//! pause/resume, gVisor, Kata, Firecracker, and registry authentication.
 //!
 //! The optional `http` feature (enabled by default) adds an authenticated JSON
 //! transport over the same [`Sandbox`] API (`http::HttpServer`). It requires an

@@ -1,17 +1,62 @@
-//! Real Kubernetes workload suites: lifecycle, exec, files, observables, typed
-//! unsupported operations, allocation-free rejections, and ownership.
+//! Real Kubernetes workload suites: lifecycle, exec, files, interactive
+//! processes, observables, typed unsupported operations, allocation-free
+//! rejections, and ownership.
 //!
 //! Run serially (`--test-threads=1`) so allocation counts and shared namespace
 //! observations are stable.
 
 mod kubernetes_support;
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use circus_sandbox::{
-    BackendConfig, ProcessRequest, Sandbox, SandboxError, SandboxPhase, WorkspaceError,
+    BackendConfig, Ownership, ProcessExit, ProcessOutput, ProcessRequest, ProcessSession,
+    ProcessTermination, Sandbox, SandboxError, SandboxPhase, WorkspaceError,
 };
 use kubernetes_support as support;
+
+fn process_request(script: &str, timeout: Duration, output_limit: usize) -> ProcessRequest {
+    ProcessRequest {
+        argv: vec![
+            "python3".to_string(),
+            "-u".to_string(),
+            "-c".to_string(),
+            script.to_string(),
+        ],
+        working_dir: None,
+        env: BTreeMap::new(),
+        timeout,
+        output_limit_bytes: output_limit,
+    }
+}
+
+async fn until_stdout(process: &ProcessSession, expected: &[u8]) -> Vec<u8> {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut bytes = Vec::new();
+        while !bytes.ends_with(expected) {
+            match process.next_output().await {
+                Some(ProcessOutput::Stdout(chunk)) => bytes.extend(chunk),
+                Some(ProcessOutput::Stderr(_)) => {}
+                None => panic!("output closed before the expected bytes"),
+            }
+        }
+        bytes
+    })
+    .await
+    .expect("expected stdout within the deadline")
+}
+
+async fn drain(process: &ProcessSession) -> (Vec<u8>, Vec<u8>) {
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    while let Some(output) = process.next_output().await {
+        match output {
+            ProcessOutput::Stdout(bytes) => stdout.extend(bytes),
+            ProcessOutput::Stderr(bytes) => stderr.extend(bytes),
+        }
+    }
+    (stdout, stderr)
+}
 
 #[tokio::test]
 #[ignore = "requires an explicit real Kubernetes cluster"]
@@ -100,6 +145,115 @@ async fn kubernetes_linux_runc_lifecycle_exec_files_and_observables() -> support
 
 #[tokio::test]
 #[ignore = "requires an explicit real Kubernetes cluster"]
+async fn kubernetes_interactive_process_round_trip_and_nonzero_exit() -> support::Result {
+    support::enabled();
+    let sandbox = support::create().await?;
+    let id = sandbox
+        .status()
+        .await?
+        .instance_id
+        .ok_or("created sandbox has no Pod name")?;
+    sandbox.create_dir_all("project").await?;
+    sandbox.start().await?;
+    assert!(support::pod_exists(&id)?);
+
+    let mut request = process_request(
+        "import os,sys\nprint('ready:' + os.getcwd(), flush=True)\nfor line in sys.stdin:\n    print('reply:' + line.strip(), flush=True)\nsys.stderr.write('marker:' + os.environ['CIRCUS_PROCESS_MARKER'] + '\\n')\nsys.stderr.flush()\nsys.exit(7)\n",
+        Duration::from_secs(20),
+        64 * 1024,
+    );
+    // Lifecycle resolves the relative working directory below the workspace and
+    // forwards explicit overrides; Kubernetes applies both inside the trampoline.
+    request.working_dir = Some("project".to_string());
+    request.env = BTreeMap::from([(
+        "CIRCUS_PROCESS_MARKER".to_string(),
+        "left=right".to_string(),
+    )]);
+    let process = sandbox.spawn_process(request).await?;
+    assert_eq!(
+        until_stdout(&process, b"ready:/workspace/project\n").await,
+        b"ready:/workspace/project\n"
+    );
+
+    // Only one interactive process is admitted per sandbox.
+    let error = match sandbox
+        .spawn_process(process_request(
+            "import time; time.sleep(5)",
+            Duration::from_secs(5),
+            1024,
+        ))
+        .await
+    {
+        Ok(_) => panic!("a second process is rejected while one is attached"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, SandboxError::ProcessActive));
+
+    // Files remain usable while the process runs.
+    sandbox.write_file("while-running.txt", b"parallel").await?;
+
+    for message in ["one", "two"] {
+        process
+            .write_stdin(format!("{message}\n").as_bytes())
+            .await?;
+        assert_eq!(
+            until_stdout(&process, b"\n").await,
+            format!("reply:{message}\n").as_bytes()
+        );
+    }
+    process.close_stdin().await?;
+    let (stdout, stderr) = drain(&process).await;
+    assert!(stdout.is_empty(), "unexpected trailing stdout: {stdout:?}");
+    assert_eq!(stderr, b"marker:left=right\n");
+    assert_eq!(process.wait().await?, ProcessExit::Exited { exit_code: 7 });
+
+    // A normal exit retains the Pod and its workspace.
+    assert_eq!(sandbox.status().await?.phase, SandboxPhase::Running);
+    assert_eq!(sandbox.read_file("while-running.txt").await?, b"parallel");
+
+    support::destroy_and_assert(&sandbox, &id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit real Kubernetes cluster"]
+async fn kubernetes_interactive_process_cancellation_cleans_up() -> support::Result {
+    support::enabled();
+    let sandbox = support::create().await?;
+    sandbox.start().await?;
+    let id = sandbox
+        .status()
+        .await?
+        .instance_id
+        .ok_or("running sandbox has no Pod name")?;
+
+    let process = sandbox
+        .spawn_process(process_request(
+            "import time\nprint('sleeping', flush=True)\ntime.sleep(120)\n",
+            Duration::from_secs(60),
+            64 * 1024,
+        ))
+        .await?;
+    until_stdout(&process, b"sleeping\n").await;
+    process.cancel();
+    match tokio::time::timeout(Duration::from_secs(20), process.wait())
+        .await
+        .expect("process outcome within the deadline")?
+    {
+        ProcessExit::Terminated { reason, cleanup } => {
+            assert_eq!(reason, ProcessTermination::Cancelled);
+            assert_eq!(cleanup.ownership, Ownership::ConfirmedAbsent);
+        }
+        other => panic!("expected cancellation, got {other:?}"),
+    }
+    assert_eq!(sandbox.status().await?.phase, SandboxPhase::Destroyed);
+    support::eventually_absent(&id).await?;
+    assert!(sandbox.destroy().await.is_ok());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit real Kubernetes cluster"]
 async fn kubernetes_exec_output_limit_destroys_and_confirms_absence() -> support::Result {
     support::enabled();
     let sandbox = support::create().await?;
@@ -141,31 +295,8 @@ async fn kubernetes_unsupported_operations_are_typed() -> support::Result {
         ));
     }
 
-    let error = match sandbox
-        .spawn_process(ProcessRequest {
-            argv: vec![
-                "python3".to_string(),
-                "-c".to_string(),
-                "print('process')".to_string(),
-            ],
-            working_dir: None,
-            env: std::collections::BTreeMap::new(),
-            timeout: Duration::from_secs(5),
-            output_limit_bytes: 1024,
-        })
-        .await
-    {
-        Err(error) => error,
-        Ok(_) => panic!("interactive processes are unsupported"),
-    };
-    assert!(matches!(
-        error,
-        SandboxError::UnsupportedCapability {
-            capability: "attach an interactive process"
-        }
-    ));
-
-    // Every rejection left the sandbox running and owned.
+    // Pause/resume rejection left the sandbox running and owned. Interactive
+    // processes and exec are supported and are exercised by their own suites.
     assert_eq!(sandbox.status().await?.phase, SandboxPhase::Running);
     sandbox.destroy().await?;
     Ok(())
