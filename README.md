@@ -1,34 +1,56 @@
-# Circus
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/circus-logo-dark.svg">
+    <img src="docs/assets/circus-logo.svg" alt="" width="112" height="112">
+  </picture>
+  <br>
+  Circus
+</h1>
 
-**桌面级 AI Agent 安全沙箱：密钥留在本机，权限按任务授予。**
+<p align="center">
+  <strong>桌面级 AI Agent 安全沙箱</strong><br>
+  密钥留在本机 · 权限按任务授予 · 结果由你掌控
+</p>
 
-导入文件、勾选允许使用的工具，让 Agent 在独立环境中完成任务，再取回结果。
-Circus 把凭据保护、文件与网络边界、资源预算和任务回收接入同一条桌面工作流。
+<p align="center">
+  <a href="#从桌面开始"><img src="https://img.shields.io/badge/status-source_preview-218D76?style=flat-square" alt="Status: source preview"></a>
+  <a href="https://github.com/BizerNotNull/circus/actions/workflows/sandbox-rust.yml?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/BizerNotNull/circus/sandbox-rust.yml?branch=main&amp;style=flat-square&amp;label=Rust%20CI" alt="Rust CI on main"></a>
+  <a href="https://github.com/BizerNotNull/circus/actions/workflows/sandbox-security.yml?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/BizerNotNull/circus/sandbox-security.yml?branch=main&amp;style=flat-square&amp;label=Security%20CI" alt="Security CI on main"></a>
+  <a href="circus-sandbox/LICENSE"><img src="https://img.shields.io/badge/sandbox-Apache--2.0-526963?style=flat-square" alt="Sandbox license: Apache-2.0"></a>
+  <a href="https://github.com/BizerNotNull/circus/stargazers"><img src="https://img.shields.io/github/stars/BizerNotNull/circus?style=flat-square&amp;color=218D76&amp;label=Stars" alt="GitHub stars"></a>
+</p>
 
-[桌面上手](#从桌面开始) · [安全演示](#一次任务从修复代码到取回产物) · [架构](#架构) · [终端验证](#快速上手) · [验收记录](circus-sandbox/docs/secure-desktop-verification.md)
+<p align="center">
+  <a href="#从桌面开始">桌面上手</a> ·
+  <a href="#一次任务从修复代码到取回产物">任务示例</a> ·
+  <a href="#架构">架构</a> ·
+  <a href="#快速上手">命令行</a> ·
+  <a href="circus-sandbox/docs/secure-desktop-verification.md">验证</a>
+</p>
 
-## 围绕参赛主题的四个设计
+选择文件、描述任务、勾选工具权限，让 Codex 或 Claude Code 在受限容器中工作，再取回结果。
+模型与 MCP 的真实凭据由宿主代理持有；Agent 通过受控通道访问获准服务，无需在沙箱中填写密钥或密码。
 
-参赛题目是**桌面级安全沙箱**。我们把安全要求做成用户能够选择、系统能够执行、演示能够验证的边界：
+## 安全与易用性
 
-| 用户关心的事             | Circus 如何处理                                                                            | 可以验证什么                           |
-| ------------------------ | ------------------------------------------------------------------------------------------ | -------------------------------------- |
-| Agent 会拿到我的密钥吗？ | 模型与 MCP 凭据由宿主代理读取；macOS 向导保存到 Keychain，真实值不写入沙箱配置、环境或文件 | 真实容器检查与凭据哨兵测试             |
-| 它能访问哪些文件和服务？ | 只复制选定文件；容器禁网；宿主限制模型目的地、MCP 工具及固定资源参数                       | 越权工具、覆盖仓库与任意联网请求被拒绝 |
-| 我需要写一堆配置吗？     | 桌面检测环境、测试模型连接、保存凭据；每次任务勾选工具权限，默认全部关闭                   | 真实 Electron 设置与授权操作           |
-| 停止后会留下进程吗？     | 生命周期统一拥有回收责任；成功必须包含产物导出和确认清理，失败保留清理状态                 | 取消、超时及独立容器删除检查           |
+从导入文件到取回结果，文件范围、工具权限、资源预算与回收状态贯穿每次任务：
 
-当前提供源码开发版，macOS 桌面向导支持 Codex；Claude Code 可通过宿主配置使用。
+- **凭据留在宿主**：macOS 向导将密钥存入 Keychain，模型与 MCP 代理代为认证。真实凭据不写入沙箱配置、环境或文件。
+- **文件与工具按任务授权**：只复制选定文件，容器禁网；每次任务勾选工具，宿主限制服务地址与仓库等资源参数。
+- **通过桌面完成配置**：检测运行环境、测试模型连接、保存凭据并选择资源预算。工具权限默认关闭。
+- **结果与回收状态可查看**：查看进度、下载产物、停止任务。成功包含确认回收，清理未完成时保留状态供核查与重试。
+
+当前为源码开发版，macOS 桌面向导支持 Codex；Claude Code 可通过宿主配置使用。
 完整信任边界见[安全设计](docs/hackathon-security.md)。
 
 ## 从桌面开始
 
-Paseo 把同一任务契约变成可交互的工作流：选择文件或粘贴内容 → 填写任务、导出路径和期限 → 查看进度 → 预览、下载结果。宿主项目不会被自动覆盖。
+桌面工作流由 Paseo 提供：选择文件或粘贴内容 → 填写任务、导出路径和期限 → 查看进度 → 预览、下载结果。任务使用文件副本，结果由你决定如何应用到原项目。
 
-当前提供源码开发版，先按 [Paseo 开发指南](circus-paseo/docs/development.md)准备 daemon 与桌面客户端。macOS 桌面用户随后可以通过界面完成 Codex 配置：
+先按 [Paseo 开发指南](circus-paseo/docs/development.md)启动本机服务与桌面客户端，再通过界面完成 Codex 配置：
 
 1. 打开本机的 **Settings → Providers → Circus sandbox**，检查运行环境并点击 **Prepare runtime**。首次准备仍需已安装 Docker、Python 与 Rust 工具链。
-2. 填写模型服务地址、模型名和 API key，测试连接、选择资源预算，点击 **Save and enable sandbox**。密钥保存在本机 Keychain，配置通过 reload 生效。
+2. 填写模型服务地址、模型名和 API key，测试连接、选择资源预算，点击 **Save and enable sandbox**。密钥保存在本机 Keychain，配置通过重新加载生效。
 3. 需要 GitHub 工具时，填写 MCP 连接、凭据及允许访问的仓库。创建任务时再显式勾选工具权限；默认不授权。
 
 ![桌面环境检测与模型连接设置](docs/assets/sandbox-setup.png)
@@ -70,7 +92,7 @@ _开发态界面，字段使用演示配置；截图已裁去本机标识。_
 | HTTPS MCP             | Streamable HTTP 工具发现与调用，JSON / 有界 SSE，凭据文件或 Keychain | 认证注入、工具授权、固定资源参数、拒绝与脱敏             | 真实 GitHub 等目标服务验收    |
 | `dsh`                 | 尚未接入                                                             | —                                                        | 确认具体应用与适配协议        |
 
-当前不包含 OAuth 登录、任意本地 stdio MCP 或完整 MCP 方法集；不能据此宣称所有主流 MCP 已兼容。
+目前支持范围以表中列出的接入方式为准；OAuth 登录、本地 stdio MCP 及其余 MCP 方法尚未支持。
 
 ## 一次任务：从修复代码到取回产物
 
@@ -97,13 +119,13 @@ result.txt: 3 bytes
 42
 ```
 
-再加一段安全挑战：让 Agent 调用未授权工具、把已固定的仓库改成另一仓库，或直接访问外网。
+验证安全边界时，还会检查未授权工具调用、篡改固定仓库参数和直接访问外网等请求是否被拒绝。
 MCP 验收让容器内进程直接发起越权请求，并检查服务端没有收到这些调用；不只依赖 Agent 的文字回答。
 真实模型读取受控 MCP Issue、导出产物，以及这组越权测试的证据见[验收记录](circus-sandbox/docs/secure-desktop-verification.md)。
 
 ![Paseo 任务结果卡片，展示清理确认与产物预览](docs/assets/paseo-task-result.png)
 
-_结果卡片来自受控 provider 的 UI 验收；真实模型与真实容器的证据分别记录。完整三分钟脚本见[安全设计](docs/hackathon-security.md#三分钟演示脚本)。_
+_结果卡片来自受控 provider 的 UI 验收；真实模型与真实容器的证据分别记录。复现步骤见[安全演示指南](docs/hackathon-security.md#三分钟演示脚本)。_
 
 ## 架构
 
@@ -150,7 +172,7 @@ Claude Code 使用独立的 Anthropic Messages 通道和固定版本镜像，复
 **准备环境：** Rust 1.99.1 / Cargo（仓库已固定工具链）、宿主 Python 3.11+、Docker CLI，以及可通过本地 socket 访问的 Linux Docker Engine + runc。需要支持 **Responses SSE 和 Codex 工具调用**的 HTTPS 模型服务；仅兼容 Chat Completions 的网关不适用。以下命令使用 **Bash**，镜像演示目标为 `linux/amd64`。
 
 <details>
-<summary>首次获取演示代码</summary>
+<summary>获取源码</summary>
 
 在新目录中克隆仓库：
 
@@ -219,7 +241,13 @@ unset CIRCUS_MODEL_API_KEY
 
 资源校验负责拒绝非法请求，实际约束依赖后端执行；它不构成跨任务资源预留或聚合准入。当前 runc 容器共享宿主内核，部署仍需可信的宿主管理边界。
 
-参赛交付接下来优先补齐**真实 MCP 服务验收、Claude 真实模型、安装包与录屏**；后续能力包括任务与产物持久化、可恢复会话及更多 Agent / 后端接入。gVisor、Kata、Firecracker 和运行时内存检查点属于后续目标；完整领域拆分与验收依赖见[交付计划](circus-sandbox/docs/delivery-plan.md)。
+## 后续计划
+
+- **完善服务兼容性**：补齐真实 GitHub 等 MCP 服务与 Claude 真实模型的端到端验证。
+- **简化安装与使用**：提供安装包，完善桌面 Agent 选择与上手指引。
+- **支持持续工作**：增加任务与产物持久化、可恢复会话及更多 Agent / 后端接入。
+
+gVisor、Kata、Firecracker 和运行时内存检查点仍是规划中的能力。完整领域拆分与验证依赖见[交付计划](circus-sandbox/docs/delivery-plan.md)。
 
 ## 如何验证
 
@@ -252,4 +280,4 @@ unset CIRCUS_MODEL_API_KEY
 
 `circus-sandbox` 使用 [Apache-2.0](circus-sandbox/LICENSE)。交互层基于 [Paseo](https://github.com/getpaseo/paseo)，其许可与第三方声明见 [Paseo LICENSE](circus-paseo/LICENSE)。感谢 Paseo 提供跨设备 Agent 工作台，感谢 Agent CLI 与 MCP 生态提供的集成接口。
 
-原始导入基线保留在 `v0`。新增沙箱能力、Agent 接入与桌面安全流程通过 PR 留下实现和验证记录；团队分工应以实际参赛者的贡献为准。
+原始导入基线保留在 `v0`。沙箱能力、Agent 接入与桌面安全流程的实现、验证和设计取舍均记录在对应 PR 中。开发与贡献流程见[贡献约定](AGENTS.md)。
