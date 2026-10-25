@@ -30,11 +30,19 @@
   <a href="circus-sandbox/docs/secure-desktop-verification.md">验证</a>
 </p>
 
+<p align="center"><strong>一次任务，从显式授权到清理确认</strong></p>
+
 <p align="center">
-  <img src="docs/assets/circus-desktop-overview.png" alt="Circus 桌面总览：Paseo 选择任务边界，Rust 控制面执行任务契约，Docker 和 runc 隔离 Agent" width="100%">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/circus-task-walkthrough-poster.png">
+    <source type="image/webp" srcset="docs/assets/circus-task-walkthrough.webp">
+    <img src="docs/assets/circus-task-walkthrough.gif" alt="Paseo 中完成一次 Circus 任务：打开 Sandbox task，描述任务，选择输入与输出，按任务授权工具，查看运行阶段，最后预览和下载产物并确认沙箱清理" width="100%">
+  </picture>
 </p>
 
-<p align="center"><sub>开发态 Paseo 工作台：输入文件、导出路径与工具权限均由当前任务显式选择。</sub></p>
+<p align="center"><sub>真实 Paseo UI 的可复现交互回放；任务事件与结果由受控测试执行器提供。<a href="circus-sandbox/docs/secure-desktop-verification.md">真实 Docker、Codex、模型与独立回收证据</a>另行记录。</sub></p>
+
+<p align="center"><a href="docs/assets/circus-desktop-overview.png">查看静态产品总览</a></p>
 
 **Paseo 负责交互，Rust 控制面负责把桌面任务边界落实到执行路径。** 当前 Agent 链路由三个 first-party Rust crate 校验有界任务协议、显式授权与后端策略，并统一拥有创建、取消、产物读取与清理确认；Docker + runc 执行当前进程、网络与资源隔离。
 模型与 MCP 的真实凭据由宿主代理持有；Agent 通过受控通道访问获准服务，无需在沙箱中填写密钥或密码。
