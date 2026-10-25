@@ -3,10 +3,7 @@ import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { join, isAbsolute } from "node:path";
 import { z } from "zod";
-import {
-  readPersistedConfig,
-  editPersistedConfig,
-} from "@getpaseo/server/configuration";
+import { readPersistedConfig, editPersistedConfig } from "@getpaseo/server/configuration";
 import { ProviderOverrideSchema } from "@getpaseo/protocol/provider-config";
 import {
   sandboxGithubInputSchema,
@@ -42,7 +39,7 @@ const connectionSchema = z.strictObject({
       name: z.string(),
       allowedArguments: z.array(z.string()),
       fixedArguments: z.record(z.string(), z.string()),
-    })
+    }),
   ),
   headersKeychain: referenceSchema.optional(),
   headersFile: z.string().optional(),
@@ -131,15 +128,9 @@ function validateHttpsUrl(value: string): string {
   } catch {
     throw new SandboxSetupError("Enter a valid HTTPS model service URL.");
   }
-  if (
-    url.protocol !== "https:" ||
-    url.username ||
-    url.password ||
-    url.search ||
-    url.hash
-  )
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash)
     throw new SandboxSetupError(
-      "Use an HTTPS URL without credentials, query parameters or fragments."
+      "Use an HTTPS URL without credentials, query parameters or fragments.",
     );
   return url.toString();
 }
@@ -148,13 +139,11 @@ function validateBaseUrl(value: string): string {
   return validateHttpsUrl(value).replace(/\/+$/, "");
 }
 
-function presetFor(
-  resources: RunnerConfig["resources"]
-): SandboxSetupInput["preset"] {
+function presetFor(resources: RunnerConfig["resources"]): SandboxSetupInput["preset"] {
   for (const name of ["compact", "balanced"] as const) {
     if (
       Object.entries(presets[name]).every(
-        ([key, value]) => resources[key as keyof typeof resources] === value
+        ([key, value]) => resources[key as keyof typeof resources] === value,
       )
     )
       return name;
@@ -169,24 +158,18 @@ function requireRuntime(environment: SandboxEnvironment) {
   return { bridge, endpoint, image, python };
 }
 
-function selectResources(
-  preset: SandboxSetupInput["preset"],
-  config: RunnerConfig | null
-) {
+function selectResources(preset: SandboxSetupInput["preset"], config: RunnerConfig | null) {
   if (config?.agent && config.agent !== "codex")
     throw new SandboxSetupError(
-      "This setup currently manages Codex only. Your existing agent configuration has not been changed."
+      "This setup currently manages Codex only. Your existing agent configuration has not been changed.",
     );
   if (preset !== "custom") return presets[preset];
-  if (!config)
-    throw new SandboxSetupError(
-      "Choose a resource preset for the new environment."
-    );
+  if (!config) throw new SandboxSetupError("Choose a resource preset for the new environment.");
   return config.resources;
 }
 
 function credentialStorage(
-  config: RunnerConfig | null
+  config: RunnerConfig | null,
 ): SandboxSetupSnapshot["settings"]["credentialStorage"] {
   if (config?.model.apiKeyKeychain) return "keychain";
   if (config?.model.apiKeyFile) return "file";
@@ -194,41 +177,26 @@ function credentialStorage(
 }
 
 async function readBounded(path: string, limit = 65536): Promise<string> {
-  const file = await open(
-    path,
-    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-  );
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     if (!(await file.stat()).isFile())
-      throw new SandboxSetupError(
-        "The saved configuration or credential must be a regular file."
-      );
+      throw new SandboxSetupError("The saved configuration or credential must be a regular file.");
     const buffer = Buffer.alloc(limit + 1);
     let total = 0;
     while (total < buffer.length) {
-      const { bytesRead } = await file.read(
-        buffer,
-        total,
-        buffer.length - total,
-        total
-      );
+      const { bytesRead } = await file.read(buffer, total, buffer.length - total, total);
       if (bytesRead === 0) break;
       total += bytesRead;
     }
     if (total > limit)
-      throw new SandboxSetupError(
-        "The saved configuration or credential exceeds its size limit."
-      );
+      throw new SandboxSetupError("The saved configuration or credential exceeds its size limit.");
     return buffer.subarray(0, total).toString("utf8");
   } finally {
     await file.close();
   }
 }
 
-async function restoreConfig(
-  path: string,
-  previous: string | null
-): Promise<void> {
+async function restoreConfig(path: string, previous: string | null): Promise<void> {
   if (previous === null) await rm(path, { force: true });
   else await atomicWrite(path, previous);
 }
@@ -254,9 +222,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
 
   function requirePlatform(): void {
     if (deps.platform !== "darwin")
-      throw new SandboxSetupError(
-        "Desktop setup currently requires macOS Keychain."
-      );
+      throw new SandboxSetupError("Desktop setup currently requires macOS Keychain.");
   }
 
   async function current() {
@@ -264,14 +230,12 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       defaultsIfMissing: true,
     });
     const candidate = persisted.agents?.providers?.sandbox;
-    const provider = candidate
-      ? ProviderOverrideSchema.parse(candidate)
-      : undefined;
+    const provider = candidate ? ProviderOverrideSchema.parse(candidate) : undefined;
     const path = provider?.env?.CIRCUS_RUNNER_CONFIG;
     if (!path) return { config: null, provider, path: null, serialized: null };
     if (!isAbsolute(path))
       throw new SandboxSetupError(
-        "The existing sandbox configuration path is invalid. It has not been changed."
+        "The existing sandbox configuration path is invalid. It has not been changed.",
       );
     let config: RunnerConfig;
     let serialized: string;
@@ -280,31 +244,26 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       config = runnerSchema.parse(JSON.parse(serialized));
     } catch {
       throw new SandboxSetupError(
-        "The existing sandbox configuration could not be read. It has not been changed."
+        "The existing sandbox configuration could not be read. It has not been changed.",
       );
     }
     if (config.backend.kind !== "docker")
       throw new SandboxSetupError(
-        "This setup currently manages Docker only. Your existing backend configuration has not been changed."
+        "This setup currently manages Docker only. Your existing backend configuration has not been changed.",
       );
     return { config, provider, path, serialized };
   }
 
   async function inspect(agent?: SandboxSetupInput["agent"]) {
     const stored = await current();
-    const selectedAgent =
-      agent ?? activeAgent ?? stored.config?.agent ?? "codex";
+    const selectedAgent = agent ?? activeAgent ?? stored.config?.agent ?? "codex";
     const candidates = [...deps.sourceCandidates];
     if (await exists(sourceFile)) {
-      const selected = z
-        .string()
-        .parse(JSON.parse(await readBounded(sourceFile, 8192)));
+      const selected = z.string().parse(JSON.parse(await readBounded(sourceFile, 8192)));
       candidates.unshift(selected);
     }
-    const sameConfiguredAgent =
-      selectedAgent === (stored.config?.agent ?? "codex");
-    const defaultAgentImage =
-      selectedAgent === "claude-code" ? CLAUDE_CODE_IMAGE : CODEX_IMAGE;
+    const sameConfiguredAgent = selectedAgent === (stored.config?.agent ?? "codex");
+    const defaultAgentImage = selectedAgent === "claude-code" ? CLAUDE_CODE_IMAGE : CODEX_IMAGE;
     const environment = await inspectEnvironment({
       platform: deps.platform,
       userHome: deps.userHome,
@@ -315,7 +274,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       configuredBridge: stored.provider?.command?.[0],
       agent: selectedAgent,
       agentImage: sameConfiguredAgent
-        ? stored.config?.backend.image ?? defaultAgentImage
+        ? (stored.config?.backend.image ?? defaultAgentImage)
         : defaultAgentImage,
     });
     return { ...stored, environment, agent: selectedAgent };
@@ -323,19 +282,16 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
 
   async function credential(
     input: SandboxSetupInput,
-    config: RunnerConfig | null
+    config: RunnerConfig | null,
   ): Promise<string> {
     if (input.apiKey) {
       if (/[\r\n]/.test(input.apiKey) || input.apiKey.includes("\0"))
         throw new SandboxSetupError("The API key must be a single line.");
       return input.apiKey;
     }
-    if (
-      !config ||
-      validateBaseUrl(config.model.baseUrl) !== validateBaseUrl(input.baseUrl)
-    )
+    if (!config || validateBaseUrl(config.model.baseUrl) !== validateBaseUrl(input.baseUrl))
       throw new SandboxSetupError(
-        "Enter an API key for this model service. Stored credentials are never sent to a different service URL."
+        "Enter an API key for this model service. Stored credentials are never sent to a different service URL.",
       );
     if (config.model.apiKeyKeychain) {
       const value = await keychain.get(config.model.apiKeyKeychain);
@@ -344,9 +300,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       const value = await readBounded(config.model.apiKeyFile, 4098);
       if (value.length <= 4098) return value.replace(/[\r\n]+$/, "");
     }
-    throw new SandboxSetupError(
-      "The saved credential is unavailable. Enter the API key again."
-    );
+    throw new SandboxSetupError("The saved credential is unavailable. Enter the API key again.");
   }
 
   return {
@@ -375,35 +329,31 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       requirePlatform();
       if (
         !isAbsolute(path) ||
-        (!(await exists(
-          join(path, "circus-sandbox/images/codex/Dockerfile")
-        )) &&
-          !(await exists(
-            join(path, "circus-sandbox/images/claude-code/Dockerfile")
-          )))
+        (!(await exists(join(path, "circus-sandbox/images/codex/Dockerfile"))) &&
+          !(await exists(join(path, "circus-sandbox/images/claude-code/Dockerfile"))))
       )
         throw new SandboxSetupError(
-          "Select the Circus repository folder containing circus-sandbox."
+          "Select the Circus repository folder containing circus-sandbox.",
         );
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await atomicWrite(sourceFile, JSON.stringify(path));
     },
     async prepare(raw?: unknown): Promise<SandboxSetupResult> {
       requirePlatform();
-      const agent =
-        raw === undefined
-          ? activeAgent ?? (await current()).config?.agent ?? "codex"
-          : sandboxSetupInputSchema.parse(raw).agent ?? "codex";
+      let agent: "codex" | "claude-code";
+      if (raw === undefined) {
+        agent = activeAgent ?? (await current()).config?.agent ?? "codex";
+      } else {
+        agent = sandboxSetupInputSchema.parse(raw).agent ?? "codex";
+      }
       activeAgent = agent;
       const { environment } = await inspect(agent);
       const { source, docker, endpoint } = environment;
-      if (!source)
-        return { ok: false, message: "Select the Circus source folder first." };
+      if (!source) return { ok: false, message: "Select the Circus source folder first." };
       if (!docker || !endpoint)
         return {
           ok: false,
-          message:
-            "Start Docker Desktop or your local Linux Docker Engine, then check again.",
+          message: "Start Docker Desktop or your local Linux Docker Engine, then check again.",
         };
       if (!environment.bridge) {
         const built = await deps.run({
@@ -420,10 +370,8 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
           };
       }
       if (!environment.image) {
-        const imageTag =
-          agent === "claude-code" ? CLAUDE_CODE_IMAGE : CODEX_IMAGE;
-        const imageDirectory =
-          agent === "claude-code" ? "claude-code" : "codex";
+        const imageTag = agent === "claude-code" ? CLAUDE_CODE_IMAGE : CODEX_IMAGE;
+        const imageDirectory = agent === "claude-code" ? "claude-code" : "codex";
         const built = await deps.run({
           executable: docker,
           args: [
@@ -448,8 +396,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       }
       return {
         ok: true,
-        message:
-          "Runtime preparation finished. Check the environment before saving.",
+        message: "Runtime preparation finished. Check the environment before saving.",
       };
     },
     async testConnection(raw: unknown): Promise<SandboxSetupResult> {
@@ -488,17 +435,12 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
                     input: "Reply with OK.",
                     max_output_tokens: 32,
                     stream: false,
-                  }
+                  },
             ),
-          }
+          },
         );
         if (response.ok) {
-          if (
-            await acceptedModelResponse(
-              response,
-              isClaude ? "messages" : "responses"
-            )
-          )
+          if (await acceptedModelResponse(response, isClaude ? "messages" : "responses"))
             return {
               ok: true,
               message: `The model service accepted a small ${
@@ -540,10 +482,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
     },
     async saveGithub(raw: unknown): Promise<SandboxSetupResult> {
       requirePlatform();
-      if (saving)
-        throw new SandboxSetupError(
-          "A configuration update is already in progress."
-        );
+      if (saving) throw new SandboxSetupError("A configuration update is already in progress.");
       saving = true;
       let added: KeychainReference | null = null;
       let saved = false;
@@ -552,16 +491,14 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
         const input = { ...parsed, url: validateHttpsUrl(parsed.url) };
         const { config, path, serialized } = await current();
         if (!config || !path)
-          throw new SandboxSetupError(
-            "Save the model and sandbox setup before adding tools."
-          );
+          throw new SandboxSetupError("Save the model and sandbox setup before adding tools.");
         const connections = z
           .array(connectionSchema)
           .max(7)
           .parse(config.mcpConnections ?? []);
         if (connections.some((connection) => connection.id === input.id))
           throw new SandboxSetupError(
-            "A connection with this name already exists. Choose a new name; existing permissions have not been changed."
+            "A connection with this name already exists. Choose a new name; existing permissions have not been changed.",
           );
         // MCP has a separate trust boundary; the model endpoint may use its own private CA.
         const tls = await inspectPythonTrust({
@@ -571,7 +508,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
         });
         if (!tls.ready)
           throw new SandboxSetupError(
-            "The MCP connector cannot load trusted certificates. Repair Python's certificate store before connecting a service."
+            "The MCP connector cannot load trusted certificates. Repair Python's certificate store before connecting a service.",
           );
         const checked = await probeGithub(input, deps.request);
         if (!checked.ok) return checked;
@@ -583,13 +520,10 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
           account: randomUUID(),
         };
         if (
-          !(await keychain.put(
-            added,
-            JSON.stringify({ Authorization: `Bearer ${input.token}` })
-          ))
+          !(await keychain.put(added, JSON.stringify({ Authorization: `Bearer ${input.token}` })))
         )
           throw new SandboxSetupError(
-            "Could not store the MCP credential in macOS Keychain. Unlock your login keychain and retry."
+            "Could not store the MCP credential in macOS Keychain. Unlock your login keychain and retry.",
           );
         const connection = {
           id: input.id,
@@ -610,15 +544,15 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
         };
         if ((await readBounded(path)) !== serialized)
           throw new SandboxSetupError(
-            "Sandbox configuration changed during the connection check. Retry with the latest configuration."
+            "Sandbox configuration changed during the connection check. Retry with the latest configuration.",
           );
         await atomicWrite(
           path,
           `${JSON.stringify(
             { ...config, mcpConnections: [...connections, connection] },
             null,
-            2
-          )}\n`
+            2,
+          )}\n`,
         );
         saved = true;
         try {
@@ -644,10 +578,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
     },
     async save(raw: unknown): Promise<SandboxSetupResult> {
       requirePlatform();
-      if (saving)
-        throw new SandboxSetupError(
-          "A configuration update is already in progress."
-        );
+      if (saving) throw new SandboxSetupError("A configuration update is already in progress.");
       saving = true;
       let added: KeychainReference | null = null;
       let previous: string | null = null;
@@ -656,8 +587,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       try {
         const input = sandboxSetupInputSchema.parse(raw);
         const baseUrl = validateBaseUrl(input.baseUrl);
-        const { config, provider, environment, path, serialized } =
-          await inspect(input.agent);
+        const { config, provider, environment, path, serialized } = await inspect(input.agent);
         const { bridge, endpoint, image, python } = requireRuntime(environment);
         const apiKey = await credential(input, config);
         const resources = selectResources(input.preset, config);
@@ -670,7 +600,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
         };
         if (!(await keychain.put(added, apiKey)))
           throw new SandboxSetupError(
-            "Could not save the credential in macOS Keychain. Unlock your login keychain and retry."
+            "Could not save the credential in macOS Keychain. Unlock your login keychain and retry.",
           );
         const model = {
           ...config?.model,
@@ -697,10 +627,9 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
         await mkdir(directory, { recursive: true, mode: 0o700 });
         if (path && (await readBounded(path)) !== serialized)
           throw new SandboxSetupError(
-            "Sandbox configuration changed while saving. Check again before retrying."
+            "Sandbox configuration changed while saving. Check again before retrying.",
           );
-        if (await exists(managedConfig))
-          previous = await readBounded(managedConfig);
+        if (await exists(managedConfig)) previous = await readBounded(managedConfig);
         await atomicWrite(managedConfig, `${JSON.stringify(next, null, 2)}\n`);
         wroteConfig = true;
         // Existing provider options and all other daemon settings remain owned by the daemon config API.
@@ -713,7 +642,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
           : undefined;
         if (JSON.stringify(latestProvider) !== JSON.stringify(provider))
           throw new SandboxSetupError(
-            "Sandbox settings changed while saving. Check again before retrying."
+            "Sandbox settings changed while saving. Check again before retrying.",
           );
         editPersistedConfig(deps.home, "agents.providers", {
           value: {
@@ -748,8 +677,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       } finally {
         try {
           try {
-            if (!applied && wroteConfig)
-              await restoreConfig(managedConfig, previous);
+            if (!applied && wroteConfig) await restoreConfig(managedConfig, previous);
           } finally {
             if (!applied && added) await keychain.remove(added);
           }

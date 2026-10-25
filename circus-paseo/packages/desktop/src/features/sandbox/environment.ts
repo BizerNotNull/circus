@@ -17,12 +17,8 @@ export interface SandboxEnvironment {
 
 // Fully qualify built-in image tags because some local Engines fail short-name inspection.
 export const CODEX_IMAGE = "docker.io/library/circus-agent-codex:0.164.0";
-export const CLAUDE_CODE_IMAGE =
-  "docker.io/library/circus-agent-claude-code:2.1.310";
-export async function exists(
-  path: string,
-  mode = constants.R_OK
-): Promise<boolean> {
+export const CLAUDE_CODE_IMAGE = "docker.io/library/circus-agent-claude-code:2.1.310";
+export async function exists(path: string, mode = constants.R_OK): Promise<boolean> {
   try {
     await access(path, mode);
     return true;
@@ -38,18 +34,11 @@ async function firstExecutable(candidates: string[]): Promise<string | null> {
   return null;
 }
 
-async function firstSupportedPython(
-  candidates: string[],
-  run: RunCommand
-): Promise<string | null> {
+async function firstSupportedPython(candidates: string[], run: RunCommand): Promise<string | null> {
   for (const candidate of candidates) {
     const checked = await run({
       executable: candidate,
-      args: [
-        "-I",
-        "-c",
-        "import sys; raise SystemExit(sys.version_info < (3, 11))",
-      ],
+      args: ["-I", "-c", "import sys; raise SystemExit(sys.version_info < (3, 11))"],
     });
     if (checked.ok) return candidate;
   }
@@ -58,7 +47,7 @@ async function firstSupportedPython(
 
 async function findSource(
   candidates: string[],
-  agent: "codex" | "claude-code"
+  agent: "codex" | "claude-code",
 ): Promise<string | null> {
   for (let candidate of candidates) {
     for (let depth = 0; depth < 6; depth += 1) {
@@ -66,10 +55,8 @@ async function findSource(
         await exists(
           join(
             candidate,
-            `circus-sandbox/images/${
-              agent === "claude-code" ? "claude-code" : "codex"
-            }/Dockerfile`
-          )
+            `circus-sandbox/images/${agent === "claude-code" ? "claude-code" : "codex"}/Dockerfile`,
+          ),
         )
       )
         return candidate;
@@ -99,66 +86,40 @@ interface InspectEnvironmentInput {
   agent?: "codex" | "claude-code";
   agentImage?: string;
 }
+function defaultImageFor(agent: "codex" | "claude-code"): string {
+  return agent === "claude-code" ? CLAUDE_CODE_IMAGE : CODEX_IMAGE;
+}
 
-export async function inspectEnvironment(
-  input: InspectEnvironmentInput
-): Promise<SandboxEnvironment> {
-  const backend = input.configured?.backend;
-  if (backend && backend.kind !== "docker")
-    throw new Error("Desktop setup only inspects Docker backends.");
-  const agent = input.agent ?? input.configured?.agent ?? "codex";
-  const source = await findSource(input.sourceCandidates, agent);
-  const bridgeCandidates = input.binaryDirectories.map((directory) =>
-    join(directory, "circus-stdio-bridge")
-  );
-  if (source)
-    bridgeCandidates.unshift(
-      join(source, "circus-sandbox/target/debug/circus-stdio-bridge"),
-      join(source, "circus-sandbox/target/release/circus-stdio-bridge")
-    );
-  if (input.configuredBridge) bridgeCandidates.unshift(input.configuredBridge);
-  const bridge = await firstExecutable(bridgeCandidates);
-  const pythonCandidates = input.binaryDirectories.map((directory) =>
-    join(directory, "python3")
-  );
-  if (input.configured) pythonCandidates.unshift(input.configured.python);
-  const python = await firstSupportedPython(pythonCandidates, input.run);
-  const tls = await inspectPythonTrust({
-    python,
-    platform: input.platform,
-    run: input.run,
-    caFile: input.configured?.model?.caFile,
-  });
-  const docker = await firstExecutable(
-    input.binaryDirectories.map((directory) => join(directory, "docker"))
-  );
-  const endpoints = backend
-    ? [backend.endpoint]
-    : [
-        "unix:///var/run/docker.sock",
-        `unix://${input.userHome}/.docker/run/docker.sock`,
-        `unix://${input.userHome}/.colima/default/docker.sock`,
-      ];
-  const imageRef =
-    input.agent === undefined || input.agent === input.configured?.agent
-      ? backend?.image ?? input.agentImage ?? CODEX_IMAGE
-      : input.agentImage ??
-        (agent === "claude-code" ? CLAUDE_CODE_IMAGE : CODEX_IMAGE);
-  const { endpoint, image } = await inspectDocker({
-    docker,
-    endpoints,
-    imageRef,
-    run: input.run,
-  });
-  const supported = input.platform === "darwin";
+function configuredImage(
+  input: InspectEnvironmentInput,
+  backend: { kind: "docker"; endpoint: string; image: string } | undefined,
+  agent: "codex" | "claude-code",
+): string {
+  const sameAgent = input.agent === undefined || input.agent === input.configured?.agent;
+  if (sameAgent) return backend?.image ?? input.agentImage ?? CODEX_IMAGE;
+  return input.agentImage ?? defaultImageFor(agent);
+}
+
+function environmentChecks(
+  platform: string,
+  source: string | null,
+  bridge: string | null,
+  python: string | null,
+  tlsReady: boolean,
+  endpoint: string | null,
+  image: string | null,
+  agent: "codex" | "claude-code",
+): SandboxSetupSnapshot["checks"] {
+  const agentName = agent === "claude-code" ? "Claude Code" : "Codex";
   const checks: SandboxSetupSnapshot["checks"] = [
     {
       id: "platform",
       label: "Credential storage",
-      ready: supported,
-      detail: supported
-        ? "macOS Keychain keeps credentials on this computer."
-        : "This setup currently requires macOS Keychain. Use the documented host configuration on other systems.",
+      ready: platform === "darwin",
+      detail:
+        platform === "darwin"
+          ? "macOS Keychain keeps credentials on this computer."
+          : "This setup currently requires macOS Keychain. Use the documented host configuration on other systems.",
     },
     {
       id: "source",
@@ -187,8 +148,8 @@ export async function inspectEnvironment(
     {
       id: "tls",
       label: "Secure model connection",
-      ready: tls.ready,
-      detail: tls.ready
+      ready: tlsReady,
+      detail: tlsReady
         ? "Trusted certificates loaded. Model connections require HTTPS verification."
         : "The model connector could not load trusted certificates. Repair Python's certificate store or the configured certificate bundle before saving.",
     },
@@ -202,20 +163,70 @@ export async function inspectEnvironment(
     },
     {
       id: "image",
-      label:
-        agent === "claude-code"
-          ? "Claude Code environment"
-          : "Codex environment",
+      label: `${agentName} environment`,
       ready: image !== null,
       detail: image
-        ? agent === "claude-code"
-          ? "Pinned Claude Code image found."
-          : "Pinned Codex 0.164.0 image found."
-        : `Prepare the runtime to build the ${
-            agent === "claude-code" ? "Claude Code" : "Codex"
-          } environment. The first build needs internet access.`,
+        ? `Pinned ${agentName} ${agent === "claude-code" ? "image" : "0.164.0 image"} found.`
+        : `Prepare the runtime to build the ${agentName} environment. The first build needs internet access.`,
     },
   ];
+  return checks;
+}
+
+export async function inspectEnvironment(
+  input: InspectEnvironmentInput,
+): Promise<SandboxEnvironment> {
+  const backend = input.configured?.backend;
+  if (backend && backend.kind !== "docker")
+    throw new Error("Desktop setup only inspects Docker backends.");
+  const agent = input.agent ?? input.configured?.agent ?? "codex";
+  const source = await findSource(input.sourceCandidates, agent);
+  const bridgeCandidates = input.binaryDirectories.map((directory) =>
+    join(directory, "circus-stdio-bridge"),
+  );
+  if (source)
+    bridgeCandidates.unshift(
+      join(source, "circus-sandbox/target/debug/circus-stdio-bridge"),
+      join(source, "circus-sandbox/target/release/circus-stdio-bridge"),
+    );
+  if (input.configuredBridge) bridgeCandidates.unshift(input.configuredBridge);
+  const bridge = await firstExecutable(bridgeCandidates);
+  const pythonCandidates = input.binaryDirectories.map((directory) => join(directory, "python3"));
+  if (input.configured) pythonCandidates.unshift(input.configured.python);
+  const python = await firstSupportedPython(pythonCandidates, input.run);
+  const tls = await inspectPythonTrust({
+    python,
+    platform: input.platform,
+    run: input.run,
+    caFile: input.configured?.model?.caFile,
+  });
+  const docker = await firstExecutable(
+    input.binaryDirectories.map((directory) => join(directory, "docker")),
+  );
+  const endpoints = backend
+    ? [backend.endpoint]
+    : [
+        "unix:///var/run/docker.sock",
+        `unix://${input.userHome}/.docker/run/docker.sock`,
+        `unix://${input.userHome}/.colima/default/docker.sock`,
+      ];
+  const imageRef = configuredImage(input, backend, agent);
+  const { endpoint, image } = await inspectDocker({
+    docker,
+    endpoints,
+    imageRef,
+    run: input.run,
+  });
+  const checks = environmentChecks(
+    input.platform,
+    source,
+    bridge,
+    python,
+    tls.ready,
+    endpoint,
+    image,
+    agent,
+  );
   return {
     source,
     bridge,
@@ -235,12 +246,7 @@ interface InspectDockerInput {
   imageRef: string;
   run: RunCommand;
 }
-async function inspectDocker({
-  docker,
-  endpoints,
-  imageRef,
-  run,
-}: InspectDockerInput) {
+async function inspectDocker({ docker, endpoints, imageRef, run }: InspectDockerInput) {
   let endpoint: string | null = null;
   let image: string | null = null;
   if (!docker) return { endpoint, image };
@@ -259,15 +265,7 @@ async function inspectDocker({
   if (!endpoint) return { endpoint, image };
   const inspected = await run({
     executable: docker,
-    args: [
-      "--host",
-      endpoint,
-      "image",
-      "inspect",
-      "--format",
-      "{{.Id}}",
-      imageRef,
-    ],
+    args: ["--host", endpoint, "image", "inspect", "--format", "{{.Id}}", imageRef],
   });
   if (inspected.ok && /^sha256:[a-f0-9]{64}$/.test(inspected.stdout.trim()))
     image = inspected.stdout.trim();
@@ -296,8 +294,7 @@ export async function inspectPythonTrust(input: PythonTrustInput) {
         ],
       })
     ).ok;
-  if (configuredCa)
-    return { ready: await verify(configuredCa), caFile: configuredCa };
+  if (configuredCa) return { ready: await verify(configuredCa), caFile: configuredCa };
   if (await verify(null)) return { ready: true, caFile: null };
   const systemCa = "/etc/ssl/cert.pem";
   if (input.platform === "darwin" && (await verify(systemCa)))
