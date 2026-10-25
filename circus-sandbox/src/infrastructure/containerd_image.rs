@@ -25,6 +25,7 @@ use containerd_client::types::{Descriptor, Mount};
 use containerd_client::with_namespace;
 
 use super::containerd_grpc::map_status;
+use super::containerd_spec::env_values;
 use super::engine::{EngineError, EngineErrorKind, file_error};
 
 const MAX_METADATA_BYTES: usize = 8 * 1024 * 1024;
@@ -51,6 +52,7 @@ pub(crate) struct ImageRootfs {
     pub chain_id: String,
     pub layers: Vec<ChainLayer>,
     pub config: Descriptor,
+    pub env: Vec<String>,
 }
 
 // One unpack at a time inside this process: two sandboxes created
@@ -118,11 +120,11 @@ pub(crate) async fn ensure_rootfs(
     namespace: &str,
     snapshotter: &str,
     image: &str,
-) -> Result<String, EngineError> {
+) -> Result<(String, Vec<String>), EngineError> {
     let _guard = UNPACK_LOCK.lock().await;
     let rootfs = resolve_rootfs(channel, namespace, image).await?;
     if snapshot_committed(channel, namespace, snapshotter, &rootfs.chain_id).await? {
-        return Ok(rootfs.chain_id);
+        return Ok((rootfs.chain_id, rootfs.env));
     }
     // containerd collects every resource that is neither referenced nor leased.
     // The extraction snapshots only become referenced by the image config at
@@ -130,7 +132,7 @@ pub(crate) async fn ensure_rootfs(
     let lease = create_unpack_lease(channel, namespace).await?;
     let unpacked = unpack_layers(channel, namespace, snapshotter, &rootfs, &lease).await;
     delete_lease_best_effort(channel, namespace, &lease).await;
-    unpacked.map(|()| rootfs.chain_id)
+    unpacked.map(|()| (rootfs.chain_id, rootfs.env))
 }
 
 async fn unpack_layers(
@@ -187,7 +189,7 @@ async fn resolve_rootfs(
     let manifest_json = read_content(channel, namespace, &manifest).await?;
     let parsed = parse_manifest(&manifest_json)?;
     let config_json = read_content(channel, namespace, &parsed.config).await?;
-    let diff_ids = parse_diff_ids(&config_json)?;
+    let (diff_ids, env) = parse_config(&config_json)?;
     if diff_ids.is_empty() {
         return Err(file_error(
             EngineErrorKind::Other,
@@ -213,6 +215,7 @@ async fn resolve_rootfs(
         chain_id: chain_id_for(&diff_ids),
         layers,
         config: parsed.config,
+        env,
     })
 }
 
@@ -305,24 +308,45 @@ pub(super) fn parse_manifest(bytes: &[u8]) -> Result<Manifest, EngineError> {
     })
 }
 
-fn parse_diff_ids(bytes: &[u8]) -> Result<Vec<String>, EngineError> {
+fn parse_config(bytes: &[u8]) -> Result<(Vec<String>, Vec<String>), EngineError> {
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|err| {
         file_error(
             EngineErrorKind::Other,
             format!("image config is not JSON: {err}"),
         )
     })?;
+    let settings = match value.get("config") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(settings) if settings.is_object() => Some(settings),
+        Some(_) => {
+            return Err(file_error(
+                EngineErrorKind::Other,
+                "image config settings are not an object",
+            ));
+        }
+    };
+    let env = match settings.and_then(|settings| settings.get("Env")) {
+        None | Some(serde_json::Value::Null) => &[][..],
+        Some(env) => env_values(env)?,
+    };
     let ids = value
         .pointer("/rootfs/diff_ids")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| file_error(EngineErrorKind::Other, "image config has no diff_ids"))?;
-    ids.iter()
+    let diff_ids = ids
+        .iter()
         .map(|id| {
             id.as_str()
                 .map(str::to_string)
                 .ok_or_else(|| file_error(EngineErrorKind::Other, "image diff_id is not a string"))
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    let env = env
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect();
+    Ok((diff_ids, env))
 }
 
 /// containerd chain identity: each step hashes the previous chain id and the
@@ -679,10 +703,72 @@ mod tests {
     }
 
     #[test]
+    fn config_parsing_preserves_image_environment_and_rootfs_together() {
+        let (diff_ids, env) = parse_config(
+            br#"{
+                "rootfs":{"diff_ids":["sha256:a","sha256:b"]},
+                "config":{
+                    "Env":["HOME=/workspace","CODEX_HOME=/workspace/codex","LANG=","A=b=c"],
+                    "Entrypoint":["not-the-init"],
+                    "User":"not-the-lifecycle-user",
+                    "WorkingDir":"/not-the-workspace"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(diff_ids, ["sha256:a", "sha256:b"]);
+        assert_eq!(
+            env,
+            [
+                "HOME=/workspace",
+                "CODEX_HOME=/workspace/codex",
+                "LANG=",
+                "A=b=c"
+            ]
+        );
+    }
+
+    #[test]
+    fn optional_image_environment_can_be_absent_or_empty() {
+        for config in [
+            serde_json::json!({"rootfs":{"diff_ids":["sha256:a"]}}),
+            serde_json::json!({"rootfs":{"diff_ids":["sha256:a"]},"config":null}),
+            serde_json::json!({"rootfs":{"diff_ids":["sha256:a"]},"config":{}}),
+            serde_json::json!({"rootfs":{"diff_ids":["sha256:a"]},"config":{"Env":null}}),
+            serde_json::json!({"rootfs":{"diff_ids":["sha256:a"]},"config":{"Env":[]}}),
+        ] {
+            let (_, env) = parse_config(&serde_json::to_vec(&config).unwrap()).unwrap();
+            assert!(env.is_empty());
+        }
+    }
+
+    #[test]
+    fn malformed_image_environment_is_not_treated_as_missing() {
+        for settings in [
+            serde_json::json!([]),
+            serde_json::json!("invalid-settings"),
+            serde_json::json!({"Env":{}}),
+            serde_json::json!({"Env":"HOME=/workspace"}),
+            serde_json::json!({"Env":[null]}),
+            serde_json::json!({"Env":[3]}),
+            serde_json::json!({"Env":["HOME"]}),
+            serde_json::json!({"Env":["=empty-key"]}),
+            serde_json::json!({"Env":["HOME=/bad\0value"]}),
+            serde_json::json!({"Env":["BAD\0KEY=value"]}),
+        ] {
+            let config = serde_json::json!({
+                "rootfs":{"diff_ids":["sha256:a"]},
+                "config":settings,
+            });
+            assert!(parse_config(&serde_json::to_vec(&config).unwrap()).is_err());
+        }
+    }
+
+    #[test]
     fn diff_ids_require_rootfs_array() {
-        assert!(parse_diff_ids(br#"{"rootfs":{"diff_ids":["sha256:a"]}}"#).is_ok());
-        assert!(parse_diff_ids(br#"{"rootfs":{}}"#).is_err());
-        assert!(parse_diff_ids(b"not json").is_err());
+        assert!(parse_config(br#"{"rootfs":{"diff_ids":["sha256:a"]}}"#).is_ok());
+        assert!(parse_config(br#"{"rootfs":{}}"#).is_err());
+        assert!(parse_config(b"not json").is_err());
     }
 
     #[test]

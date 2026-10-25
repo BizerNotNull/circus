@@ -22,8 +22,12 @@ const CPU_PERIOD: u64 = 100_000;
 
 /// Builds the one container init spec. The init process parks in `sleep` so the
 /// sandbox stays alive until lifecycle starts, pauses, resumes, or destroys it.
-pub(crate) fn container_any(spec: &CommonSpec, hostname: &str) -> Any {
-    let env = default_env(&[]);
+pub(crate) fn container_any(
+    spec: &CommonSpec,
+    hostname: &str,
+    image_env: &[String],
+) -> Result<Any, EngineError> {
+    let env = merged_env(image_env.iter().map(String::as_str), &[])?;
     let args = vec![
         "python3".to_string(),
         "-I".to_string(),
@@ -88,7 +92,7 @@ pub(crate) fn container_any(spec: &CommonSpec, hostname: &str) -> Any {
             ],
         },
     });
-    any(SPEC_TYPE_URL, &spec)
+    Ok(any(SPEC_TYPE_URL, &spec))
 }
 
 /// Builds one exec process spec. `user` is the lifecycle-owned `uid:gid` pair.
@@ -97,9 +101,23 @@ pub(crate) fn process_any(
     workdir: &str,
     argv: &[String],
     env: &[String],
+    container_spec: Option<&Any>,
 ) -> Result<Any, EngineError> {
     let (uid, gid) = parse_user(user)?;
-    let env = default_env(env);
+    let stored = container_spec
+        .filter(|spec| spec.type_url == SPEC_TYPE_URL)
+        .ok_or_else(|| file_error(EngineErrorKind::Other, "container has no OCI spec"))?;
+    let stored: Value = serde_json::from_slice(&stored.value).map_err(|err| {
+        file_error(
+            EngineErrorKind::Other,
+            format!("container spec is not JSON: {err}"),
+        )
+    })?;
+    let base = stored
+        .pointer("/process/env")
+        .ok_or_else(|| file_error(EngineErrorKind::Other, "container spec has no process env"))?;
+    let base = env_values(base)?;
+    let env = merged_env(base.iter().filter_map(Value::as_str), env)?;
     let process = process_value(uid, gid, workdir, argv, &env);
     Ok(any(PROCESS_TYPE_URL, &process))
 }
@@ -129,16 +147,55 @@ fn process_value(uid: u32, gid: u32, cwd: &str, argv: &[String], env: &[String])
     })
 }
 
-/// Explicit overrides first, then the fixed defaults they did not replace.
-fn default_env(explicit: &[String]) -> Vec<String> {
-    let mut env = explicit.to_vec();
+/// Validates metadata before callers allocate an owned environment.
+pub(super) fn env_values(value: &Value) -> Result<&[Value], EngineError> {
+    let values = value
+        .as_array()
+        .ok_or_else(|| file_error(EngineErrorKind::Other, "environment is not an array"))?;
+    for value in values {
+        let entry = value.as_str().ok_or_else(|| {
+            file_error(EngineErrorKind::Other, "environment entry is not a string")
+        })?;
+        env_key(entry)?;
+    }
+    Ok(values)
+}
+
+fn env_key(entry: &str) -> Result<&str, EngineError> {
+    entry
+        .split_once('=')
+        .map(|(key, _)| key)
+        .filter(|key| !key.is_empty() && !entry.contains('\0'))
+        .ok_or_else(|| file_error(EngineErrorKind::Other, "invalid environment entry"))
+}
+
+/// Last value per key wins; caller overrides beat image values. Defaults only
+/// fill missing keys, including when a supplied value is explicitly empty.
+fn merged_env<'a>(
+    base: impl DoubleEndedIterator<Item = &'a str> + Clone,
+    explicit: &'a [String],
+) -> Result<Vec<String>, EngineError> {
+    for entry in base.clone().chain(explicit.iter().map(String::as_str)) {
+        env_key(entry)?;
+    }
+    let mut env: Vec<String> = Vec::with_capacity(base.clone().count() + explicit.len() + 2);
+    for entry in explicit.iter().map(String::as_str).rev().chain(base.rev()) {
+        let key = env_key(entry)?;
+        if !env
+            .iter()
+            .any(|existing| existing.split_once('=').map(|(key, _)| key) == Some(key))
+        {
+            env.push(entry.to_string());
+        }
+    }
+    env.reverse();
     if !env.iter().any(|entry| entry.starts_with("PATH=")) {
         env.push(format!("PATH={DEFAULT_PATH}"));
     }
     if !env.iter().any(|entry| entry.starts_with("LANG=")) {
         env.push("LANG=C.UTF-8".to_string());
     }
-    env
+    Ok(env)
 }
 
 /// Parses the lifecycle-owned `uid:gid` user string into numeric ids.
@@ -418,7 +475,7 @@ mod tests {
 
     #[test]
     fn spec_is_read_only_capability_free_and_workspace_bounded() {
-        let any = container_any(&spec(), "circus");
+        let any = container_any(&spec(), "circus", &[]).unwrap();
         assert_eq!(any.type_url, SPEC_TYPE_URL);
         let value: Value = serde_json::from_slice(&any.value).unwrap();
         assert_eq!(value.pointer("/root/readonly"), Some(&Value::Bool(true)));
@@ -464,7 +521,7 @@ mod tests {
 
     #[test]
     fn report_reads_back_structural_facts_only() {
-        let any = container_any(&spec(), "circus");
+        let any = container_any(&spec(), "circus", &[]).unwrap();
         let report = report_from_any(Some("io.containerd.runc.v2".to_string()), Some(&any));
         assert_eq!(report.runtime.as_deref(), Some("io.containerd.runc.v2"));
         assert_eq!(report.readonly_root, Some(true));
@@ -534,11 +591,12 @@ mod tests {
             "/workspace",
             &["python3".to_string()],
             &["A=1".to_string()],
+            Some(&container_any(&spec(), "circus", &[]).unwrap()),
         )
         .unwrap();
         let value: Value = serde_json::from_slice(&any.value).unwrap();
         let env = value.get("env").unwrap().as_array().unwrap();
-        assert_eq!(env[0], json!("A=1"));
+        assert!(env.contains(&json!("A=1")));
         assert!(
             env.iter()
                 .any(|entry| entry.as_str().is_some_and(|v| v.starts_with("PATH=")))
@@ -547,7 +605,140 @@ mod tests {
     }
 
     #[test]
+    fn init_inherits_image_environment_without_changing_lifecycle_fields() {
+        let image_env = [
+            "HOME=/workspace",
+            "CODEX_HOME=/workspace/codex",
+            "PATH=/image/bin",
+            "LANG=",
+        ]
+        .map(str::to_string);
+        let spec = container_any(&spec(), "circus", &image_env).unwrap();
+        let value: Value = serde_json::from_slice(&spec.value).unwrap();
+        assert_eq!(value.pointer("/process/env"), Some(&json!(image_env)));
+        assert_eq!(value.pointer("/process/cwd"), Some(&json!("/workspace")));
+        assert_eq!(value.pointer("/process/user/uid"), Some(&json!(65_534)));
+        assert_eq!(value.pointer("/process/args/0"), Some(&json!("python3")));
+    }
+
+    #[test]
+    fn exec_overrides_inherited_keys_once_and_keeps_unspecified_image_values() {
+        let image_env = [
+            "HOME=/old",
+            "HOME=/workspace",
+            "CODEX_HOME=/workspace/codex",
+            "PATH=/image/bin",
+            "LANG=image-locale",
+            "WITH_EQUALS=a=b",
+        ]
+        .map(str::to_string);
+        let container = container_any(&spec(), "circus", &image_env).unwrap();
+        let process = process_any(
+            "65534:65534",
+            "/workspace/subdir",
+            &["custom-command".to_string()],
+            &[
+                "PATH=/ignored".to_string(),
+                "PATH=/caller/bin".to_string(),
+                "LANG=".to_string(),
+            ],
+            Some(&container),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&process.value).unwrap();
+        assert_eq!(
+            value.get("env"),
+            Some(&json!([
+                "HOME=/workspace",
+                "CODEX_HOME=/workspace/codex",
+                "WITH_EQUALS=a=b",
+                "PATH=/caller/bin",
+                "LANG=",
+            ]))
+        );
+        assert_eq!(value.get("cwd"), Some(&json!("/workspace/subdir")));
+        assert_eq!(value.get("args"), Some(&json!(["custom-command"])));
+    }
+
+    #[test]
+    fn environment_defaults_only_fill_absent_keys() {
+        let env = merged_env(["HOME=/workspace", "PATH="].into_iter(), &[]).unwrap();
+        assert_eq!(env, ["HOME=/workspace", "PATH=", "LANG=C.UTF-8"]);
+        let env = merged_env(std::iter::empty(), &[]).unwrap();
+        assert_eq!(
+            env,
+            [format!("PATH={DEFAULT_PATH}"), "LANG=C.UTF-8".to_string()]
+        );
+    }
+
+    #[test]
+    fn malformed_container_environment_fails_closed_even_with_overrides() {
+        let execute = |stored: Option<&Any>| {
+            process_any(
+                "65534:65534",
+                "/workspace",
+                &["true".to_string()],
+                &["HOME=/override".to_string()],
+                stored,
+            )
+        };
+        assert!(execute(None).is_err());
+        assert!(execute(Some(&any(PROCESS_TYPE_URL, &json!({"process":{"env":[]}})))).is_err());
+        assert!(
+            execute(Some(&Any {
+                type_url: SPEC_TYPE_URL.to_string(),
+                value: b"not json".to_vec(),
+            }))
+            .is_err()
+        );
+        for stored in [
+            json!({}),
+            json!({"process":null}),
+            json!({"process":{"env":null}}),
+            json!({"process":{"env":{}}}),
+            json!({"process":{"env":[1]}}),
+            json!({"process":{"env":["HOME"]}}),
+            json!({"process":{"env":["=empty-key"]}}),
+            json!({"process":{"env":["HOME=/bad\0value"]}}),
+        ] {
+            assert!(execute(Some(&any(SPEC_TYPE_URL, &stored))).is_err());
+        }
+    }
+
+    #[test]
+    fn invalid_image_and_explicit_environment_entries_are_rejected() {
+        for entry in [
+            "missing-equals",
+            "=empty-key",
+            "KEY=bad\0value",
+            "BAD\0KEY=value",
+        ] {
+            assert!(container_any(&spec(), "circus", &[entry.to_string()]).is_err());
+            let container = container_any(&spec(), "circus", &[]).unwrap();
+            assert!(
+                process_any(
+                    "65534:65534",
+                    "/workspace",
+                    &["true".to_string()],
+                    &[entry.to_string()],
+                    Some(&container),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn non_numeric_user_is_rejected() {
-        assert!(process_any("nobody", "/workspace", &["true".to_string()], &[]).is_err());
+        assert!(
+            process_any(
+                "nobody",
+                "/workspace",
+                &["true".to_string()],
+                &[],
+                Some(&container_any(&spec(), "circus", &[]).unwrap()),
+            )
+            .is_err()
+        );
     }
 }
