@@ -2,7 +2,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use circus_sandbox::{
-    BackendConfig, CommandRequest, IoLimits, IsolationConfig, Ownership, ResourceLimits, Sandbox,
+    BackendConfig, CommandRequest, IoLimits, IsolationConfig, ResourceLimits, Sandbox,
     SandboxConfig, SandboxError, SandboxPhase,
 };
 
