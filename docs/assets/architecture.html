@@ -26,7 +26,8 @@
       }
 
       body {
-        font-family: 'JetBrains Mono', 'PingFang SC', 'Microsoft YaHei', monospace;
+        font-family:
+          "JetBrains Mono", "PingFang SC", "Microsoft YaHei", monospace;
         background: #020617;
         min-height: 100vh;
         padding: 2rem;
@@ -58,8 +59,13 @@
       }
 
       @keyframes pulse {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.5; }
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.5;
+        }
       }
 
       h1 {
@@ -115,11 +121,21 @@
         border-radius: 50%;
       }
 
-      .card-dot.cyan { background: #22d3ee; }
-      .card-dot.emerald { background: #34d399; }
-      .card-dot.violet { background: #a78bfa; }
-      .card-dot.amber { background: #fbbf24; }
-      .card-dot.rose { background: #fb7185; }
+      .card-dot.cyan {
+        background: #22d3ee;
+      }
+      .card-dot.emerald {
+        background: #34d399;
+      }
+      .card-dot.violet {
+        background: #a78bfa;
+      }
+      .card-dot.amber {
+        background: #fbbf24;
+      }
+      .card-dot.rose {
+        background: #fb7185;
+      }
 
       .card h3 {
         font-size: 0.875rem;
@@ -159,14 +175,21 @@
         line-height: 1;
         padding: 0.25rem 0.5rem;
         border-radius: 0.375rem;
-        transition: color 0.2s, background 0.2s;
+        transition:
+          color 0.2s,
+          background 0.2s;
       }
-      .toolbar-toggle:hover { color: #94a3b8; background: rgba(30, 41, 59, 0.5); }
+      .toolbar-toggle:hover {
+        color: #94a3b8;
+        background: rgba(30, 41, 59, 0.5);
+      }
       .toolbar-actions {
         display: none;
         gap: 0.5rem;
       }
-      .toolbar.expanded .toolbar-actions { display: flex; }
+      .toolbar.expanded .toolbar-actions {
+        display: flex;
+      }
       .toolbar-actions button {
         background: rgba(30, 41, 59, 0.8);
         border: 1px solid #334155;
@@ -186,13 +209,25 @@
       }
 
       @media (max-width: 650px) {
-        body { padding: 20px 12px; }
-        .diagram-container { padding: 8px; }
-        .subtitle { margin-left: 0; line-height: 1.7; }
+        body {
+          padding: 20px 12px;
+        }
+        .diagram-container {
+          padding: 8px;
+        }
+        .subtitle {
+          margin-left: 0;
+          line-height: 1.7;
+        }
       }
       @media print {
-        body { background: #020617; padding: 1rem; }
-        .toolbar { display: none !important; }
+        body {
+          background: #020617;
+          padding: 1rem;
+        }
+        .toolbar {
+          display: none !important;
+        }
       }
     </style>
   </head>
@@ -220,7 +255,7 @@
           </div>
         </div>
         <p class="subtitle">
-          从任务输入到产物导出：运行边界、模型通道与清理归属。
+          从任务输入到产物导出：宿主凭据、工具授权、执行边界与清理归属。
         </p>
       </div>
 
@@ -234,14 +269,15 @@
           role="img"
           aria-labelledby="title desc"
         >
-          <title id="title">Circus task architecture</title>
+          <title id="title">Circus secure agent architecture</title>
           <desc id="desc">
-            A Paseo client connects to a Node daemon, a stdio bridge, and the
-            Agent runner. The runner uses the sandbox lifecycle and Docker plus
-            runc to start Codex. Model requests travel from the network-disabled
-            container to a host controller over the process standard streams,
-            then to an approved HTTPS Responses endpoint. Containerd and
-            Kubernetes are library backends, not Agent runner backends.
+            A Paseo client connects to a Node daemon, stdio bridge and
+            AgentRunner. The Rust lifecycle starts Codex or Claude Code in a
+            network-disabled Docker container. Model and authorized MCP requests
+            travel over process standard streams to the host credential broker,
+            which injects host-held credentials and enforces destinations, tools
+            and fixed resource parameters. Containerd and Kubernetes remain
+            separate library backends.
           </desc>
           <defs>
             <pattern
@@ -315,7 +351,7 @@
             font-size="34"
             font-weight="700"
           >
-            One task. One sandbox. A result you can inspect.
+            Your agent runs. Your credentials stay here.
           </text>
           <text
             x="40"
@@ -324,8 +360,8 @@
             font-family="Arial, sans-serif"
             font-size="17"
           >
-            Current Agent path · Docker + runc · explicit input and artifacts ·
-            confirmed cleanup
+            Desktop setup · task-scoped tools · Docker + runc · confirmed
+            cleanup
           </text>
 
           <!-- Boundaries and links are drawn before the components. -->
@@ -582,7 +618,7 @@
             font-size="19"
             font-weight="700"
           >
-            Model service
+            Model / MCP services
           </text>
           <text
             x="59"
@@ -600,7 +636,7 @@
             font-family="monospace"
             font-size="12"
           >
-            POST /v1/responses
+            Responses · Messages · MCP
           </text>
 
           <rect
@@ -630,7 +666,7 @@
             font-size="19"
             font-weight="700"
           >
-            Host model controller
+            Host credential broker
           </text>
           <text
             x="379"
@@ -639,7 +675,7 @@
             font-family="Arial, sans-serif"
             font-size="14"
           >
-            Real API key stays here
+            Model + MCP credentials stay on host
           </text>
           <text
             x="379"
@@ -648,7 +684,7 @@
             font-family="Arial, sans-serif"
             font-size="13"
           >
-            Validates request; streams Responses SSE
+            Fixed destination · model · tools · resource policy
           </text>
 
           <rect
@@ -726,7 +762,7 @@
             font-size="21"
             font-weight="700"
           >
-            Codex CLI
+            Codex / Claude CLI
           </text>
           <text
             x="899"
@@ -754,7 +790,7 @@
             font-family="Arial, sans-serif"
             font-size="14"
           >
-            Tools + local model forwarder
+            Tools + loopback forwarding
           </text>
           <text
             x="899"
@@ -918,7 +954,7 @@
             font-family="Arial, sans-serif"
             font-size="14"
           >
-            Model request via host
+            Model / MCP via host
           </text>
           <text
             x="915"
@@ -985,57 +1021,95 @@
       async function copyAsImage(btn) {
         const orig = btn.textContent;
         try {
-          const el = document.getElementById('report-container');
+          const el = document.getElementById("report-container");
           const r = el.getBoundingClientRect();
           const pad = 32;
-          const canvas = await html2canvas(document.body, { backgroundColor: '#020617', scale: 2, useCORS: true, ignoreElements: (e) => e.classList && e.classList.contains('toolbar'), x: r.left + window.scrollX - pad, y: r.top + window.scrollY - pad, width: r.width + pad * 2, height: r.height + pad * 2 });
-          const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
-          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-          btn.textContent = '✓ Copied!';
+          const canvas = await html2canvas(document.body, {
+            backgroundColor: "#020617",
+            scale: 2,
+            useCORS: true,
+            ignoreElements: (e) =>
+              e.classList && e.classList.contains("toolbar"),
+            x: r.left + window.scrollX - pad,
+            y: r.top + window.scrollY - pad,
+            width: r.width + pad * 2,
+            height: r.height + pad * 2,
+          });
+          const blob = await new Promise((r) => canvas.toBlob(r, "image/png"));
+          await navigator.clipboard.write([
+            new ClipboardItem({ "image/png": blob }),
+          ]);
+          btn.textContent = "✓ Copied!";
         } catch (e) {
-          btn.textContent = '✗ Failed';
+          btn.textContent = "✗ Failed";
         }
-        setTimeout(() => btn.textContent = orig, 2000);
+        setTimeout(() => (btn.textContent = orig), 2000);
       }
 
       async function downloadPNG(btn) {
         const orig = btn.textContent;
-        btn.textContent = '⏳ ...';
+        btn.textContent = "⏳ ...";
         try {
-          const el = document.getElementById('report-container');
+          const el = document.getElementById("report-container");
           const r = el.getBoundingClientRect();
           const pad = 32;
-          const canvas = await html2canvas(document.body, { backgroundColor: '#020617', scale: 2, useCORS: true, ignoreElements: (e) => e.classList && e.classList.contains('toolbar'), x: r.left + window.scrollX - pad, y: r.top + window.scrollY - pad, width: r.width + pad * 2, height: r.height + pad * 2 });
-          const link = document.createElement('a');
-          link.download = 'circus-architecture.png';
-          link.href = canvas.toDataURL('image/png');
+          const canvas = await html2canvas(document.body, {
+            backgroundColor: "#020617",
+            scale: 2,
+            useCORS: true,
+            ignoreElements: (e) =>
+              e.classList && e.classList.contains("toolbar"),
+            x: r.left + window.scrollX - pad,
+            y: r.top + window.scrollY - pad,
+            width: r.width + pad * 2,
+            height: r.height + pad * 2,
+          });
+          const link = document.createElement("a");
+          link.download = "circus-architecture.png";
+          link.href = canvas.toDataURL("image/png");
           link.click();
-          btn.textContent = '✓ Done!';
+          btn.textContent = "✓ Done!";
         } catch (e) {
-          btn.textContent = '✗ Failed';
+          btn.textContent = "✗ Failed";
         }
-        setTimeout(() => btn.textContent = orig, 2000);
+        setTimeout(() => (btn.textContent = orig), 2000);
       }
 
       async function downloadPDF(btn) {
         const orig = btn.textContent;
-        btn.textContent = '⏳ ...';
+        btn.textContent = "⏳ ...";
         try {
-          const el = document.getElementById('report-container');
+          const el = document.getElementById("report-container");
           const r = el.getBoundingClientRect();
           const pad = 32;
-          const canvas = await html2canvas(document.body, { backgroundColor: '#020617', scale: 2, useCORS: true, ignoreElements: (e) => e.classList && e.classList.contains('toolbar'), x: r.left + window.scrollX - pad, y: r.top + window.scrollY - pad, width: r.width + pad * 2, height: r.height + pad * 2 });
-          const imgData = canvas.toDataURL('image/png');
+          const canvas = await html2canvas(document.body, {
+            backgroundColor: "#020617",
+            scale: 2,
+            useCORS: true,
+            ignoreElements: (e) =>
+              e.classList && e.classList.contains("toolbar"),
+            x: r.left + window.scrollX - pad,
+            y: r.top + window.scrollY - pad,
+            width: r.width + pad * 2,
+            height: r.height + pad * 2,
+          });
+          const imgData = canvas.toDataURL("image/png");
           const { jsPDF } = window.jspdf;
-          const orientation = canvas.width > canvas.height ? 'landscape' : 'portrait';
-          const pdf = new jsPDF({ orientation, unit: 'px', format: [canvas.width, canvas.height], hotfixes: ['px_scaling'] });
-          pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
-          pdf.save('circus-architecture.pdf');
-          btn.textContent = '✓ Done!';
+          const orientation =
+            canvas.width > canvas.height ? "landscape" : "portrait";
+          const pdf = new jsPDF({
+            orientation,
+            unit: "px",
+            format: [canvas.width, canvas.height],
+            hotfixes: ["px_scaling"],
+          });
+          pdf.addImage(imgData, "PNG", 0, 0, canvas.width, canvas.height);
+          pdf.save("circus-architecture.pdf");
+          btn.textContent = "✓ Done!";
         } catch (e) {
-          btn.textContent = '✗ Failed';
+          btn.textContent = "✗ Failed";
         }
-        setTimeout(() => btn.textContent = orig, 2000);
+        setTimeout(() => (btn.textContent = orig), 2000);
       }
     </script>
   </body>
