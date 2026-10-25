@@ -298,6 +298,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
     throw new SandboxSetupError("The saved credential is unavailable. Enter the API key again.");
   }
 
+  return {
     async snapshot(): Promise<SandboxSetupSnapshot> {
       const { config, environment, agent } = await inspect();
       const supported = deps.platform === "darwin";
