@@ -25,7 +25,7 @@
   <a href="#从桌面开始">桌面上手</a> ·
   <a href="#一次任务从显式授权到清理确认">交互流程</a> ·
   <a href="#rust-安全控制面">Rust 核心</a> ·
-  <a href="#真实任务验收修复代码并取回产物">真实验收</a> ·
+  <a href="#一次任务从修复代码到取回产物">真实验收</a> ·
   <a href="#架构">架构</a> ·
   <a href="#快速上手">命令行</a> ·
   <a href="circus-sandbox/docs/secure-desktop-verification.md">验证</a>
@@ -149,7 +149,7 @@ _回放使用真实 Paseo UI；任务事件与结果由受控 provider fixture �
 
 目前支持范围以表中列出的接入方式为准；OAuth 登录、本地 stdio MCP 及其余 MCP 方法尚未支持。
 
-## 真实任务验收：修复代码并取回产物
+## 一次任务：从修复代码到取回产物
 
 给 Codex 一份故意写错的 `answer.py`：
 
