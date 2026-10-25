@@ -129,6 +129,25 @@ const model = {
   preset: "compact" as const,
 };
 
+test("commits the runner and Keychain credential after successful save", async () => {
+  const f = await fixture();
+  await expect(f.service.save({ ...model, agent: "claude-code" })).resolves.toMatchObject({
+    ok: true,
+  });
+
+  const persisted = JSON.parse(await readFile(join(f.home, "config.json"), "utf8"));
+  const runnerPath = persisted.agents.providers.sandbox.env.CIRCUS_RUNNER_CONFIG;
+  const runner = JSON.parse(await readFile(runnerPath, "utf8"));
+  expect(runner.agent).toBe("claude-code");
+  expect(
+    f.secrets.get(
+      `${runner.model.apiKeyKeychain.service}:${runner.model.apiKeyKeychain.account}`,
+    ),
+  ).toBe(model.apiKey);
+  expect(await f.service.snapshot()).toMatchObject({
+    settings: { agent: "claude-code", hasCredential: true, credentialStorage: "keychain" },
+  });
+});
 test("saves a usable provider without storing a credential in config, argv, or snapshot", async () => {
   const f = await fixture();
   expect((await f.service.snapshot()).ready).toBe(true);
