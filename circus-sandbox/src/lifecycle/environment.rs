@@ -23,7 +23,7 @@ const CLEANUP_CONFIRM: Duration = Duration::from_secs(60);
 impl EnvironmentPlan {
     /// Runs the plan against one owned sandbox and confirms cleanup.
     ///
-    /// The local image is inspected (never pulled), then one sandbox is created,
+    /// The image is resolved using the request's pull policy (default local-only), then one sandbox is created,
     /// started, and used for each step in order. Each exec receives only the
     /// step's argv, timeout, and output bound; no host environment variable or
     /// credential is forwarded and no shell is involved. The sandbox is always

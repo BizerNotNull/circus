@@ -180,7 +180,7 @@ impl Engine {
         let inspected = self.docker.inspect_image(image).await.map_err(map_err)?;
         if inspected.os.as_deref() != Some("linux") {
             return Err(EngineError::new(
-                "local image is not a linux image; this crate does not pull",
+                "local image is not a linux image; sandbox creation does not pull",
             ));
         }
         if inspected

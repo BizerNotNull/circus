@@ -213,10 +213,10 @@ pub enum SandboxError {
         current: SandboxPhase,
         operation: &'static str,
     },
-    /// The selected backend has no local copy of this image. This crate never
+    /// The selected backend has no local copy of this image. Sandbox creation never
     /// pulls; supply an image that already exists or resolve one explicitly
     /// with [`crate::environment`].
-    #[error("backend image {image} is not available locally; this crate does not pull")]
+    #[error("backend image {image} is not available locally; sandbox creation does not pull")]
     BackendImageUnavailable { image: String },
     /// A backend operation failed. The message is backend-supplied text; no SDK
     /// type is exposed.

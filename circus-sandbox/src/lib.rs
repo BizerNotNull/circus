@@ -13,8 +13,9 @@
 //! sandbox snapshots capture and restore tmpfs workspace files, including
 //! running writes, but are not process, memory, VM, or Docker-commit
 //! checkpoints. [`environment::prepare_docker_image`] resolves an explicit
-//! reference to an immutable local image identity; it never pulls from or
-//! authenticates against a registry. [`environment::EnvironmentPlan`] adds an
+//! reference to an immutable image identity, defaulting to local-only inspection;
+//! explicit [`environment::ImagePullPolicy::IfMissing`] permits one unauthenticated
+//! missing-image pull. It never loads registry credentials. [`environment::EnvironmentPlan`] adds an
 //! ordered, pinned preparation plan that executes separate-argv guest commands
 //! in one owned sandbox and confirms cleanup, and
 //! [`environment::EnvironmentId`] derives an opaque SHA-256 identity from the
@@ -37,7 +38,7 @@
 //! container cleanup; a normal exit preserves container and workspace. A
 //! session is not a TTY, process-group signal API, or detached recovery
 //! mechanism. Not implemented: Kubernetes, gVisor, Kata, Firecracker, and
-//! registry pulls/authentication.
+//! registry authentication.
 //!
 //! The optional `http` feature (enabled by default) adds an authenticated JSON
 //! transport over the same [`Sandbox`] API (`http::HttpServer`). It requires an
