@@ -98,7 +98,7 @@ _开发态界面，字段使用演示配置；截图已裁去本机标识。_
 <summary>其他平台或 Claude Code：手动配置宿主</summary>
 
 在 `circus-sandbox/` 执行 `cargo build --locked -p circus-stdio-bridge`，按 [stdio 宿主配置](circus-sandbox/docs/stdio-bridge.md#宿主配置)创建 `runner.json`，指定 Agent、镜像 ID、Python、资源限制和宿主凭据引用。
-将以下内容合入 daemon 配置，替换两个绝对路径：
+将以下内容合入 daemon 配置，替换三个绝对路径：
 
 ```json
 {
@@ -107,7 +107,10 @@ _开发态界面，字段使用演示配置；截图已裁去本机标识。_
       "sandbox": {
         "enabled": true,
         "command": ["/absolute/path/to/circus-stdio-bridge"],
-        "env": { "CIRCUS_RUNNER_CONFIG": "/absolute/path/to/runner.json" }
+        "env": {
+          "CIRCUS_RUNNER_CONFIG": "/absolute/path/to/runner.json",
+          "CIRCUS_SANDBOX_STATE_DIR": "/absolute/path/to/state"
+        }
       }
     }
   }
@@ -118,13 +121,13 @@ _开发态界面，字段使用演示配置；截图已裁去本机标识。_
 
 选择 **Sandbox** 可提交纯提示词任务；需要文件时打开工作区的 **Sandbox task** 面板。完整说明见 [Paseo sandbox provider](circus-paseo/public-docs/supported-providers.md#sandbox-codex)。
 
-当前一次沙箱只接受一个任务，结束后创建新任务。产物保存在 daemon 的有界内存缓存中，**重启前需下载**；二进制下载支持 Web / 桌面端，原生移动端可预览和复制 UTF-8 文本。
+沙箱会话按顺序执行：每次提示重建沙箱，从宿主状态目录中的明文工作区归档恢复已完成轮次，并让 Codex 续接原生线程；运行中的进程和进行中的 turn 不保留。产物保存在 daemon 的有界内存缓存中，**重启前需下载**；二进制下载支持 Web / 桌面端，原生移动端可预览和复制 UTF-8 文本。
 
 ## Agent 与 MCP 支持范围
 
 | 接入项                | 当前可用                                                             | 已验证                                                   | 仍待完成                      |
 | --------------------- | -------------------------------------------------------------------- | -------------------------------------------------------- | ----------------------------- |
-| Codex `0.164.0`       | 桌面配置、单任务执行、宿主模型与 MCP 代理                            | 真实 `gpt-5.6-sol` + Docker + 受控 HTTPS MCP             | 发布安装包验收                |
+| Codex `0.164.0`       | 桌面配置、顺序多轮（每轮重建沙箱）、宿主模型与 MCP 代理              | 真实 `gpt-5.6-sol` + Docker + 受控 HTTPS MCP             | 发布安装包验收                |
 | Claude Code `2.1.310` | 固定镜像、Messages 通道、同一任务与 MCP 契约                         | 真实 CLI + Docker + 脚本模型服务，含工具调用、取消和清理 | 真实模型推理与桌面 Agent 选择 |
 | HTTPS MCP             | Streamable HTTP 工具发现与调用，JSON / 有界 SSE，凭据文件或 Keychain | 认证注入、工具授权、固定资源参数、拒绝与脱敏             | 真实 GitHub 等目标服务验收    |
 | `dsh`                 | 尚未接入                                                             | —                                                        | 确认具体应用与适配协议        |
@@ -267,17 +270,17 @@ unset CIRCUS_MODEL_API_KEY
 
 ## 目前能做什么
 
-| 能力                | 当前实现                                                                                                       | 边界                                                                                          |
-| ------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Agent 任务          | Codex / Claude Code 单任务、显式输入、事件、取消、期限、产物、清理重试；Codex 可用调用方归档与线程 ID 串行多轮 | Agent 运行器使用 Docker；每任务重建沙箱，不恢复进行中的 turn；无自动重试或持久化任务队列      |
-| 凭证与工具授权      | macOS Keychain、宿主模型代理、按任务授权的 HTTPS MCP broker                                                    | 不支持 OAuth、任意宿主 stdio MCP 或全部 MCP 方法                                              |
-| 桌面配置            | macOS 环境检测、模型密钥保存、资源预算与 MCP 只读预设                                                          | 仍需 Docker 与源码构建条件；尚非打包即用的跨平台发行版                                        |
-| Docker + runc       | 生命周期、exec、交互进程、文件、工作区快照、池租约                                                             | 每沙箱一个交互进程；显式本地 Engine                                                           |
-| containerd + runc   | 生命周期、exec、交互进程、文件、工作区快照、池租约                                                             | 独立沙箱库能力，尚未接入 Agent 运行器                                                         |
-| Kubernetes workload | Pod 创建与就绪、exec、交互进程、文件、工作区快照、池租约、删除                                                 | 可选 feature；无真正 pause/resume、NetworkPolicy 与 PID 限制能力；交互进程经 `pods/exec` 附加 |
-| 环境与代码准备      | 本地 OCI 镜像解析、固定提交 Git clone/worktree、受预算约束的文件复制                                           | Docker/containerd 默认使用本地镜像；Kubernetes 可由 kubelet 拉取                              |
-| 快照与预启动        | 工作区文件快照、预启动池与单次租约                                                                             | 不包含进程或 VM 内存检查点；尚无启动性能基准                                                  |
-| 接入与观测          | Rust API、Node stdio 客户端、认证 HTTP API、结构化 tracing 与计数                                              | HTTP 当前仅支持 Docker 沙箱操作；指标不等于计费系统                                           |
+| 能力                | 当前实现                                                                                                                  | 边界                                                                                                      |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Agent 任务          | Codex / Claude Code 单任务、显式输入、事件、取消、期限、产物、清理重试；Paseo 的 Codex 会话可用明文归档与线程 ID 顺序多轮 | Agent 运行器使用 Docker；每轮重建沙箱，只延续已完成 turn，不恢复进行中的 turn；无自动重试或持久化任务队列 |
+| 凭证与工具授权      | macOS Keychain、宿主模型代理、按任务授权的 HTTPS MCP broker                                                               | 不支持 OAuth、任意宿主 stdio MCP 或全部 MCP 方法                                                          |
+| 桌面配置            | macOS 环境检测、模型密钥保存、资源预算与 MCP 只读预设                                                                     | 仍需 Docker 与源码构建条件；尚非打包即用的跨平台发行版                                                    |
+| Docker + runc       | 生命周期、exec、交互进程、文件、工作区快照、池租约                                                                        | 每沙箱一个交互进程；显式本地 Engine                                                                       |
+| containerd + runc   | 生命周期、exec、交互进程、文件、工作区快照、池租约                                                                        | 独立沙箱库能力，尚未接入 Agent 运行器                                                                     |
+| Kubernetes workload | Pod 创建与就绪、exec、交互进程、文件、工作区快照、池租约、删除                                                            | 可选 feature；无真正 pause/resume、NetworkPolicy 与 PID 限制能力；交互进程经 `pods/exec` 附加             |
+| 环境与代码准备      | 本地 OCI 镜像解析、固定提交 Git clone/worktree、受预算约束的文件复制                                                      | Docker/containerd 默认使用本地镜像；Kubernetes 可由 kubelet 拉取                                          |
+| 快照与预启动        | 工作区文件快照、预启动池与单次租约                                                                                        | 不包含进程或 VM 内存检查点；尚无启动性能基准                                                              |
+| 接入与观测          | Rust API、Node stdio 客户端、认证 HTTP API、结构化 tracing 与计数                                                         | HTTP 当前仅支持 Docker 沙箱操作；指标不等于计费系统                                                       |
 
 资源校验负责拒绝非法请求，实际约束依赖后端执行；它不构成跨任务资源预留或聚合准入。当前 runc 容器共享宿主内核，部署仍需可信的宿主管理边界。
 

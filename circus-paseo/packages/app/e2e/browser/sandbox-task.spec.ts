@@ -15,7 +15,7 @@ async function openSandboxTask(page: Page, workspaceId: string) {
   const command = await openCommandCenter(page);
   await command.getByTestId("command-center-input").fill("New sandbox task");
   await command.getByRole("button", { name: "New sandbox task", exact: true }).click();
-  await expect(page.getByText(/This sandbox accepts one task/)).toBeVisible();
+  await expect(page.getByText(/Sandbox sessions continue completed turns only/)).toBeVisible();
 }
 
 test("sandbox form distinguishes configuration failures and preserves the draft across layouts", async ({

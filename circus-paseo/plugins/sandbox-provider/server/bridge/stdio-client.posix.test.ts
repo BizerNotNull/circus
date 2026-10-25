@@ -60,6 +60,7 @@ createInterface({input:process.stdin}).on('line', line => {
   const client = new CircusStdioClient({
     executable,
     configFile: join(root, "config.json"),
+    stateDir: join(root, "state"),
     env: { PEER_MODE: mode, PATH: "/usr/bin:/bin" },
     shutdownTimeoutMs: 1000,
   });

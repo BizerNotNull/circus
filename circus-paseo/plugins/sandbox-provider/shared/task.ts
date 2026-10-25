@@ -5,6 +5,12 @@ export const SANDBOX_PROVIDER_ID = "sandbox";
 export const SANDBOX_HOST_MODEL_ID = "host-configured";
 export const SANDBOX_PROVIDER_SELECTION = `${SANDBOX_PROVIDER_ID}/${SANDBOX_HOST_MODEL_ID}`;
 
+/** Bounds for one workspace archive load or capture. */
+export const DEFAULT_WORKSPACE_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+export const DEFAULT_WORKSPACE_MAX_ENTRIES = 65_536;
+export const MAX_WORKSPACE_TOTAL_BYTES = 512 * 1024 * 1024;
+export const MAX_WORKSPACE_ENTRIES = 1_000_000;
+
 export const projectPathSchema = z
   .string()
   .min(1)
@@ -30,6 +36,18 @@ export const taskOptionsSchema = z
     outputPaths: z.array(projectPathSchema).max(32).default([]),
     timeoutMs: z.number().int().min(1).max(3_600_000).default(300_000),
     mcpGrants: mcpGrantsSchema.default([]),
+    workspaceMaxTotalBytes: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_WORKSPACE_TOTAL_BYTES)
+      .default(DEFAULT_WORKSPACE_MAX_TOTAL_BYTES),
+    workspaceMaxEntries: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_WORKSPACE_ENTRIES)
+      .default(DEFAULT_WORKSPACE_MAX_ENTRIES),
   })
   .superRefine((task, context) => {
     const inputs = task.inputFiles.map((file) => file.path);
@@ -65,5 +83,5 @@ export function inputFileBytes(file: InputFile): number {
   return (file.base64.length * 3) / 4 - padding;
 }
 
-export const SINGLE_TASK_NOTICE =
-  "This sandbox accepts one task. Only the files you supply are imported. Exported files are kept separately; your project is not changed. After it finishes or stops, create a new task. Conversation and workspace continuation are not available.";
+export const SANDBOX_SESSION_NOTICE =
+  "Sandbox sessions continue completed turns only. Each prompt runs in a fresh sandbox restored from this session's host-side workspace archive, and Codex resumes the previous thread. Running processes and in-flight turns are not preserved. Files added in the panel are staged with every prompt; only files you supply are imported, and your project is not changed. Exports are kept separately for download.";

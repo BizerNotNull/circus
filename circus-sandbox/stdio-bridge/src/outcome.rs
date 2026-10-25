@@ -2,12 +2,17 @@ use circus_agent_runner::{ModelFailure, TaskError, TaskOutcome};
 
 use crate::protocol::{Cleanup, Failure, FinalResult, artifacts};
 
-pub fn present(outcome: &TaskOutcome) -> (FinalResult, Cleanup) {
+/// `include_agent_session` is set only when the caller opted into durable
+/// multi-turn; otherwise the v1 success shape remains byte-compatible.
+pub fn present(outcome: &TaskOutcome, include_agent_session: bool) -> (FinalResult, Cleanup) {
     match outcome {
         Ok(output) => (
             FinalResult::Succeeded {
                 cleanup: Cleanup::Confirmed,
                 artifacts: artifacts(&output.artifacts),
+                agent_session: include_agent_session
+                    .then(|| output.agent_session.clone())
+                    .flatten(),
             },
             Cleanup::Confirmed,
         ),
@@ -91,7 +96,26 @@ fn code(error: &TaskError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use circus_agent_runner::TaskFailure;
+    use circus_agent_runner::{TaskFailure, TaskOutput};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn success_exposes_agent_session_only_for_durable_callers() {
+        let outcome: TaskOutcome = Ok(TaskOutput {
+            task_id: "task-1".into(),
+            artifacts: BTreeMap::new(),
+            agent_session: Some("thread-1".into()),
+        });
+        let (durable, _) = present(&outcome, true);
+        let serialized = sonic_rs::to_string(&durable).unwrap();
+        assert!(serialized.contains(r#""agentSession":"thread-1""#));
+        let (legacy, _) = present(&outcome, false);
+        assert!(
+            !sonic_rs::to_string(&legacy)
+                .unwrap()
+                .contains("agentSession")
+        );
+    }
 
     #[test]
     fn worker_loss_and_host_cleanup_are_never_confirmed_by_sandbox_retry() {
@@ -110,7 +134,7 @@ mod tests {
                 cleanup: None,
             });
             assert!(after_cleanup_retry(&outcome) == Cleanup::Unknown);
-            let (result, cleanup) = present(&outcome);
+            let (result, cleanup) = present(&outcome, true);
             assert!(cleanup == Cleanup::Unknown);
             assert!(
                 !sonic_rs::to_string(&result)

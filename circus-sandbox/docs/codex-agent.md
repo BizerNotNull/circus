@@ -1,6 +1,6 @@
 # Agent 任务运行器
 
-`agent-runner/` 提供独立的 `circus-agent-runner` library crate，把 Codex 单任务示例整理成可复用调用入口。调用方提交任务、消费事件、等待产物；运行器负责准备独立沙箱、驱动一个 Codex turn、取回文件和确认清理。它通过 `circus-sandbox` 的公开 API 工作，Codex 协议没有进入沙箱核心。调用方可以用调用方拥有的工作区归档和原生线程 ID 串起多轮任务，但每个任务仍创建新沙箱。Paseo 通过 [stdio bridge](stdio-bridge.md) 和 [sandbox provider](../../circus-paseo/public-docs/supported-providers.md#sandbox-codex) 接入；stdio v1 仍是单轮。HTTP 服务、进行中 turn 的恢复和自动重试仍未实现。
+`agent-runner/` 提供独立的 `circus-agent-runner` library crate，把 Codex 单任务示例整理成可复用调用入口。调用方提交任务、消费事件、等待产物；运行器负责准备独立沙箱、驱动一个 Codex turn、取回文件和确认清理。它通过 `circus-sandbox` 的公开 API 工作，Codex 协议没有进入沙箱核心。调用方可以用调用方拥有的工作区归档和原生线程 ID 串起多轮任务，但每个任务仍创建新沙箱。Paseo 通过 [stdio bridge](stdio-bridge.md) 和 [sandbox provider](../../circus-paseo/public-docs/supported-providers.md#sandbox-codex) 接入；bridge v1 的每个进程仍只执行一个任务，但请求可以携带明文工作区归档与 Codex 线程 ID，provider 每次提示启动新进程来串起已完成轮次。HTTP 服务、进行中 turn 的恢复和自动重试仍未实现。
 
 ## 调用契约
 

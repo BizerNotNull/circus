@@ -4,7 +4,7 @@
 
 ## 当前工程
 
-当前检出是 Rust 1.99.1 / edition 2024 的 Cargo workspace，共用工具链与生成的 `Cargo.lock`。根包 `circus-sandbox` 提供文件工作区、资源请求校验、本地 Linux Docker + runc、containerd + runc、Kubernetes workload、认证 HTTP API、交互进程、镜像准备、Git、工作区快照和预启动池；成员 `agent-runner/` 提供基于公开沙箱 API 的 Codex/Claude Code 任务调用库（Codex 可由调用方用工作区归档与原生线程 ID 串行多轮），`sandbox-exec/` 提供把既有 provider 命令接入沙箱的原始 stdio 代理二进制，`stdio-bridge/` 提供同机子进程协议入口。四者均在 `default-members` 中，现有 build、clippy、test、doc 命令覆盖四包；格式检查使用 `cargo fmt --all --check`，依赖策略使用 `cargo deny --workspace --locked check` 显式覆盖全部成员。Agent 协议测试入口见[运行器说明](codex-agent.md)，Node 与 stdio 契约见[桥接说明](stdio-bridge.md)，Linux CI 同时运行运行器的 Python 策略与本地 HTTPS 测试。Paseo 通过显式启用的 sandbox provider 使用 stdio 单任务入口；运行器当前仅选择 Docker 后端。
+当前检出是 Rust 1.99.1 / edition 2024 的 Cargo workspace，共用工具链与生成的 `Cargo.lock`。根包 `circus-sandbox` 提供文件工作区、资源请求校验、本地 Linux Docker + runc、containerd + runc、Kubernetes workload、认证 HTTP API、交互进程、镜像准备、Git、工作区快照和预启动池；成员 `agent-runner/` 提供基于公开沙箱 API 的 Codex/Claude Code 任务调用库（Codex 可由调用方用工作区归档与原生线程 ID 串行多轮），`sandbox-exec/` 提供把既有 provider 命令接入沙箱的原始 stdio 代理二进制，`stdio-bridge/` 提供同机子进程协议入口（每进程一个任务，可选工作区归档、预算与线程 ID 字段支持顺序多轮）。四者均在 `default-members` 中，现有 build、clippy、test、doc 命令覆盖四包；格式检查使用 `cargo fmt --all --check`，依赖策略使用 `cargo deny --workspace --locked check` 显式覆盖全部成员。Agent 协议测试入口见[运行器说明](codex-agent.md)，Node 与 stdio 契约见[桥接说明](stdio-bridge.md)，Linux CI 同时运行运行器的 Python 策略与本地 HTTPS 测试。Paseo 通过显式启用的 sandbox provider 使用 stdio 入口：每个提示启动一个进程，按已完成轮次恢复工作区归档并续接 Codex 线程；运行器当前仅选择 Docker 后端。
 
 本文按当前检出描述工程范围，不以文件存在代替合并、发布或最新提交的检查。交付记录入口见 [交付计划](delivery-plan.md)，安全扫描约定见 [安全说明](../../.github/sandbox-security.md)。
 
