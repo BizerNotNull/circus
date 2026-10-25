@@ -2,8 +2,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use circus_sandbox::{
-    CommandRequest, DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig, ProcessOutput,
-    ProcessRequest, ResourceLimits, RuntimeName, SandboxConfig, SandboxError, SandboxPhase,
+    CommandRequest, DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig, NetworkAccess,
+    ProcessOutput, ProcessRequest, ResourceLimits, RuntimeName, SandboxConfig, SandboxError,
+    SandboxPhase,
 };
 
 const PY: &str = "python3";
@@ -24,14 +25,22 @@ fn endpoint() -> Result<DockerEndpoint, Box<dyn std::error::Error>> {
     )?)?)
 }
 
-fn config() -> Result<SandboxConfig, Box<dyn std::error::Error>> {
+fn config(network_access: NetworkAccess) -> Result<SandboxConfig, Box<dyn std::error::Error>> {
     let limits = ResourceLimits::new(64 * 1024 * 1024, 100, TEST_PIDS, 8 * 1024 * 1024, 1024)?;
     Ok(SandboxConfig::new(
         endpoint()?,
         std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
         RuntimeName::runc(),
         limits,
-        IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
+        IsolationConfig::linux_enforced(
+            true,
+            true,
+            true,
+            network_access,
+            "/workspace",
+            65534,
+            65534,
+        )?,
         IoLimits::new(64 * 1024, Duration::from_secs(3))?,
     )?)
 }
@@ -44,8 +53,14 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_network(NetworkAccess::Disabled).await
+    }
+
+    async fn with_network(
+        network_access: NetworkAccess,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let ep = endpoint()?;
-        let sandbox = DockerSandbox::create(config()?).await?;
+        let sandbox = DockerSandbox::create(config(network_access)?).await?;
         let id = sandbox.status().await?.container_id;
         Ok(Self {
             sandbox: Some(sandbox),
@@ -396,6 +411,33 @@ async fn docker_linux_runc_process_session_timeout_destroys_its_sandbox()
         Err(SandboxError::TimedOut { .. })
     ));
     assert_eq!(f.sandbox().status().await?.phase, SandboxPhase::Destroyed);
+    destroy(&mut f).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires explicit opt-in and a real Linux Docker Engine with outbound Internet"]
+async fn docker_bridge_allows_outbound_https() -> Result<(), Box<dyn std::error::Error>> {
+    enabled();
+    let mut f = Fixture::with_network(NetworkAccess::Bridge).await?;
+    f.sandbox().start().await?;
+    let status = f.sandbox().status().await?;
+    assert_eq!(status.network_mode, "bridge");
+    let result = f
+        .sandbox()
+        .exec(CommandRequest {
+            argv: vec![
+                PY.into(),
+                "-c".into(),
+                "import urllib.request; r=urllib.request.urlopen('https://example.com/', timeout=15); print(r.status)"
+                    .into(),
+            ],
+            timeout: Duration::from_secs(30),
+            output_limit_bytes: 16 * 1024,
+        })
+        .await?;
+    assert_eq!(result.exit_code, 0, "HTTPS egress failed: {result:?}");
+    assert!(String::from_utf8(result.stdout)?.contains("200"));
     destroy(&mut f).await?;
     Ok(())
 }

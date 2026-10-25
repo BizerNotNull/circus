@@ -6,8 +6,8 @@ mod process;
 pub use process::{ProcessOutput, ProcessRequest, ProcessSession};
 
 pub use config::{
-    ConfigError, DockerEndpoint, IoLimits, IsolationConfig, OWNER_LABEL_KEY, RuntimeName,
-    SandboxConfig,
+    ConfigError, DockerEndpoint, IoLimits, IsolationConfig, NetworkAccess, OWNER_LABEL_KEY,
+    RuntimeName, SandboxConfig,
 };
 
 use std::path::Path;
@@ -1068,6 +1068,7 @@ fn create_spec(config: &SandboxConfig, nonce: &str) -> CreateSpec {
         workspace_path: config.isolation().workspace_path().to_string(),
         workspace_bytes: limits.workspace_bytes(),
         guest_uid: config.isolation().guest_uid(),
+        network_access: config.isolation().network_access(),
         guest_gid: config.isolation().guest_gid(),
         owner_label: nonce.to_string(),
     }

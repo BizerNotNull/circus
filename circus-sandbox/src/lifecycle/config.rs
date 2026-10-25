@@ -106,12 +106,22 @@ impl RuntimeName {
     }
 }
 
-/// Isolation flags that must all be enabled. There is no insecure constructor.
+/// Docker network policy. `Bridge` permits ordinary unrestricted container egress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkAccess {
+    /// Disable container networking.
+    Disabled,
+    /// Connect to Docker's default bridge; no destination allowlist is applied.
+    Bridge,
+}
+
+/// Isolation flags that must all be enabled. Network access is selected explicitly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IsolationConfig {
     workspace_path: String,
     guest_uid: u32,
     guest_gid: u32,
+    network_access: NetworkAccess,
 }
 
 impl IsolationConfig {
@@ -121,20 +131,18 @@ impl IsolationConfig {
     /// mounted as a bounded tmpfs. The root filesystem is read-only, so a later
     /// Docker commit would not preserve workspace writes. Snapshot is unsupported.
     ///
-    /// # Errors
-    ///
-    /// Rejects any disabled flag, a non-absolute workspace path, or a path that
-    /// contains `..`, `\`, or a Windows drive prefix in any component.
+    /// Rejects disabled hardening flags, a non-absolute workspace path, or a path
+    /// that contains `..`, `\`, or a Windows drive prefix in any component.
     pub fn linux_enforced(
         no_new_privileges: bool,
         drop_all_capabilities: bool,
         readonly_root: bool,
-        network_disabled: bool,
+        network_access: NetworkAccess,
         workspace_path: impl Into<String>,
         guest_uid: u32,
         guest_gid: u32,
     ) -> Result<Self, ConfigError> {
-        if !no_new_privileges || !drop_all_capabilities || !readonly_root || !network_disabled {
+        if !no_new_privileges || !drop_all_capabilities || !readonly_root {
             return Err(ConfigError::IsolationNotEnforced);
         }
         let workspace_path = workspace_path.into();
@@ -143,6 +151,7 @@ impl IsolationConfig {
             workspace_path,
             guest_uid,
             guest_gid,
+            network_access,
         })
     }
 
@@ -150,6 +159,12 @@ impl IsolationConfig {
     #[must_use]
     pub fn workspace_path(&self) -> &str {
         &self.workspace_path
+    }
+
+    /// Explicit Docker network policy.
+    #[must_use]
+    pub fn network_access(&self) -> NetworkAccess {
+        self.network_access
     }
 
     /// Guest user id. Passed explicitly to the engine; not inherited.
@@ -280,9 +295,7 @@ pub enum ConfigError {
     UnsupportedEndpoint { value: String },
     #[error("runtime {name} is not supported; only runc is accepted")]
     UnsupportedRuntime { name: String },
-    #[error(
-        "no-new-privileges, capability drop, readonly root, and disabled network must all be set"
-    )]
+    #[error("no-new-privileges, capability drop, and readonly root must all be set")]
     IsolationNotEnforced,
     #[error("workspace path must be an absolute container path without host prefixes")]
     InvalidWorkspacePath,

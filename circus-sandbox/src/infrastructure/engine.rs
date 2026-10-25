@@ -7,6 +7,8 @@ use futures_util::{Stream, StreamExt};
 
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
+use crate::lifecycle::NetworkAccess;
+
 const GUEST_FILES: &str = include_str!("guest_files.py");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +82,7 @@ pub(crate) struct CreateSpec {
     pub workspace_bytes: u64,
     pub guest_uid: u32,
     pub guest_gid: u32,
+    pub network_access: NetworkAccess,
     pub owner_label: String,
 }
 
@@ -781,7 +784,7 @@ fn container_body(name: &str, spec: &CreateSpec) -> bollard::models::ContainerCr
             "import time; time.sleep(31536000)".to_string(),
         ]),
         working_dir: Some(spec.workspace_path.clone()),
-        network_disabled: Some(true),
+        network_disabled: Some(spec.network_access == NetworkAccess::Disabled),
         exposed_ports: Some(Vec::new()),
         volumes: Some(Vec::new()),
         labels: Some(labels),
@@ -793,7 +796,13 @@ fn container_body(name: &str, spec: &CreateSpec) -> bollard::models::ContainerCr
             nano_cpus: Some(spec.nano_cpus),
             pids_limit: Some(spec.pids),
             readonly_rootfs: Some(true),
-            network_mode: Some("none".to_string()),
+            network_mode: Some(
+                match spec.network_access {
+                    NetworkAccess::Disabled => "none",
+                    NetworkAccess::Bridge => "bridge",
+                }
+                .to_string(),
+            ),
             cap_drop: Some(vec!["ALL".to_string()]),
             cap_add: Some(Vec::new()),
             security_opt: Some(vec!["no-new-privileges:true".to_string()]),
@@ -918,4 +927,43 @@ fn is_not_found(err: &bollard::errors::Error) -> bool {
             ..
         }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_spec(network_access: NetworkAccess) -> CreateSpec {
+        CreateSpec {
+            image: "python:3.12-slim".into(),
+            runtime: "runc".into(),
+            memory: 64 * 1024 * 1024,
+            nano_cpus: 100_000_000,
+            pids: 32,
+            workspace_path: "/workspace".into(),
+            workspace_bytes: 1024 * 1024,
+            guest_uid: 1000,
+            guest_gid: 1000,
+            network_access,
+            owner_label: "test-owner".into(),
+        }
+    }
+
+    #[test]
+    fn network_access_maps_to_matching_docker_fields() {
+        for (access, disabled, mode) in [
+            (NetworkAccess::Disabled, true, "none"),
+            (NetworkAccess::Bridge, false, "bridge"),
+        ] {
+            let body = container_body("test", &create_spec(access));
+            assert_eq!(body.network_disabled, Some(disabled));
+            assert_eq!(
+                body.host_config
+                    .expect("container host config")
+                    .network_mode
+                    .as_deref(),
+                Some(mode)
+            );
+        }
+    }
 }

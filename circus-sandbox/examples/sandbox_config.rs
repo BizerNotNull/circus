@@ -1,11 +1,20 @@
 use std::time::Duration;
 
 use circus_sandbox::runtime::ResourceLimits;
-use circus_sandbox::{DockerEndpoint, IoLimits, IsolationConfig, RuntimeName, SandboxConfig};
+use circus_sandbox::{
+    DockerEndpoint, IoLimits, IsolationConfig, NetworkAccess, RuntimeName, SandboxConfig,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let isolation =
-        IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 1000, 1000)?;
+    let isolation = IsolationConfig::linux_enforced(
+        true,
+        true,
+        true,
+        NetworkAccess::Disabled,
+        "/workspace",
+        1000,
+        1000,
+    )?;
     let limits = ResourceLimits::new(64 * 1024 * 1024, 250, 3, 16 * 1024 * 1024, 1024 * 1024)?;
     let valid = SandboxConfig::new(
         DockerEndpoint::parse("/var/run/docker.sock")?,

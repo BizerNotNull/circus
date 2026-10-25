@@ -77,6 +77,8 @@ cargo run --locked --example resource_policy
 
 容器后端的配置、生命周期、文件传输和已知限制见 [Linux Docker + runc 文档](docs/docker-linux-runc.md)，设计取舍见 [ADR-0001](docs/adr-0001-docker-linux-runc.md)。最小前置条件：Linux Docker Engine（本地 Unix socket；Windows 开发机可使用 Linux Docker Desktop named pipe）、已存在的 Linux 镜像、镜像内 Python 3，以及 cgroup v2 用于运行集成测试。镜像不会自动拉取；声明 `VOLUME` 的镜像不支持。
 
+容器网络通过公开 `NetworkAccess::{Disabled, Bridge}` 显式选择；现有调用点都传 `Disabled`。`Disabled` 对应 Docker `network_disabled=true`/模式 `none`，`Bridge` 对应 `false`/模式 `bridge`。Bridge 是普通 Docker bridge，允许一般出站访问，没有目的地址白名单；网络/MCP 工作负载可能泄露数据。它不是 MCP 专用网关；未来 MCP 需要独立的、更窄的受限通道，目前尚未实现。出站 HTTPS 的真实 Docker opt-in smoke 测试见 `docker_bridge_allows_outbound_https`。
+
 `DockerSandbox::open_process(ProcessRequest)` 在已启动的 sandbox 中启动 argv 子进程，提供有界异步 stdin/stdout/stderr 流。请求包含超时与 stdout/stderr 共用的输出字节上限；`close_stdin` 发送 EOF，`wait` 返回退出码（非零退出也是正常完成），而正常进程退出不会销毁 sandbox。输出按带流类型的块到达，边界不保证对应行或写入。超时或输出超限会销毁所属 sandbox。Docker 没有此处可用的 exec 级 kill API：显式 `close` 或丢弃仍活动的 session 会断开流并销毁整个所属容器，以确保子进程不能遗留；显式关闭会等待 I/O 清理。每个 sandbox 同时只允许一个活动进程 session，清理不会影响其他 sandbox。
 
 集成测试默认被忽略且不会连接 Docker。显式运行真实后端：

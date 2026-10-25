@@ -2,7 +2,21 @@
 
 This checkout implements one real backend: an explicit local Docker Engine endpoint running a Linux image with the `runc` runtime. The SDK does not pull images and does not expose bollard types. Callers provide the image, endpoint, resource limits, isolation policy, and output bounds; the owner label is generated internally per sandbox.
 
-The adapter sets memory and swap, milli-CPU to nano-CPU, pids, a bounded tmpfs workspace, read-only root, `none` networking, `no-new-privileges`, and `ALL` capability drop. It creates no host binds, volumes, credentials, or ports. Workspace files are staged from the existing capability-scoped `Workspace`. The guest file transport requires Python 3 and rejects symlinks during running-phase file operations.
+The adapter sets memory and swap, milli-CPU to nano-CPU, pids, a bounded tmpfs workspace, read-only root, `no-new-privileges`, and `ALL` capability drop. Network access is explicit: `Disabled` sets Docker `network_disabled=true` and network mode `none`; `Bridge` sets `false` and `bridge`. Every existing callsite selects `Disabled`. `Bridge` is ordinary Docker bridge networking with unrestricted destination egress, not an allowlist or MCP-only channel; network/MCP workloads can leak data. A future MCP gateway needs a separate, narrower restricted channel and is not implemented. The adapter creates no host binds, volumes, credentials, or ports. Workspace files are staged from the existing capability-scoped `Workspace`. The guest file transport requires Python 3 and rejects symlinks during running-phase file operations.
+
+To opt in to unrestricted bridge egress, pass `NetworkAccess::Bridge` to `IsolationConfig::linux_enforced`:
+
+```rust
+let isolation = IsolationConfig::linux_enforced(
+    true,
+    true,
+    true,
+    NetworkAccess::Bridge,
+    "/workspace",
+    65534,
+    65534,
+)?;
+```
 
 `CommandRequest` uses argv form, bounded stdout and stderr, and a required timeout. Timeout, output overflow, and cancellation destroy the entire owned container so descendants cannot survive. Dropping the create future retains the generated name and owner label and recovers only a matching container. Cleanup errors retain ownership and are returned; retry `destroy` is required. Start and lifecycle operations also use the configured I/O timeout and may destroy the container when the engine call cannot be accepted safely.
 
@@ -32,5 +46,11 @@ cargo run --locked --example docker_sandbox
 ```
 
 The test requires both the explicit opt-in `CIRCUS_DOCKER_SANDBOX=1` and `CIRCUS_DOCKER_ENDPOINT`; the example requires the endpoint but does not check the opt-in. Both accept `CIRCUS_DOCKER_IMAGE`, defaulting to `python:3.12-slim`, and require a locally available Linux image containing Python 3. Image preparation is a caller/CI responsibility, not an SDK pull feature. The example stages, reads, and executes against a workspace file, pauses/resumes, then destroys its sandbox. Only clean up containers owned by the current run; never use global prune.
+
+The HTTPS egress smoke inside the ignored suite needs outbound Internet. To run only that case, use:
+
+```bash
+cargo test --locked --test docker_sandbox docker_bridge_allows_outbound_https -- --ignored
+```
 
 Snapshot, Docker commit, HTTP, Git, environment resolution/pull, pools, and other runtimes are planned but not implemented. A read-only root plus tmpfs workspace would not preserve workspace writes in a Docker commit; a future snapshot must archive and restore files.

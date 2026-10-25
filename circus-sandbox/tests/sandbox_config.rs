@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use circus_sandbox::runtime::ResourceLimits;
 use circus_sandbox::{
-    ConfigError, DockerEndpoint, IoLimits, IsolationConfig, RuntimeName, SandboxConfig,
+    ConfigError, DockerEndpoint, IoLimits, IsolationConfig, NetworkAccess, RuntimeName,
+    SandboxConfig,
 };
 
 fn limits(pids: u32) -> ResourceLimits {
@@ -10,13 +11,30 @@ fn limits(pids: u32) -> ResourceLimits {
 }
 
 fn isolation() -> IsolationConfig {
-    IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 1000, 1000).unwrap()
+    IsolationConfig::linux_enforced(
+        true,
+        true,
+        true,
+        NetworkAccess::Disabled,
+        "/workspace",
+        1000,
+        1000,
+    )
+    .unwrap()
 }
 
 #[test]
 fn rejects_insecure_flags_and_remote_values() {
     assert!(matches!(
-        IsolationConfig::linux_enforced(false, true, true, true, "/workspace", 1000, 1000),
+        IsolationConfig::linux_enforced(
+            false,
+            true,
+            true,
+            NetworkAccess::Disabled,
+            "/workspace",
+            1000,
+            1000
+        ),
         Err(ConfigError::IsolationNotEnforced)
     ));
     assert!(DockerEndpoint::parse("tcp://127.0.0.1:2375").is_err());
@@ -69,5 +87,17 @@ fn accepts_valid_configuration_and_exposes_typed_values() {
     assert_eq!(config.image(), "alpine:3.20");
     assert_eq!(config.runtime().as_str(), "runc");
     assert_eq!(config.isolation().workspace_path(), "/workspace");
+    assert_eq!(config.isolation().network_access(), NetworkAccess::Disabled);
+    let bridge = IsolationConfig::linux_enforced(
+        true,
+        true,
+        true,
+        NetworkAccess::Bridge,
+        "/workspace",
+        1000,
+        1000,
+    )
+    .unwrap();
+    assert_eq!(bridge.network_access(), NetworkAccess::Bridge);
     assert_eq!(config.output_limit_bytes(), 4096);
 }

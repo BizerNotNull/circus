@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use circus_sandbox::{
-    CommandRequest, DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig, ResourceLimits,
-    RuntimeName, SandboxConfig,
+    CommandRequest, DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig, NetworkAccess,
+    ResourceLimits, RuntimeName, SandboxConfig,
 };
 
 #[tokio::main]
@@ -11,8 +11,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image =
         std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".to_string());
     let limits = ResourceLimits::new(64 * 1024 * 1024, 100, 32, 8 * 1024 * 1024, 1024 * 1024)?;
-    let isolation =
-        IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?;
+    let isolation = IsolationConfig::linux_enforced(
+        true,
+        true,
+        true,
+        NetworkAccess::Disabled,
+        "/workspace",
+        65534,
+        65534,
+    )?;
     let config = SandboxConfig::new(
         endpoint,
         image,
