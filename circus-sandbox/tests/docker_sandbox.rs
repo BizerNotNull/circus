@@ -7,6 +7,8 @@ use circus_sandbox::{
 };
 
 const PY: &str = "python3";
+// OCI startup and exec helpers temporarily consume additional PID slots.
+const TEST_PIDS: u32 = 32;
 
 fn enabled() {
     assert_eq!(
@@ -23,7 +25,7 @@ fn endpoint() -> Result<DockerEndpoint, Box<dyn std::error::Error>> {
 }
 
 fn config() -> Result<SandboxConfig, Box<dyn std::error::Error>> {
-    let limits = ResourceLimits::new(64 * 1024 * 1024, 100, 8, 8 * 1024 * 1024, 1024)?;
+    let limits = ResourceLimits::new(64 * 1024 * 1024, 100, TEST_PIDS, 8 * 1024 * 1024, 1024)?;
     Ok(SandboxConfig::new(
         endpoint()?,
         std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
@@ -100,7 +102,7 @@ async fn docker_linux_runc_lifecycle() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(status.runtime, "runc");
     assert_eq!(status.memory_bytes, 64 * 1024 * 1024);
     assert_eq!(status.nano_cpus, 100_000_000);
-    assert_eq!(status.pids_limit, 8);
+    assert_eq!(status.pids_limit, i64::from(TEST_PIDS));
     assert!(status.readonly_root && status.network_mode == "none");
     assert!(status.bind_count == 0 && status.cap_drop.iter().any(|c| c == "ALL"));
     let security = f.sandbox().exec(py(&["-c", r###"from pathlib import Path; s=Path('/proc/self/status').read_text(); print(next(x for x in s.splitlines() if x.startswith('NoNewPrivs:'))); print(next(x for x in s.splitlines() if x.startswith('CapEff:')))"###])).await?;
@@ -118,7 +120,7 @@ async fn docker_linux_runc_lifecycle() -> Result<(), Box<dyn std::error::Error>>
     let limits = f.sandbox().exec(py(&["-c", r###"from pathlib import Path; root=Path('/sys/fs/cgroup'); print((root/'memory.max').read_text().strip()); print((root/'pids.max').read_text().strip()); print((root/'cpu.max').read_text().strip())"###])).await?;
     let limit_text = String::from_utf8(limits.stdout)?;
     assert_eq!(limit_text.lines().next(), Some("67108864"));
-    assert_eq!(limit_text.lines().nth(1), Some("8"));
+    assert_eq!(limit_text.lines().nth(1), Some("32"));
     assert_eq!(limit_text.lines().nth(2), Some("10000 100000"));
     let out = f.sandbox().exec(py(&["-c", r###"from pathlib import Path; Path('/workspace/hello.txt').write_bytes(b'changed'); Path('/workspace/staged/guest.txt').write_bytes(b'guest')"###])).await?;
     assert_eq!(out.exit_code, 0);
