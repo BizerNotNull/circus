@@ -189,6 +189,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Merge recipe for cargo-llvm-cov 0.6.17: --no-report retains
+          # artifacts (do not pass --no-clean with --no-report; that errors).
           cargo llvm-cov clean --workspace
           # Non-ignored default suite first.
           cargo llvm-cov --locked --package circus-sandbox --no-report
@@ -204,7 +206,7 @@ jobs:
             docker_process \
             docker_http_api
           do
-            cargo llvm-cov --locked --package circus-sandbox --no-report --no-clean \
+            cargo llvm-cov --locked --package circus-sandbox --no-report \
               --test "$suite" -- --ignored
           done
           cargo llvm-cov report --lcov \
