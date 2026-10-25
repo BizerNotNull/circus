@@ -119,6 +119,7 @@ export type CleanupStatus = z.infer<typeof CleanupStatusSchema>;
 const failure = z.strictObject({
   code: z.enum([
     "invalid_request",
+    "image_preparation",
     "cancelled",
     "timed_out",
     "backpressure",

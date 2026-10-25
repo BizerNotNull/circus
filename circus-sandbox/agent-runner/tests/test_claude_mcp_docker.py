@@ -96,8 +96,12 @@ class ClaudeMcpDockerTests(unittest.TestCase):
             connection = service.config()
             del connection["headers"]
             connection["headersFile"] = str(headers)
-            config = {"version": 1, "agent": "claude-code", "dockerEndpoint": os.environ["CIRCUS_DOCKER_ENDPOINT"],
-                      "agentImage": os.environ["CIRCUS_CLAUDE_IMAGE"], "python": sys.executable,
+            config = {"version": 1, "agent": "claude-code",
+                      "backend": {"kind": "docker", "endpoint": os.environ["CIRCUS_DOCKER_ENDPOINT"],
+                                  "image": os.environ["CIRCUS_CLAUDE_IMAGE"], "runtime": "runc"},
+                      "image": {"platform": {"os": "linux", "architecture": "amd64"},
+                                "pullPolicy": "local-only", "prepareTimeoutMs": 30000},
+                      "python": sys.executable,
                       "resources": {"memoryBytes": 536870912, "cpuMillis": 1000, "maxProcesses": 128,
                                     "workspaceBytes": 134217728, "maxFileBytes": 2097152},
                       "model": {"baseUrl": service.base + "/v1", "model": "circus-fixture", "apiKeyFile": str(key),

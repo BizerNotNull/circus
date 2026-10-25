@@ -16,6 +16,7 @@ type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 fn runner() -> Result<AgentRunner> {
     assert_eq!(std::env::var("CIRCUS_DOCKER_SANDBOX").as_deref(), Ok("1"));
     Ok(AgentRunner::new(RunnerConfig {
+        image_preparation: None,
         backend: BackendConfig::docker(
             std::env::var("CIRCUS_DOCKER_ENDPOINT")?,
             std::env::var("CIRCUS_AGENT_IMAGE")?,

@@ -41,14 +41,17 @@ struct FailureFrame {
 }
 
 impl Peer {
-    fn new() -> Self {
-        let endpoint = if cfg!(windows) {
+    fn missing_endpoint() -> &'static str {
+        if cfg!(windows) {
             "npipe:////./pipe/circus-stdio-missing-engine"
         } else {
             "unix:///circus-stdio-missing-engine.sock"
-        };
+        }
+    }
+
+    fn new() -> Self {
         Self::with_backend(
-            endpoint,
+            Self::missing_endpoint(),
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             &std::env::current_exe().unwrap(),
         )
@@ -58,15 +61,14 @@ impl Peer {
         let directory = tempfile::tempdir().unwrap();
         let credential = directory.path().join("key");
         std::fs::write(&credential, "host-only-test-sentinel").unwrap();
+        let json = config_json(endpoint, image, python, &credential);
+        let mut peer = Self::spawn(directory, &json);
+        assert_eq!(peer.read().kind, "ready");
+        peer
+    }
+
+    fn spawn(directory: tempfile::TempDir, json: &str) -> Self {
         let config = directory.path().join("config.json");
-        // This endpoint must fail before allocating a sandbox; no fake runner.
-        let json = format!(
-            r#"{{"version":1,"dockerEndpoint":{},"agentImage":{},"python":{},"resources":{{"memoryBytes":536870912,"cpuMillis":1000,"maxProcesses":128,"workspaceBytes":134217728,"maxFileBytes":2097152}},"model":{{"baseUrl":"https://unused.invalid/v1","model":"test","apiKeyFile":{}}}}}"#,
-            sonic_rs::to_string(endpoint).unwrap(),
-            sonic_rs::to_string(image).unwrap(),
-            sonic_rs::to_string(python).unwrap(),
-            sonic_rs::to_string(&credential).unwrap()
-        );
         std::fs::write(&config, json).unwrap();
         let mut process = Command::new(env!("CARGO_BIN_EXE_circus-stdio-bridge"))
             .args(["--config", config.to_str().unwrap()])
@@ -77,14 +79,12 @@ impl Peer {
             .unwrap();
         let input = process.stdin.take();
         let output = BufReader::new(process.stdout.take().unwrap());
-        let mut peer = Self {
+        Self {
             process,
             input,
             output,
             _directory: directory,
-        };
-        assert_eq!(peer.read().kind, "ready");
-        peer
+        }
     }
 
     fn write(&mut self, frame: &str) {
@@ -180,25 +180,159 @@ impl Drop for Peer {
     }
 }
 
+fn config_json(
+    endpoint: &str,
+    image: &str,
+    python: &std::path::Path,
+    credential: &std::path::Path,
+) -> String {
+    format!(
+        r#"{{"version":1,"backend":{{"kind":"docker","endpoint":{},"image":{},"runtime":"runc"}},"image":{{"platform":{{"os":"linux","architecture":"amd64"}},"pullPolicy":"local-only","prepareTimeoutMs":30000}},"python":{},"resources":{{"memoryBytes":536870912,"cpuMillis":1000,"maxProcesses":128,"workspaceBytes":134217728,"maxFileBytes":2097152}},"model":{{"baseUrl":"https://unused.invalid/v1","model":"test","apiKeyFile":{}}}}}"#,
+        sonic_rs::to_string(endpoint).unwrap(),
+        sonic_rs::to_string(image).unwrap(),
+        sonic_rs::to_string(python).unwrap(),
+        sonic_rs::to_string(credential).unwrap()
+    )
+}
+
+fn reject_configuration(configure: impl FnOnce(String) -> String) {
+    let directory = tempfile::tempdir().unwrap();
+    let credential = directory.path().join("key");
+    std::fs::write(&credential, "host-only-test-sentinel").unwrap();
+    let config = config_json(
+        Peer::missing_endpoint(),
+        "circus-agent:test",
+        &std::env::current_exe().unwrap(),
+        &credential,
+    );
+    let mut peer = Peer::spawn(directory, &configure(config));
+    peer.close();
+    assert!(!peer.wait().success());
+    let frame = peer.read();
+    assert_eq!(frame.kind, "error");
+    assert_eq!(frame.code.as_deref(), Some("configuration"));
+    let mut extra = String::new();
+    assert_eq!(peer.output.read_line(&mut extra).unwrap(), 0);
+    use std::io::Read;
+    let mut diagnostics = String::new();
+    peer.process
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut diagnostics)
+        .unwrap();
+    assert!(!diagnostics.contains("host-only-test-sentinel"));
+}
+
+#[test]
+fn obsolete_runner_configuration_is_rejected_before_ready() {
+    reject_configuration(|config| {
+        let start = config.find(r#""backend":"#).unwrap();
+        let end = config.find(r#","python":"#).unwrap();
+        format!(
+            "{}{}{}",
+            &config[..start],
+            r#""dockerEndpoint":"unix:///unused.sock","agentImage":"circus-agent:test""#,
+            &config[end..]
+        )
+    });
+    for obsolete in ["dockerEndpoint", "agentImage"] {
+        reject_configuration(|config| {
+            config.replacen('{', &format!(r#"{{"{obsolete}":"obsolete","#), 1)
+        });
+    }
+}
+
+#[test]
+fn invalid_backend_and_image_configuration_is_rejected_before_ready() {
+    for (valid, invalid) in [
+        (r#""image":"circus-agent:test""#, r#""image":"""#),
+        (
+            r#""image":"circus-agent:test""#,
+            r#""image":"invalid host-only-test-sentinel""#,
+        ),
+        (r#""runtime":"runc""#, r#""runtime":"runsc""#),
+        (r#""os":"linux""#, r#""os":"windows""#),
+        (r#""architecture":"amd64""#, r#""architecture":"x86_64""#),
+        (
+            r#""architecture":"amd64""#,
+            r#""architecture":"amd64","variant":"""#,
+        ),
+        (r#""prepareTimeoutMs":30000"#, r#""prepareTimeoutMs":0"#),
+        (r#""prepareTimeoutMs":30000"#, r#""prepareTimeoutMs":-1"#),
+        (r#""pullPolicy":"local-only""#, r#""pullPolicy":"always""#),
+    ] {
+        reject_configuration(|config| config.replacen(valid, invalid, 1));
+    }
+    reject_configuration(|config| {
+        config.replace(
+            &sonic_rs::to_string(Peer::missing_endpoint()).unwrap(),
+            r#""https://user:host-only-test-sentinel@daemon.invalid""#,
+        )
+    });
+}
+
+fn containerd_config(config: String) -> String {
+    let start = config.find(r#""backend":"#).unwrap();
+    let end = config.find(r#","image":{"platform""#).unwrap();
+    format!(
+        "{}{}{}",
+        &config[..start],
+        r#""backend":{"kind":"containerd","socket":"/run/circus-missing-containerd.sock","namespace":"circus-test","image":"circus-agent:test","runtime":"runc","snapshotter":"overlayfs"}"#,
+        &config[end..]
+    )
+}
+
+#[cfg(not(all(unix, feature = "containerd")))]
+#[test]
+fn unavailable_containerd_is_rejected_before_ready() {
+    reject_configuration(containerd_config);
+}
+
+#[cfg(all(unix, feature = "containerd"))]
+#[test]
+fn invalid_containerd_descriptors_are_rejected_before_ready() {
+    for (valid, invalid) in [
+        (r#""runtime":"runc""#, r#""runtime":"runsc""#),
+        (r#""snapshotter":"overlayfs""#, r#""snapshotter":"native""#),
+        (
+            r#""namespace":"circus-test""#,
+            r#""namespace":"invalid/namespace""#,
+        ),
+        (
+            r#""socket":"/run/circus-missing-containerd.sock""#,
+            r#""socket":"relative.sock""#,
+        ),
+    ] {
+        reject_configuration(|config| containerd_config(config).replace(valid, invalid));
+    }
+}
+
 const START: &str = "{\"v\":1,\"type\":\"start\",\"requestId\":\"client-a\",\"request\":{\"prompt\":\"test\",\"inputFiles\":[],\"outputPaths\":[],\"timeoutMs\":1000}}\n";
 
 #[test]
-fn real_entry_reports_backend_failure_without_claiming_success() {
+fn real_entry_reports_image_preparation_failure_without_allocating_a_sandbox() {
     let mut peer = Peer::new();
     peer.write(START);
     assert_eq!(peer.read().kind, "accepted");
     loop {
         let frame = peer.read();
+        assert!(
+            frame
+                .event
+                .as_ref()
+                .and_then(|event| event.instance_id.as_ref())
+                .is_none(),
+            "image preparation must fail before sandbox creation"
+        );
         if frame.kind == "result" {
             let result = frame.result.unwrap();
             assert_eq!(result.status, "failed");
             assert_eq!(result.cleanup, "confirmed");
             let error = result.error.unwrap();
-            assert_eq!(error.code, "sandbox");
-            assert_eq!(
-                error.message,
-                "Agent task failed; inspect the error code and cleanup status"
-            );
+            assert_eq!(error.code, "image_preparation");
+            assert!(!error.message.contains("host-only-test-sentinel"));
+            assert!(!error.message.contains(Peer::missing_endpoint()));
             break;
         }
     }

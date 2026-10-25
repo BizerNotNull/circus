@@ -79,6 +79,11 @@ jobs:
         shell: bash
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
 
+      - name: Test runner and bridge with containerd feature
+        if: matrix.suite == 'containerd_sandbox'
+        shell: bash
+        run: cargo test --locked --features containerd -p circus-agent-runner -p circus-stdio-bridge --all-targets
+
       - name: Start containerd
         shell: bash
         run: |
