@@ -184,6 +184,14 @@ CIRCUS_DOCKER_PULL_IMAGE=alpine:3.21 \
   cargo test --locked --test docker_image_pull -- --ignored --test-threads=1
 ```
 
+### 显式 containerd 镜像准备
+
+Unix + `containerd` feature 提供独立的 `environment::prepare_containerd_image(ContainerdImageRequest)`；构造参数显式指定绝对 Unix socket、namespace、reference、`ImagePlatform` 和整个操作的 timeout，不读取环境配置。默认复用 `ImagePullPolicy::LocalOnly`，仅显式 `IfMissing` 在 image record 缺失时允许一次无认证 daemon transfer。连接、查询、transfer、元数据平台验证和不可变别名注册共用 deadline；无隐式凭据、重试或 cache 删除。取消后 daemon transfer/cache 仍可能继续改变。
+
+结果返回 selected manifest digest、实际平台和同 namespace 中的 digest-qualified alias，可直接传给 `BackendConfig::containerd`；已有 alias 的 digest、media type 或 size 不同时拒绝，不覆盖；annotations 不参与内容身份比较。Local-only 可能写入 alias metadata，但不访问 registry；不创建容器、不解包、不强制宿主平台，也不防止外部删除。Docker API/default 与 sandbox 创建不自动拉取的行为保持不变。
+
+`containerd_image_environment` 要求显式 `CIRCUS_CONTAINERD=1` 与 `CIRCUS_CONTAINERD_SOCKET`、`CIRCUS_CONTAINERD_NAMESPACE`、`CIRCUS_CONTAINERD_IMAGE`、`CIRCUS_CONTAINERD_OS`、`CIRCUS_CONTAINERD_ARCH`、`CIRCUS_CONTAINERD_TIMEOUT_SECS`、`CIRCUS_CONTAINERD_PULL_POLICY=local-only|if-missing`；可选 `CIRCUS_CONTAINERD_VARIANT`。输出真实 alias/digest/platform，然后以原始 source request 再次 local-only 查询以演示缓存复用，保留 index-only variant 的校验证据；direct-manifest alias 本身不保留该证据。完整 Linux 命令、缺失镜像 opt-in 方法、协议依据和限制见 [containerd 文档](docs/containerd-runc.md#显式镜像准备)。
+
 ### 环境准备计划与稳定标识
 
 `EnvironmentPlan::new(ImageRequest, Vec<PrepareStep>)` 构造显式有序的准备计划。`PrepareStep::new(argv, PinnedVersion, timeout, output_limit_bytes)` 只接受分开的 argv，不经过 shell；`PrepareStep::unpinned(...)` 可以表示未固定的步骤，但 `EnvironmentPlan::new` 会在任何 Docker 连接或容器分配之前以 `PlanError::UnpinnedInput { index }` 拒绝它，不会静默接受不可复现的输入。
@@ -358,6 +366,13 @@ npm --prefix circus-sandbox/qa run architecture
 - 新增 `ImagePullPolicy::{LocalOnly, IfMissing}` 与 `ImageRequest::with_pull_policy`/`pull_policy`；默认仍为 local-only，`EnvironmentPlan` 使用同一请求策略，sandbox 创建仍不拉取。
 - `IfMissing` 仅在首次 inspect 确认缺失时发起一次无认证 SDK 拉取，再 inspect 原引用并校验 os/arch，返回不可变 ID；全流程共用 deadline，无重试、回退或隐式凭据。共享镜像 cache 在失败/取消时仍可能改变，库不删除镜像。
 - `image_environment` 支持显式 `CIRCUS_DOCKER_PULL_POLICY`；独立忽略套件 `docker_image_pull` 需要额外网络 opt-in 和初始缺失的公开镜像，不改变既有 Docker CI 的环境要求。
+
+### 未发布：显式 containerd 镜像准备
+
+- 新增 Unix + `containerd` feature 的 `ContainerdImageRequest`、`PreparedContainerdImage`、`ContainerdImageError` 和 `prepare_containerd_image`，复用现有平台与拉取策略，默认 local-only；Docker API/default 不变。
+- 通过 daemon gRPC 查询/可选 transfer 并验证显式平台，返回 selected manifest digest 与同 namespace 的不可变别名；已有别名 digest、media type 或 size 不同则拒绝，annotations 不参与内容身份比较。整个操作共用 deadline，无认证、重试或共享 cache 删除。
+- 新增显式环境配置示例、请求校验单元测试、具体本地 gRPC peer 的确定性 `containerd_image_policy` 套件，以及默认忽略的真实 `containerd_image_environment` 套件；后者在自有唯一 namespace 中验证 pull、不可变 alias/cache 和实际 sandbox start/exec/destroy 与自有清理。本次已在 Linux containerd 2.2.1、公开 ECR 镜像和 GC 压力下执行，结果见对应 PR；不继承其他历史运行记录。
+- 修复既有 containerd 解包：提取快照改用唯一 key，不再与提交后的 chain key 冲突；整个解包处于 namespace lease 下，避免 GC 在 Apply 期间删除挂载点；完成后在 image config 记录 chain 引用，和 containerd 自带 unpacker 的回收可达性一致。
 
 ### 未发布：环境准备计划与稳定标识
 

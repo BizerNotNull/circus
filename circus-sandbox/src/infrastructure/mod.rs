@@ -14,6 +14,8 @@ mod containerd_image;
 #[cfg(all(unix, feature = "containerd"))]
 mod containerd_io;
 #[cfg(all(unix, feature = "containerd"))]
+mod containerd_prepare;
+#[cfg(all(unix, feature = "containerd"))]
 mod containerd_spec;
 mod docker;
 mod engine;
@@ -38,6 +40,10 @@ pub(crate) use backend::{Backend, BackendProcess, CommonSpec, InstanceId, Prepar
 pub(crate) use containerd::ContainerdBackend;
 #[cfg(all(unix, feature = "containerd"))]
 pub(crate) use containerd_config::{ContainerdConfig, ContainerdConfigError};
+#[cfg(all(unix, feature = "containerd"))]
+pub(crate) use containerd_prepare::{
+    ContainerdImageFailure, ContainerdImageSpec, ContainerdPlatform, prepare_containerd_image,
+};
 pub(crate) use docker::{DockerBackend, DockerConfig, DockerConfigError, DockerEndpoint};
 pub(crate) use engine::{
     Engine, EngineError, EngineErrorKind, ImageInfo, OutputPhase, ProcessChunk, ProcessSpec,
