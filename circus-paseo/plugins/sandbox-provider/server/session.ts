@@ -87,12 +87,14 @@ export class SandboxSession {
         return [file.path, bytes];
       }),
     );
-    // Host system prompts, env, MCP servers and cwd never enter the task request.
+    // Only connection/tool IDs cross this boundary. Host MCP configurations,
+    // credentials, system prompts, env and cwd never enter the task request.
     const task = this.context.client.start({
       prompt: text,
       inputFiles,
       outputPaths: this.options.outputPaths,
       timeoutMs: this.options.timeoutMs,
+      mcpGrants: this.options.mcpGrants,
     });
     const state: Exclude<RunState, { status: "ready" }> = {
       status: "active",

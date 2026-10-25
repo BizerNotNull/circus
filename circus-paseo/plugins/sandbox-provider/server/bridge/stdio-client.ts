@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { spawnProcess, terminateProcess } from "@getpaseo/plugin/server";
 import { z } from "zod";
+import type { McpGrant } from "../../shared/mcp.js";
 import { EventStream } from "./event-stream.js";
 import { CircusBridgeError, Deferred, FrameDecoder } from "./framing.js";
 import {
@@ -32,6 +33,7 @@ export interface CircusTaskRequest {
   inputFiles: Record<string, Uint8Array>;
   outputPaths: string[];
   timeoutMs: number;
+  mcpGrants?: McpGrant[];
 }
 export type CircusTaskResult =
   | Exclude<WireResult, { status: "succeeded" }>
@@ -101,7 +103,11 @@ export class CircusStdioClient {
       path,
       data: Buffer.from(bytes).toString("base64"),
     }));
-    const parsed = TaskRequestSchema.safeParse({ ...request, inputFiles });
+    const wireRequest = { ...request, inputFiles };
+    // COMPAT(sandboxMcpGrants): added in v0.13.0-beta.2, remove after 2027-04-25
+    // once the minimum supported bridge accepts the optional v1 mcpGrants field.
+    if (wireRequest.mcpGrants?.length === 0) delete wireRequest.mcpGrants;
+    const parsed = TaskRequestSchema.safeParse(wireRequest);
     if (!parsed.success)
       throw new CircusBridgeError("invalid_request", "Task request violates path or byte limits");
     const startFrame: ClientFrame = {

@@ -119,7 +119,7 @@ jobs:
 
       - name: Check Codex model bridge policy and HTTPS transport
         if: ${{ !cancelled() && steps.rust.outcome == 'success' && runner.os == 'Linux' }}
-        run: python3 -B -m unittest discover -s agent-runner/tests -p 'test_codex_*.py' -v
+        run: python3 -B -m unittest discover -s agent-runner/tests -p 'test_*.py' -v
 
       - name: Run example
         if: ${{ !cancelled() && steps.rust.outcome == 'success' }}

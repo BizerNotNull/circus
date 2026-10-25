@@ -330,6 +330,8 @@ name = "circus-stdio-bridge"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "cap-fs-ext",
+ "cap-std",
  "circus-agent-runner",
  "circus-sandbox",
  "serde",

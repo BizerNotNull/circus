@@ -1,3 +1,4 @@
+mod claude;
 mod docker;
 
 use std::collections::BTreeMap;

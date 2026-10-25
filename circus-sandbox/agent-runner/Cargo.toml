@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
 license = "Apache-2.0"
-description = "Single-task Codex caller for Circus sandbox with events, cancellation, and owned cleanup."
+description = "Single-task agent caller for Circus sandbox with events, cancellation, and owned cleanup."
 
 [dependencies]
 circus-sandbox = { path = "..", version = "0.1.0" }

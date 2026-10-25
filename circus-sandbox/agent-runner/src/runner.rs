@@ -14,16 +14,20 @@ use crate::config::{MAX_ARTIFACT_BYTES, PROCESS_BYTES, project_path};
 use crate::events::{EVENT_QUEUE, Events};
 use crate::model::CleanupOwner;
 use crate::{
-    CleanupHandle, RunnerConfig, TaskError, TaskEvent, TaskFailure, TaskOutcome, TaskOutput,
-    TaskPhase, TaskRequest,
+    AgentKind, CleanupHandle, RunnerConfig, TaskError, TaskEvent, TaskFailure, TaskOutcome,
+    TaskOutput, TaskPhase, TaskRequest,
 };
 
 pub(crate) const BRIDGE: &str = include_str!("codex_bridge.py");
+pub(crate) const MCP_HOST: &str = include_str!("mcp.py");
+const MCP_GUEST: &str = include_str!("mcp_guest.py");
 
 /// Reusable caller configuration. Every `start` owns a fresh, isolated sandbox.
 #[derive(Debug, Clone)]
 pub struct AgentRunner {
     config: Arc<RunnerConfig>,
+    agent: AgentKind,
+    mcp_connections: Arc<Vec<crate::McpConnection>>,
 }
 
 impl AgentRunner {
@@ -33,20 +37,59 @@ impl AgentRunner {
         }
         Ok(Self {
             config: Arc::new(config),
+            agent: AgentKind::Codex,
+            mcp_connections: Arc::new(Vec::new()),
         })
+    }
+
+    /// Select a fixed agent adapter; the supplied backend image must contain its CLI.
+    /// Codex uses Responses; Claude Code uses the Anthropic Messages API.
+    pub fn with_agent(mut self, agent: AgentKind) -> Self {
+        self.agent = agent;
+        self
     }
 
     /// Validates before allocation and starts an owned task on the current Tokio
     /// runtime. Consume `next_event` concurrently with `wait`; the event queue is
     /// bounded and does not block cancellation or cleanup.
     pub fn start(&self, request: TaskRequest) -> Result<AgentTask, TaskError> {
-        self.start_controller(request, format!("{BRIDGE}\nmain_host()\n"))
+        self.start_with_mcp(request, Vec::new())
     }
 
+    /// Configure trusted endpoints separately from untrusted task requests.
+    pub fn with_mcp_connections(
+        mut self,
+        connections: Vec<crate::McpConnection>,
+    ) -> Result<Self, TaskError> {
+        crate::mcp::validate_connections(&connections)?;
+        self.mcp_connections = Arc::new(connections);
+        Ok(self)
+    }
+
+    /// Explicit task grants never implicitly authorize every configured tool.
+    pub fn start_with_mcp(
+        &self,
+        request: TaskRequest,
+        grants: Vec<crate::McpGrant>,
+    ) -> Result<AgentTask, TaskError> {
+        let mcp_config = crate::mcp::task_config(&self.mcp_connections, &grants)?;
+        self.start_inner(request, self.agent.host(), mcp_config)
+    }
+
+    #[cfg(test)]
     pub(crate) fn start_controller(
         &self,
         request: TaskRequest,
         controller: String,
+    ) -> Result<AgentTask, TaskError> {
+        self.start_inner(request, controller, "[]".into())
+    }
+
+    fn start_inner(
+        &self,
+        request: TaskRequest,
+        controller: String,
+        mcp_config: String,
     ) -> Result<AgentTask, TaskError> {
         request.validate(self.config.resources.max_file_bytes())?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| TaskError::NoRuntime)?;
@@ -61,9 +104,20 @@ impl AgentRunner {
             outcome,
         };
         let config = self.config.clone();
+        let guest = self.agent.guest();
         runtime.spawn(async move {
             let mut events = Events::new(sender);
-            let result = run(&id, &config, request, &controller, &cancel, &mut events).await;
+            let result = run(
+                &id,
+                &config,
+                request,
+                &controller,
+                &guest,
+                &mcp_config,
+                &cancel,
+                &mut events,
+            )
+            .await;
             let _ = outcome_tx.send(Some(Arc::new(result)));
         });
         Ok(task)
@@ -140,11 +194,14 @@ fn sandbox_error(phase: TaskPhase, source: SandboxError) -> TaskError {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     id: &str,
     config: &RunnerConfig,
     request: TaskRequest,
     controller: &str,
+    guest: &str,
+    mcp_config: &str,
     cancel: &CancellationToken,
     events: &mut Events,
 ) -> TaskOutcome {
@@ -194,7 +251,7 @@ async fn run(
         }
     };
     let result = execute(
-        id, &sandbox, config, request, controller, deadline, cancel, events,
+        id, &sandbox, config, request, controller, guest, mcp_config, deadline, cancel, events,
     )
     .await;
     // Event backpressure may fail execution but must never suppress cleanup.
@@ -221,6 +278,8 @@ async fn execute(
     config: &RunnerConfig,
     request: TaskRequest,
     controller: &str,
+    guest: &str,
+    mcp_config: &str,
     deadline: Instant,
     cancel: &CancellationToken,
     events: &mut Events,
@@ -237,9 +296,12 @@ async fn execute(
     }
     let staging = async {
         sandbox.create_dir_all("project").await?;
-        sandbox
-            .write_file("bridge.py", format!("{BRIDGE}\nmain_guest()\n").as_bytes())
-            .await?;
+        sandbox.write_file("bridge.py", guest.as_bytes()).await?;
+        if mcp_config != "[]" {
+            sandbox
+                .write_file("mcp_guest.py", MCP_GUEST.as_bytes())
+                .await?;
+        }
         for (path, data) in &request.input_files {
             let path = format!("project/{path}");
             if let Some((parent, _)) = path.rsplit_once('/') {
@@ -273,6 +335,10 @@ async fn execute(
         env: BTreeMap::from([
             ("CIRCUS_TASK_TOKEN".into(), token.clone()),
             ("CIRCUS_MODEL".into(), config.model.model.clone()),
+            (
+                "CIRCUS_MCP_ENABLED".into(),
+                if mcp_config == "[]" { "0" } else { "1" }.into(),
+            ),
         ]),
         timeout: deadline
             .saturating_duration_since(Instant::now())
@@ -287,6 +353,7 @@ async fn execute(
         config,
         &request.prompt,
         controller,
+        mcp_config,
         &token,
         deadline,
         cancel,

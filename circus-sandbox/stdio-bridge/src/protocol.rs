@@ -66,6 +66,8 @@ pub struct TaskInput {
     pub input_files: Vec<File>,
     pub output_paths: Vec<String>,
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub mcp_grants: Vec<circus_agent_runner::McpGrant>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -304,6 +306,7 @@ mod tests {
                 }],
                 output_paths: vec![],
                 timeout_ms: 10,
+                mcp_grants: Vec::new(),
             };
             assert!(request.into_task().is_err());
         }
@@ -320,6 +323,7 @@ mod tests {
             input_files: vec![input()],
             output_paths: vec!["a".into()],
             timeout_ms: 10,
+            mcp_grants: Vec::new(),
         };
         assert_eq!(request.into_task().unwrap().input_files["a"], [0, 255]);
         let duplicate = TaskInput {
@@ -327,6 +331,7 @@ mod tests {
             input_files: vec![input(), input()],
             output_paths: vec![],
             timeout_ms: 10,
+            mcp_grants: Vec::new(),
         };
         assert!(duplicate.into_task().is_err());
     }

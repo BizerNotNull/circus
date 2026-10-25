@@ -7,7 +7,7 @@ to its operator-configured HTTPS endpoint; the upstream key never crosses the pi
 import base64
 import hmac
 import http.client
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import queue
@@ -149,6 +149,10 @@ class ModelEndpoint:
         self.key = key
         self.ca_file = ca_file
 
+    def request_headers(self):
+        return {"Authorization": "Bearer " + self.key,
+                "Content-Type": "application/json", "Accept": "text/event-stream"}
+
     def forward(self, body, emit):
         # http.client does not follow redirects or read environment proxy settings.
         # Destination and Authorization come exclusively from host configuration.
@@ -158,10 +162,7 @@ class ModelEndpoint:
             raise BridgeError("model trust configuration failed", "tls") from error
         connection = http.client.HTTPSConnection(self.host, self.port, timeout=30, context=context)
         try:
-            connection.request("POST", self.path, body=body, headers={
-                "Authorization": "Bearer " + self.key,
-                "Content-Type": "application/json", "Accept": "text/event-stream",
-            })
+            connection.request("POST", self.path, body=body, headers=self.request_headers())
             response = connection.getresponse()
             if response.status != 200:
                 # Never echo upstream errors, headers or redirects into guest logs.
@@ -191,6 +192,7 @@ class HostController:
         self.revoked = threading.Event()
         self.text_seen = set()
         self.output_seen = set()
+        self.mcp = None
 
     def rpc(self, request_id, method, params):
         message = {"method": method, "params": params}
@@ -290,6 +292,10 @@ class HostController:
                 self.turn_id = turn_id
             else:
                 raise BridgeError("unexpected response id")
+        elif message.get("method") == "mcpServer/startupStatus/updated":
+            params = message.get("params", {})
+            if self.mcp is not None and params.get("name") == "circus" and params.get("status") == "failed":
+                raise BridgeError("authorized MCP connection could not initialize")
         elif message.get("method") in ("turn/started", "turn/completed"):
             params = message.get("params", {})
             turn = params.get("turn", {})
@@ -351,6 +357,8 @@ class HostController:
                 self.on_rpc(message.get("message"))
             elif channel == "http_request":
                 self.model_request(message)
+            elif channel == "mcp_request" and self.mcp is not None:
+                self.mcp.request(message, self.token)
             elif channel == "rpc_closed":
                 if not self.finished:
                     raise BridgeError("app-server output closed before turn completion")
@@ -377,6 +385,9 @@ def main_host(provider=None):
                                      required("CIRCUS_MODEL_API_KEY", 4096),
                                      os.environ.get("CIRCUS_MODEL_CA_FILE"))
         controller = HostController(provider, model, token, prompt)
+        mcp_config = decode_json(os.environ.get("CIRCUS_MCP_CONFIG", "[]"))
+        if mcp_config:
+            controller.mcp = McpBroker(mcp_config, controller.revoked)
         controller.run()
     except Exception as error:
         # Upstream/client/library errors may include credentials or response content.
@@ -385,29 +396,61 @@ def main_host(provider=None):
     finally:
         if controller:
             controller.revoked.set()
+            if controller.mcp is not None:
+                controller.mcp.close()
 
 
-class GuestServer(HTTPServer):
-    def __init__(self, token):
-        super().__init__(("127.0.0.1", 0), GuestHandler)
+class GuestServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 4
+    def __init__(self, token, handler=None):
+        super().__init__(("127.0.0.1", 0), handler or GuestHandler)
         self.token, self.next_id = token, 0
         self.pending = {}
+        self.pending_mcp, self.next_mcp_id = {}, 0
+        self.slots = threading.BoundedSemaphore(4)
+        self.ids = threading.Lock()
+
+    def process_request(self, request, client_address):
+        request.settimeout(60)
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
 
 
 class GuestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    routes = ("/v1/responses",)
+    auth_header = "Authorization"
+    auth_prefix = "Bearer "
 
     def log_message(self, *_args):
         pass
 
+    def request_metadata(self):
+        return {}
+
     def do_POST(self):
+        if self.path == "/mcp":
+            return self.mcp_post()
         self.close_connection = True
         self.connection.settimeout(30)
-        if (self.path != "/v1/responses" or self.headers.get("Transfer-Encoding")
+        if (self.path not in self.routes or self.headers.get("Transfer-Encoding")
                 or self.headers.get("Content-Encoding")
                 or len(self.headers.get_all("Content-Length", [])) != 1
-                or not hmac.compare_digest(self.headers.get("Authorization", "").encode(),
-                                           ("Bearer " + self.server.token).encode())):
+                or not hmac.compare_digest(self.headers.get(self.auth_header, "").encode(),
+                                           (self.auth_prefix + self.server.token).encode())):
             self.send_error(403)
             return
         try:
@@ -415,10 +458,11 @@ class GuestHandler(BaseHTTPRequestHandler):
         except ValueError:
             self.send_error(400)
             return
-        if not 0 < length <= MAX_BODY or self.server.next_id >= MAX_REQUESTS:
-            self.send_error(413)
-            return
-        request_id = self.server.next_id = self.server.next_id + 1
+        with self.server.ids:
+            if not 0 < length <= MAX_BODY or self.server.next_id >= MAX_REQUESTS:
+                self.send_error(413)
+                return
+            request_id = self.server.next_id = self.server.next_id + 1
         responses = queue.Queue(maxsize=32)
         self.server.pending[request_id] = responses
         started = False
@@ -427,7 +471,8 @@ class GuestHandler(BaseHTTPRequestHandler):
             if len(body) != length:
                 raise BridgeError("incomplete model request")
             send({"channel": "http_request", "id": request_id, "method": "POST", "path": self.path,
-                  "token": self.server.token, "body": base64.b64encode(body).decode("ascii")})
+                  "token": self.server.token, "body": base64.b64encode(body).decode("ascii"),
+                  **self.request_metadata()})
             while True:
                 message = responses.get(timeout=35)
                 kind = message["channel"]
@@ -451,16 +496,58 @@ class GuestHandler(BaseHTTPRequestHandler):
             self.server.pending.pop(request_id, None)
 
 
+    def mcp_post(self):
+        self.close_connection = True
+        self.connection.settimeout(60)
+        if (os.environ.get("CIRCUS_MCP_ENABLED") != "1"
+                or self.headers.get("Transfer-Encoding") or self.headers.get("Content-Encoding")
+                or len(self.headers.get_all("Content-Length", [])) != 1
+                or not hmac.compare_digest(self.headers.get("Authorization", "").encode(),
+                                           ("Bearer " + self.server.token).encode())):
+            self.send_error(403)
+            return
+        try:
+            length = int(self.headers["Content-Length"])
+            with self.server.ids:
+                if not 0 < length <= 1024 * 1024 or self.server.next_mcp_id >= 64:
+                    raise BridgeError("MCP request budget exceeded")
+                request_id = self.server.next_mcp_id = self.server.next_mcp_id + 1
+            body = self.rfile.read(length)
+            if len(body) != length:
+                raise BridgeError("incomplete MCP request")
+            responses = queue.Queue(maxsize=1)
+            self.server.pending_mcp[request_id] = responses
+            try:
+                send({"channel": "mcp_request", "id": request_id, "token": self.server.token,
+                      "body": base64.b64encode(body).decode("ascii")})
+                result = responses.get(timeout=55)["body"]
+            finally:
+                self.server.pending_mcp.pop(request_id, None)
+            data = b"" if result is None else json.dumps(result, allow_nan=False).encode()
+            self.send_response(204 if result is None else 200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception:
+            self.send_error(502, "MCP channel unavailable")
+
+
 def guest_config(port):
     if type(port) is not int or not 1 <= port <= 65535:
         raise BridgeError("invalid loopback port")
-    return "\n".join([
+    result = "\n".join([
         'model_provider="circus"', 'web_search="disabled"',
         'model_providers.circus={name="Circus task channel",'
         f'base_url="http://127.0.0.1:{port}/v1",'
         'env_key="CIRCUS_TASK_TOKEN",wire_api="responses",requires_openai_auth=false,'
         'supports_websockets=false,request_max_retries=0,stream_max_retries=0}',
     ]) + "\n"
+    if os.environ.get("CIRCUS_MCP_ENABLED") == "1":
+        result += ('[mcp_servers.circus]\ncommand="python3"\n'
+                   f'args=["-I","-B","/workspace/mcp_guest.py","{port}"]\n'
+                   'env_vars=["CIRCUS_TASK_TOKEN"]\nrequired=true\nstartup_timeout_sec=60\ntool_timeout_sec=60\n')
+    return result
 
 
 def main_guest():
@@ -497,6 +584,11 @@ def main_guest():
                     pending = server.pending.get(message.get("id"))
                     if pending is None:
                         raise BridgeError("unknown model response id")
+                    pending.put(message, timeout=5)
+                elif channel == "mcp_response":
+                    pending = server.pending_mcp.get(message.get("id"))
+                    if pending is None:
+                        raise BridgeError("unknown MCP response id")
                     pending.put(message, timeout=5)
                 elif channel == "shutdown":
                     break

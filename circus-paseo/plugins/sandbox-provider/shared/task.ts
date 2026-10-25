@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { mcpGrantsSchema } from "./mcp.js";
 
 export const SANDBOX_PROVIDER_ID = "sandbox";
 export const SANDBOX_HOST_MODEL_ID = "host-configured";
@@ -28,6 +29,7 @@ export const taskOptionsSchema = z
     inputFiles: z.array(inputFileSchema).max(64).default([]),
     outputPaths: z.array(projectPathSchema).max(32).default([]),
     timeoutMs: z.number().int().min(1).max(3_600_000).default(300_000),
+    mcpGrants: mcpGrantsSchema.default([]),
   })
   .superRefine((task, context) => {
     const inputs = task.inputFiles.map((file) => file.path);

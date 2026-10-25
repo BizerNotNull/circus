@@ -1,7 +1,9 @@
 mod config;
 mod io;
+mod mcp_config;
 mod outcome;
 mod protocol;
+mod secrets;
 mod session;
 
 use std::path::PathBuf;
@@ -14,7 +16,7 @@ async fn main() -> ExitCode {
     let output = io::Output::stdout();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let runner = if args.len() == 2 && args[0] == "--config" {
-        config::load(&PathBuf::from(&args[1]))
+        config::load(&PathBuf::from(&args[1])).await
     } else {
         Err(())
     };

@@ -42,6 +42,7 @@ pub(crate) async fn exchange(
     config: &RunnerConfig,
     prompt: &str,
     controller: &str,
+    mcp_config: &str,
     token: &str,
     deadline: Instant,
     cancel: &CancellationToken,
@@ -67,6 +68,7 @@ pub(crate) async fn exchange(
         .env("CIRCUS_MODEL_API_KEY", &config.model.api_key)
         .env("CIRCUS_TASK_TOKEN", token)
         .env("CIRCUS_AGENT_PROMPT", prompt)
+        .env("CIRCUS_MCP_CONFIG", mcp_config)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
