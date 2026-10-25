@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use circus_sandbox::environment::{ImagePlatform, ImagePullPolicy};
 use circus_sandbox::{BackendConfig, ResourceLimits, SnapshotBudget};
 
 use crate::TaskError;
@@ -68,13 +69,29 @@ impl std::fmt::Debug for ModelConfig {
 }
 
 /// Trusted caller configuration; never populated from guest requests or ambient
-/// Codex login files. Only the current Docker+runc backend is implemented.
+/// Codex login files. Image preparation, when configured, runs in the owned task
+/// immediately before sandbox creation.
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
     pub backend: BackendConfig,
+    pub image_preparation: Option<ImagePreparation>,
     pub resources: ResourceLimits,
     pub model: ModelConfig,
     pub python: PathBuf,
+}
+
+/// Explicit image resolution policy requested by a trusted caller. Backend
+/// connection and image identity remain solely in [`RunnerConfig::backend`].
+///
+/// Invalid preparation timeouts and unsupported runtimes are rejected before
+/// daemon access. The task deadline and cancellation also bound preparation;
+/// no sandbox is created after either interrupts image resolution.
+#[derive(Debug, Clone)]
+pub struct ImagePreparation {
+    pub platform: ImagePlatform,
+    /// Positive whole-operation bound representable as a host monotonic deadline.
+    pub timeout: Duration,
+    pub pull_policy: ImagePullPolicy,
 }
 
 /// Caller-owned durable workspace archive for sequential tasks.

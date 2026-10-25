@@ -6,8 +6,12 @@ rust-version = "1.99.1"
 license = "Apache-2.0"
 description = "Single-task agent caller for Circus sandbox with events, cancellation, and owned cleanup."
 
+[features]
+default = []
+containerd = ["circus-sandbox/containerd"]
+
 [dependencies]
-circus-sandbox = { path = "..", version = "0.1.0" }
+circus-sandbox = { version = "0.1.0", path = ".." }
 serde = { version = "1", features = ["derive"] }
 sonic-rs = "0.5"
 tempfile.workspace = true

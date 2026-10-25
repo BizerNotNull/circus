@@ -64,9 +64,11 @@ pub enum ModelFailure {
 
 #[derive(Debug, thiserror::Error)]
 pub enum TaskError {
+    #[error("image preparation failed: {0}")]
+    ImagePreparation(String),
     #[error("invalid task configuration or request: {0}")]
     Invalid(&'static str),
-    #[error("task requires an active Tokio runtime")]
+    #[error("an active Tokio runtime is required")]
     NoRuntime,
     #[error("task was cancelled")]
     Cancelled,
