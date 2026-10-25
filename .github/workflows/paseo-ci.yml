@@ -150,7 +150,7 @@ jobs:
     name: typecheck
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.quality != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -415,7 +415,7 @@ jobs:
     name: app-tests
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.app != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -450,7 +450,7 @@ jobs:
     name: playwright (shard 1/8)
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: write
@@ -511,7 +511,7 @@ jobs:
     name: playwright (shard 2/8)
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: write
@@ -524,7 +524,7 @@ jobs:
     name: playwright (shard 3/8)
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: write
@@ -537,7 +537,7 @@ jobs:
     name: playwright (shard 4/8)
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: write
@@ -550,7 +550,7 @@ jobs:
     name: playwright (shard 5/8)
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: write
@@ -563,7 +563,7 @@ jobs:
     name: playwright (shard 6/8)
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: write
@@ -576,7 +576,7 @@ jobs:
     name: playwright (shard 7/8)
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: write
@@ -589,7 +589,7 @@ jobs:
     name: playwright (shard 8/8)
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: write
