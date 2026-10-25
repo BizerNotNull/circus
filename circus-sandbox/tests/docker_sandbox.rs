@@ -159,7 +159,7 @@ async fn docker_linux_runc_lifecycle() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(observed.network_mode.as_deref(), Some("none"));
     assert_eq!(observed.bind_count, Some(0));
     assert!(
-        enforcement
+        observed
             .cap_drop
             .as_ref()
             .is_some_and(|caps| caps.iter().any(|c| c == "ALL"))
@@ -404,7 +404,7 @@ async fn docker_linux_runc_exec_aggregate_output_budget() -> Result<(), Box<dyn 
         .exec(py(&["-c", "print('alive')"]))
         .await?;
     assert_eq!(output.stdout, b"alive\n");
-    teardown(&mut victim).await?;
-    teardown(&mut survivor).await?;
+    destroy(&mut victim).await?;
+    destroy(&mut survivor).await?;
     Ok(())
 }

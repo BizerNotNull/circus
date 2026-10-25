@@ -136,13 +136,10 @@ struct FileRequest<'a> {
 }
 
 struct ExecIo<'a> {
-    stdin: Option<&'a [u8]>,
-    output_limits: OutputLimits,
-}
-
-enum OutputLimits {
-    Aggregate(usize),
-    Separate { stdout: usize, stderr: usize },
+    stdin: GuestStdin<'a>,
+    stdout_limit: usize,
+    stderr_limit: usize,
+    combined_limit: usize,
 }
 
 impl Engine {
@@ -555,8 +552,10 @@ impl Engine {
             workdir,
             argv,
             ExecIo {
-                stdin: None,
-                output_limits: OutputLimits::Aggregate(output_limit),
+                stdin: GuestStdin::None,
+                stdout_limit: output_limit,
+                stderr_limit: output_limit,
+                combined_limit: output_limit,
             },
         )
         .await
@@ -703,18 +702,10 @@ impl Engine {
                 match item.map_err(map_err)? {
                     bollard::container::LogOutput::StdOut { message }
                     | bollard::container::LogOutput::Console { message } => {
-                        let (other_len, limit) = match output_limits {
-                            OutputLimits::Aggregate(limit) => (stderr.len(), limit),
-                            OutputLimits::Separate { stdout, .. } => (0, stdout),
-                        };
-                        push_bounded(&mut stdout, &message, other_len, limit)?;
+                        collector.push(output::OutputPhase::Stdout, &message)?;
                     }
                     bollard::container::LogOutput::StdErr { message } => {
-                        let (other_len, limit) = match output_limits {
-                            OutputLimits::Aggregate(limit) => (stdout.len(), limit),
-                            OutputLimits::Separate { stderr, .. } => (0, stderr),
-                        };
-                        push_bounded(&mut stderr, &message, other_len, limit)?;
+                        collector.push(output::OutputPhase::Stderr, &message)?;
                     }
                     bollard::container::LogOutput::StdIn { .. } => {}
                 }
@@ -805,19 +796,6 @@ impl Engine {
             Err(err) if is_not_found(&err) => Ok(()),
             Err(err) => Err(map_err(err)),
         }
-    }
-}
-impl RemovalControl for Engine {
-    async fn inspect_owner(&self, name: &str, owner_label: &str) -> OwnerCheck {
-        self.owner_check(name, owner_label).await
-    }
-
-    async fn stop(&self, id: &str) -> Result<(), EngineError> {
-        self.stop_best_effort(id).await
-    }
-
-    async fn remove(&self, id: &str) -> Result<(), EngineError> {
-        self.force_remove(id).await
     }
 }
 
