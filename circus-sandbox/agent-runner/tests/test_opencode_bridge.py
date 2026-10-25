@@ -2,6 +2,8 @@
 
 import base64
 import json
+import threading
+import time
 from pathlib import Path
 import types
 import unittest
@@ -37,6 +39,48 @@ class OpenCodeTests(unittest.TestCase):
         self.assertEqual(self.provider.path, "/approved/v1/responses")
         self.assertEqual(self.provider.key, "host-secret")
 
+
+    def test_simultaneous_summary_and_user_requests_are_serialized_and_correlated(self):
+        requests = []
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingProvider:
+            def forward(_self, body, emit):
+                request = json.loads(body)
+                requests.append(request["input"])
+                if request["input"] == "summary":
+                    entered.set()
+                    self.assertTrue(release.wait(5))
+                emit("http_start", None)
+                emit("http_end", None)
+
+        self.controller.provider = BlockingProvider()
+        sent = []
+        first = {
+            "id": 1, "method": "POST", "path": "/v1/responses", "token": "task-token",
+            "body": base64.b64encode(json.dumps({
+                "model": "gpt-4.1", "stream": True, "input": "summary",
+            }).encode()).decode(),
+        }
+        second = {**first, "id": 2, "body": base64.b64encode(json.dumps({
+            "model": "gpt-4.1", "stream": True, "input": "user",
+        }).encode()).decode()}
+        with patch.object(bridge, "send", side_effect=lambda message: sent.append(message)):
+            self.controller.model_request(first)
+            self.assertTrue(entered.wait(2))
+            pending = threading.Thread(target=self.controller.model_request, args=(second,))
+            pending.start()
+            time.sleep(0.02)
+            self.assertTrue(pending.is_alive())
+            release.set()
+            pending.join(2)
+            self.assertFalse(pending.is_alive())
+            self.controller.worker.join(2)
+        self.assertEqual(requests, ["summary", "user"])
+        self.assertEqual([(item["channel"], item["id"]) for item in sent],
+                         [("http_start", 1), ("http_end", 1),
+                          ("http_start", 2), ("http_end", 2)])
     def test_json_events_map_text_tools_session_and_turn_completion(self):
         events = []
         messages = [
