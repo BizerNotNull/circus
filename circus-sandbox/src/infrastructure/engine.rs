@@ -27,7 +27,7 @@ pub(crate) use recovery::{OwnerCheck, Recovered, RemovalControl, recover_with};
 mod process;
 pub(crate) use process::{EngineProcess, ProcessChunk, ProcessSpec};
 
-use std::future::Future;
+use std::collections::HashMap;
 
 use futures_util::StreamExt;
 
@@ -36,8 +36,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::observability::events;
 
 use super::guest_transport::{
-    ExecIo, GuestFileMode, GuestStdin, TRANSFER_CHUNK_BYTES, helper_argv, helper_failure,
-    helper_limits,
+    GuestFileMode, GuestStdin, TRANSFER_CHUNK_BYTES, helper_argv, helper_failure, helper_limits,
 };
 
 /// One bounded host-to-guest copy buffer is shared with the guest helper.
@@ -819,6 +818,23 @@ impl Engine {
             Err(err) if is_not_found(&err) => Ok(()),
             Err(err) => Err(map_err(err)),
         }
+    }
+}
+impl RemovalControl for Engine {
+    fn inspect_owner(
+        &self,
+        name: &str,
+        owner_label: &str,
+    ) -> impl Future<Output = OwnerCheck> + Send {
+        async move { self.owner_check(name, owner_label).await }
+    }
+
+    fn stop(&self, id: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
+        async move { self.stop_best_effort(id).await }
+    }
+
+    fn remove(&self, id: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
+        async move { self.force_remove(id).await }
     }
 }
 
