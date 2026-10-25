@@ -273,14 +273,16 @@
             Circus Rust control plane and agent isolation architecture
           </title>
           <desc id="desc">
-            A Paseo client connects to a Node daemon and a three-crate Rust
-            control plane: the bounded stdio bridge, AgentRunner and
-            circus-sandbox lifecycle. Rust validates task policy, inspects the
-            effective backend policy and owns cleanup while Docker and runc
-            enforce the current agent isolation. Model and authorized MCP
-            requests travel over process standard streams to the host credential
-            broker, which injects host-held credentials and enforces
-            destinations, tools and fixed resource parameters.
+            The current Paseo sandbox-provider task path connects a Node daemon
+            to the Rust control plane through the bounded stdio bridge,
+            AgentRunner and circus-sandbox lifecycle. Rust validates task
+            policy, inspects the effective backend policy and owns cleanup while
+            Docker and runc enforce the current agent isolation. Model and
+            authorized MCP requests travel over process standard streams to the
+            host credential broker, which injects host-held credentials and
+            enforces destinations, tools and fixed resource parameters. The
+            separate circus-sandbox-exec provider proxy reuses circus-sandbox
+            and is outside this path.
           </desc>
           <defs>
             <pattern
@@ -468,7 +470,7 @@
             font-size="12"
             font-weight="700"
           >
-            RUST CONTROL PLANE · 3 FIRST-PARTY CRATES
+            RUST CONTROL PLANE · DESKTOP TASK PATH
           </text>
           <text
             x="880"

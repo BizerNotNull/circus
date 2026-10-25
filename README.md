@@ -36,7 +36,7 @@
 
 <p align="center"><sub>开发态 Paseo 工作台：输入文件、导出路径与工具权限均由当前任务显式选择。</sub></p>
 
-**Paseo 负责交互，三个 first-party Rust crate 构成 Circus 的安全控制面。** 桌面选择的文件、资源预算与工具权限不会只作为提示词传给 Agent，而会被校验为有界任务契约；Rust 统一拥有创建、取消、产物读取与清理确认，Docker + runc 执行当前进程、网络与资源隔离。
+**Paseo 负责交互，Rust 控制面负责把桌面任务边界落实到执行路径。** 当前 Agent 链路由三个 first-party Rust crate 校验有界任务协议、显式授权与后端策略，并统一拥有创建、取消、产物读取与清理确认；Docker + runc 执行当前进程、网络与资源隔离。
 模型与 MCP 的真实凭据由宿主代理持有；Agent 通过受控通道访问获准服务，无需在沙箱中填写密钥或密码。
 
 ## 安全与易用性
@@ -54,7 +54,7 @@ _界面使用受控 provider fixture 展示授权与 cleanup state；真实 Dock
 
 ### Rust 安全控制面
 
-三个 first-party Rust crate 让一项任务依次通过三道失败即拒绝的安全关口：
+当前桌面 Agent 任务链路依次经过三个 first-party Rust crate，每一层都失败即拒绝：
 
 | Rust 安全关口                                                                       | 失败即拒绝的约束                                                          |
 | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
@@ -66,7 +66,11 @@ _界面使用受控 provider fixture 展示授权与 cleanup state；真实 Dock
 
 **先请求，再验真。** `circus-sandbox` 不把发给 Docker 的配置当作隔离已经生效的证据：容器创建后会再次 inspect，核对 runtime、内存 / CPU / PID 限制、只读根、`network=none`、capability、mount / device、tmpfs 与 namespace 等实际策略；缺项或不一致即失败，并保留资源回收责任。
 
-因此，超限输入、未授权工具、固定参数覆盖和未确认清理都不能被包装成成功；即使取消、超时或事件背压，任务 worker 仍保留回收责任。三个 crate 均使用 Rust 1.99.1 / edition 2024，并设置 `unsafe_code = "forbid"`。这是 first-party 源码约束，不覆盖依赖、Python 宿主连接器、Agent CLI、Docker + runc 或 Linux 内核，也不是端到端安全证明。当前安全边界由 Rust 生命周期控制、宿主连接器与 Linux Docker + runc 共同组成；runc 容器共享宿主内核。
+因此，超限输入、未授权工具、固定参数覆盖和未确认清理都不能被包装成成功；即使取消、超时或事件背压，任务 worker 仍保留回收责任。
+
+另一个 workspace Rust crate [`circus-sandbox-exec`](circus-sandbox/sandbox-exec/README.md) 是独立接入入口，不是上述链路的第四道串行关口。它把既有 provider 命令的原始 stdio 代理进 owned sandbox，在新建实例前恢复旧孤儿，使用有界归档保存工作区，并在退出时确认清理；它不提供模型 / MCP 代理、凭据注入、任务协议或 UI，使用方不得通过 `agent.env` 放入宿主凭据。
+
+上述四个 first-party crate 均使用 Rust 1.99.1 / edition 2024，并设置 `unsafe_code = "forbid"`。这是 first-party 源码约束，不覆盖依赖、Python 宿主连接器、Agent CLI、Docker + runc 或 Linux 内核，也不是端到端安全证明。当前桌面 Agent 安全边界由 Rust 生命周期控制、宿主连接器与 Linux Docker + runc 共同组成；runc 容器共享宿主内核。
 
 当前为源码开发版，macOS 桌面向导支持 Codex；Claude Code 可通过宿主配置使用。
 完整信任边界见[安全设计](docs/hackathon-security.md)。
@@ -165,6 +169,8 @@ _结果卡片来自受控 provider 的 UI 验收；真实模型与真实容器�
 ![Circus 架构：Paseo 经 Rust bridge、AgentRunner 与 sandbox lifecycle 管理任务；Docker 和 runc 执行隔离，模型与 MCP 请求经宿主凭据代理](docs/assets/architecture.svg)
 
 [打开架构图源文件](docs/assets/architecture.svg) · [下载 HTML 展示版](docs/assets/architecture.html)（本地打开；PNG / PDF 导出工具需联网加载）
+
+下图聚焦当前 Paseo sandbox provider 的单任务链路；独立的 `circus-sandbox-exec` 进程代理复用 `circus-sandbox`，不经过 `circus-stdio-bridge` 或 `circus-agent-runner`。
 
 ### 四层职责
 
