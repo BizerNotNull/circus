@@ -5,6 +5,9 @@ edition = "2024"
 rust-version = "1.99.1"
 license = "Apache-2.0"
 description = "Bounded stdio transport for sequential Circus Agent runner tasks."
+[features]
+default = []
+containerd = ["circus-agent-runner/containerd", "circus-sandbox/containerd"]
 
 [dependencies]
 circus-agent-runner = { version = "0.1.0", path = "../agent-runner" }

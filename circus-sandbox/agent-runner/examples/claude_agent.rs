@@ -23,6 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         model = model.with_ca_file(path.into());
     }
     let runner = AgentRunner::new(RunnerConfig {
+        image_preparation: None,
         backend: BackendConfig::docker(
             required("CIRCUS_DOCKER_ENDPOINT")?,
             required("CIRCUS_AGENT_IMAGE")?,

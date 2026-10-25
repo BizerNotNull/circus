@@ -16,6 +16,8 @@
   <a href="#从桌面开始"><img src="https://img.shields.io/badge/status-source_preview-218D76?style=flat-square" alt="Status: source preview"></a>
   <a href="circus-sandbox/Cargo.toml"><img src="https://img.shields.io/badge/core-Rust_1.99.1-D66B35?style=flat-square&amp;logo=rust&amp;logoColor=white" alt="Core: Rust 1.99.1"></a>
   <a href="https://github.com/BizerNotNull/circus/actions/workflows/sandbox-rust.yml?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/BizerNotNull/circus/sandbox-rust.yml?branch=main&amp;style=flat-square&amp;label=Rust%20CI" alt="Rust CI on main"></a>
+  <a href="https://github.com/BizerNotNull/circus/actions/workflows/sandbox-rust.yml?query=branch%3Amain"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FBizerNotNull%2Fcircus%2Fbadges%2Fcoverage.json&amp;style=flat-square" alt="circus-sandbox default-suite line coverage"></a>
+  <a href="https://github.com/BizerNotNull/circus/actions/workflows/sandbox-docker.yml"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FBizerNotNull%2Fcircus%2Fbadges%2Fcoverage-docker.json&amp;style=flat-square" alt="circus-sandbox default plus Docker ignored line coverage"></a>
   <a href="https://github.com/BizerNotNull/circus/actions/workflows/sandbox-security.yml?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/BizerNotNull/circus/sandbox-security.yml?branch=main&amp;style=flat-square&amp;label=Security%20CI" alt="Security CI on main"></a>
   <a href="circus-sandbox/LICENSE"><img src="https://img.shields.io/badge/sandbox-Apache--2.0-526963?style=flat-square" alt="Sandbox license: Apache-2.0"></a>
   <a href="https://github.com/BizerNotNull/circus/stargazers"><img src="https://img.shields.io/github/stars/BizerNotNull/circus?style=flat-square&amp;color=218D76&amp;label=Stars" alt="GitHub stars"></a>
@@ -23,26 +25,19 @@
 
 <p align="center">
   <a href="#从桌面开始">桌面上手</a> ·
+  <a href="#一次任务从显式授权到清理确认">交互流程</a> ·
   <a href="#rust-安全控制面">Rust 核心</a> ·
-  <a href="#一次任务从修复代码到取回产物">任务示例</a> ·
+  <a href="#一次任务从修复代码到取回产物">真实验收</a> ·
   <a href="#架构">架构</a> ·
   <a href="#快速上手">命令行</a> ·
   <a href="circus-sandbox/docs/secure-desktop-verification.md">验证</a>
 </p>
 
-<p align="center"><strong>一次任务，从显式授权到清理确认</strong></p>
-
 <p align="center">
-  <picture>
-    <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/circus-task-walkthrough-poster.png">
-    <source type="image/webp" srcset="docs/assets/circus-task-walkthrough.webp">
-    <img src="docs/assets/circus-task-walkthrough.gif" alt="Paseo 中完成一次 Circus 任务：打开 Sandbox task，描述任务，选择输入与输出，按任务授权工具，查看运行阶段，最后预览和下载产物并确认沙箱清理" width="100%">
-  </picture>
+  <img src="docs/assets/circus-desktop-overview.png" alt="Circus 桌面总览：Paseo 选择任务边界，Rust 控制面执行任务契约，Docker 和 runc 隔离 Agent" width="100%">
 </p>
 
-<p align="center"><sub>真实 Paseo UI 的可复现交互回放；任务事件与结果由受控测试执行器提供。<a href="circus-sandbox/docs/secure-desktop-verification.md">真实 Docker、Codex、模型与独立回收证据</a>另行记录。</sub></p>
-
-<p align="center"><a href="docs/assets/circus-desktop-overview.png">查看静态产品总览</a></p>
+<p align="center"><sub>开发态 Paseo 工作台：输入文件、导出路径与工具权限均由当前任务显式选择。</sub></p>
 
 **Paseo 负责交互，Rust 控制面负责把桌面任务边界落实到执行路径。** 当前 Agent 链路由三个 first-party Rust crate 校验有界任务协议、显式授权与后端策略，并统一拥有创建、取消、产物读取与清理确认；Docker + runc 执行当前进程、网络与资源隔离。
 模型与 MCP 的真实凭据由宿主代理持有；Agent 通过受控通道访问获准服务，无需在沙箱中填写密钥或密码。
@@ -130,6 +125,20 @@ _开发态界面，字段使用演示配置；截图已裁去本机标识。_
 选择 **Sandbox** 可提交纯提示词任务；需要文件时打开工作区的 **Sandbox task** 面板。完整说明见 [Paseo sandbox provider](circus-paseo/public-docs/supported-providers.md#sandbox-codex)。
 
 沙箱会话按顺序执行：每次提示重建沙箱，从宿主状态目录中的明文工作区归档恢复已完成轮次，并让 Codex 续接原生线程；运行中的进程和进行中的 turn 不保留。产物保存在 daemon 的有界内存缓存中，**重启前需下载**；二进制下载支持 Web / 桌面端，原生移动端可预览和复制 UTF-8 文本。
+
+## 一次任务：从显式授权到清理确认
+
+打开 **Sandbox task**，写下任务，只加入 Agent 需要的文件和要取回的产物。工具默认关闭，需要时只为本次任务授权。提交后，Paseo 依次显示准备、运行、导出和清理状态；完成后可以预览或下载产物，并核对 `Sandbox cleanup: confirmed`。
+
+<p align="center">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/circus-task-walkthrough-poster.png">
+    <source type="image/webp" srcset="docs/assets/circus-task-walkthrough.webp">
+    <img src="docs/assets/circus-task-walkthrough.gif" alt="Paseo 中完成一次 Circus 任务：打开 Sandbox task，描述任务，选择输入与输出，按任务授权工具，查看运行阶段，最后预览和下载产物并确认沙箱清理" width="100%">
+  </picture>
+</p>
+
+_回放使用真实 Paseo UI；任务事件与结果由受控 provider fixture 生成，用于稳定展示交互和状态。它不构成真实模型或容器执行证据。真实 Docker + runc、Codex、模型调用与独立回收证据见[验收记录](circus-sandbox/docs/secure-desktop-verification.md)。_
 
 ## Agent 与 MCP 支持范围
 

@@ -84,10 +84,12 @@ CIRCUS_CONTAINERD_TIMEOUT_SECS=120 CIRCUS_CONTAINERD_PULL_POLICY=local-only \
 
 `create_owned`：
 
-1. 解析镜像 manifest/config（OCI index 按 host 架构选择 `linux/<arch>`），读取 image config 的 `rootfs.diff_ids`，按 containerd 的 chain-id 规则计算每一层的 committed snapshot key。若目标 committed snapshot 不存在，使用本地 content + diff service 解包（`Snapshots.Prepare` → `Diff.Apply` → `Snapshots.Commit`）；不访问 registry。进程内用一把异步互斥锁串行化解包，避免并发 create 重复 apply。解包期间持有一个 namespace 级 lease（`containerd-lease` gRPC header），active snapshot 使用随机 `extract-<uuid>` key，commit 时以 chain id 命名；完成后在 image config content 上写入 `containerd.io/gc.ref.snapshot.<snapshotter>` 引用，使 committed chain 在 image 存在期间不被 GC 回收，最后 best-effort 删除 lease。
+1. 解析镜像 manifest/config（OCI index 按 host 架构选择 `linux/<arch>`），从同一份已加载的 image config 读取 `rootfs.diff_ids` 与 `config.Env`，按 containerd 的 chain-id 规则计算每一层的 committed snapshot key；非法环境元数据失败关闭，不回退为空环境。若目标 committed snapshot 不存在，使用本地 content + diff service 解包（`Snapshots.Prepare` → `Diff.Apply` → `Snapshots.Commit`）；不访问 registry。进程内用一把异步互斥锁串行化解包，避免并发 create 重复 apply。解包期间持有一个 namespace 级 lease（`containerd-lease` gRPC header），active snapshot 使用随机 `extract-<uuid>` key，commit 时以 chain id 命名；完成后在 image config content 上写入 `containerd.io/gc.ref.snapshot.<snapshotter>` 引用，使 committed chain 在 image 存在期间不被 GC 回收，最后 best-effort 删除 lease。
 2. 以容器名（`circus-sandbox-<uuid>`）为 snapshot key，从最终 chain snapshot prepare 一个 active snapshot，并写入 owner label。
 3. 以真实 OCI runtime-spec JSON 调用 `Containers.Create`：runtime handler `io.containerd.runc.v2`、`snapshotter=overlayfs`、`snapshot_key=<id>`。
 4. 用 `Snapshots.Prepare` 返回的 mounts 调用 `Tasks.Create`，**不启动** task；`Sandbox::start` 才调用 `Tasks.Start`。
+
+镜像 `config.Env` 是初始 OCI process 的基础环境，并持久在 containerd 保存的容器 spec 中。后续 `ProcessSession` 与一次性 `exec` 继承该存储的基础环境，不重新解析可变 image tag；交互请求的显式 `ProcessRequest.env` 按变量名覆盖镜像值（包括空值和含 `=` 的值）。固定 `PATH` / `LANG` 仅在对应变量缺失时补齐，不覆盖镜像或请求值；不会复制宿主环境。镜像的 `USER`、`WORKDIR`、`ENTRYPOINT` / `CMD` 不接管执行：guest uid/gid、workspace 工作目录和初始化 argv 仍由 lifecycle 拥有，交互进程的 argv 与相对工作目录仍来自已校验的请求。
 
 OCI spec 的安全设置：
 
@@ -134,6 +136,17 @@ CIRCUS_CONTAINERD=1 cargo test --locked --features containerd \
   -- --ignored --exact --nocapture --test-threads=1
 ```
 
+`containerd_process_inherits_image_environment` 属于默认忽略的 `containerd_process` 套件：同一真实 sandbox 中，`ProcessSession` 与一次性 `exec` 都必须继承 `PYTHON_VERSION`，并与实际 `sys.version` 的第一个 token 精确相等；交互请求覆盖镜像变量、新增含 `=` 的值，且宿主已设为 `1` 的 `CIRCUS_CONTAINERD` 不得出现在 guest 中。用例检查 stdout、stderr、非零退出码，并在传播操作错误或断言输出前销毁容器、确认自有 snapshot 消失，不修改宿主环境。
+
+该环境回归的 fixture 默认使用本地已存在的官方 `python:3.12-slim`，依赖官方镜像的 `ENV PYTHON_VERSION`。可通过 `CIRCUS_CONTAINERD_IMAGE` 指向自备镜像，但它必须提供 Python 3，并在 image config 中声明与该解释器实际版本一致的 `PYTHON_VERSION`；不得预置测试控制变量 `CIRCUS_CONTAINERD` 或 `CIRCUS_CONTAINERD_ENV_REGRESSION`。仅有可执行 Python、但没有相应 image ENV 的镜像不满足此回归的 fixture 契约。以下命令是运行入口，不代表本次修改已执行或通过：
+
+```bash
+CIRCUS_CONTAINERD=1 CIRCUS_CONTAINERD_IMAGE=python:3.12-slim \
+  cargo test --locked --features containerd --test containerd_process \
+  containerd_process_inherits_image_environment \
+  -- --ignored --exact --test-threads=1
+```
+
 新增镜像准备测试与下方历史运行记录分开验收。确定性 `containerd_image_policy` 使用 Unix + `containerd` feature 的具体本地 gRPC peer，不需要真实 daemon；它验证协议/策略边界，不是真实 registry 或隔离证据：
 
 ```bash
@@ -163,7 +176,7 @@ cargo test --locked --features containerd --test containerd_sandbox --test conta
 
 - `containerd_sandbox`：生命周期、exec argv/退出码/共享输出预算、文件写入/读取/删除、pause/resume、缺失镜像类型化错误且新 namespace 无残留、并发创建、只读 status。
 - `containerd_snapshot`：运行中 guest tmpfs 的 capture，并 restore 到新容器；capture 后源容器仍可写。
-- `containerd_process`：交互进程 stdout/stdin/stderr/退出码、取消导致整容器清理、输出超限导致整容器清理。
+- `containerd_process`：交互进程 stdout/stdin/stderr/退出码、镜像 `PYTHON_VERSION` 继承与精确版本对照、显式环境覆盖及宿主环境不复制（同时覆盖一次性 exec 的继承）、取消导致整容器清理、输出超限导致整容器清理。
 - `containerd_pool`：`SandboxPool`（后端中立，Docker 与 containerd 通用）在真实 containerd 上预热容量 2、`status()` 计数、租约写入私有标记后 release 并经 `ctr` 确认容器与 snapshot 均不存在且下一租约看不到标记、容量 1 的 `AcquireTimeout` 后重新获取、短 TTL 撤销等待睡眠 Python 子进程的 exec 并补充全新容器、持有租约时 `shutdown()` 销毁全部槽位且幂等、坏镜像准备失败留下类型化错误且无容器。租约单次使用，release、TTL 与 shutdown 都真实销毁；`ResourceLimits` 仍是每容器限制，不是宿主聚合准入。
 - 每个 teardown 都用 `ctr -n <ns> containers list -q` 与 `ctr -n <ns> snapshots --snapshotter overlayfs list` 确认容器和 snapshot 不存在。
 

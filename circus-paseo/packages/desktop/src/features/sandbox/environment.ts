@@ -15,10 +15,9 @@ export interface SandboxEnvironment {
   checks: SandboxSetupSnapshot["checks"];
 }
 
-// Fully qualify built-in image tags: some local Engines fail short-name inspection even
-// when their image listing contains it. Save pins the inspected immutable image ID.
+// Fully qualify the built-in tag: some local Engines fail short-name inspection even when
+// their image listing contains it. Save still pins the inspected immutable image ID.
 export const CODEX_IMAGE = "docker.io/library/circus-agent-codex:0.164.0";
-export const CLAUDE_CODE_IMAGE = "docker.io/library/circus-agent-claude-code:2.1.310";
 
 export async function exists(path: string, mode = constants.R_OK): Promise<boolean> {
   try {
@@ -36,14 +35,21 @@ async function firstExecutable(candidates: string[]): Promise<string | null> {
   return null;
 }
 
+async function firstSupportedPython(candidates: string[], run: RunCommand): Promise<string | null> {
+  for (const candidate of candidates) {
+    const checked = await run({
+      executable: candidate,
+      args: ["-I", "-c", "import sys; raise SystemExit(sys.version_info < (3, 11))"],
+    });
+    if (checked.ok) return candidate;
+  }
+  return null;
+}
+
 async function findSource(candidates: string[]): Promise<string | null> {
   for (let candidate of candidates) {
     for (let depth = 0; depth < 6; depth += 1) {
-      if (
-        (await exists(join(candidate, "circus-sandbox/images/codex/Dockerfile"))) ||
-        (await exists(join(candidate, "circus-sandbox/images/claude-code/Dockerfile")))
-      )
-        return candidate;
+      if (await exists(join(candidate, "circus-sandbox/images/codex/Dockerfile"))) return candidate;
       const parent = dirname(candidate);
       if (parent === candidate) break;
       candidate = parent;
@@ -59,91 +65,21 @@ interface InspectEnvironmentInput {
   run: RunCommand;
   configured?: {
     python: string;
-    dockerEndpoint: string;
-    agentImage: string;
-    agent?: "codex" | "claude-code";
+    backend:
+      | { kind: "docker"; endpoint: string; image: string }
+      | { kind: "containerd"; image: string };
     model?: { caFile?: string };
   };
   configuredBridge?: string;
   binaryDirectories: string[];
-  agent?: "codex" | "claude-code";
-  agentImage?: string;
-}
-
-function makeEnvironmentChecks(input: {
-  agent: "codex" | "claude-code";
-  supported: boolean;
-  source: string | null;
-  bridge: string | null;
-  python: string | null;
-  tlsReady: boolean;
-  endpoint: string | null;
-  image: string | null;
-}): SandboxSetupSnapshot["checks"] {
-  const agentLabel = input.agent === "claude-code" ? "Claude Code" : "Codex";
-  return [
-    {
-      id: "platform",
-      label: "Credential storage",
-      ready: input.supported,
-      detail: input.supported
-        ? "macOS Keychain keeps credentials on this computer."
-        : "This setup currently requires macOS Keychain. Use the documented host configuration on other systems.",
-    },
-    {
-      id: "source",
-      label: "Circus runtime files",
-      ready: input.source !== null,
-      detail: input.source
-        ? "Circus source folder detected."
-        : "Select the Circus source folder to prepare the runtime.",
-    },
-    {
-      id: "bridge",
-      label: "Task runner",
-      ready: input.bridge !== null,
-      detail: input.bridge
-        ? "Task runner found."
-        : "Prepare the runtime. Rust 1.99.1 must be installed for this source build.",
-    },
-    {
-      id: "python",
-      label: "Model connector",
-      ready: input.python !== null,
-      detail: input.python
-        ? "Python 3.11 or later found."
-        : "Install Python 3.11 or later, then check again.",
-    },
-    {
-      id: "tls",
-      label: "Secure model connection",
-      ready: input.tlsReady,
-      detail: input.tlsReady
-        ? "Trusted certificates loaded. Model connections require HTTPS verification."
-        : "The model connector could not load trusted certificates. Repair Python's certificate store or the configured certificate bundle before saving.",
-    },
-    {
-      id: "docker",
-      label: "Sandbox engine",
-      ready: input.endpoint !== null,
-      detail: input.endpoint
-        ? "Local Linux Docker Engine is responding."
-        : "Install and open Docker Desktop, or start your local Linux Docker Engine, then check again.",
-    },
-    {
-      id: "image",
-      label: `${agentLabel} environment`,
-      ready: input.image !== null,
-      detail: input.image
-        ? `Pinned ${agentLabel} image found.`
-        : `Prepare the runtime to build the ${agentLabel} environment. The first build needs internet access.`,
-    },
-  ];
 }
 
 export async function inspectEnvironment(
   input: InspectEnvironmentInput,
 ): Promise<SandboxEnvironment> {
+  const backend = input.configured?.backend;
+  if (backend && backend.kind !== "docker")
+    throw new Error("Desktop setup only inspects Docker backends.");
   const source = await findSource(input.sourceCandidates);
   const bridgeCandidates = input.binaryDirectories.map((directory) =>
     join(directory, "circus-stdio-bridge"),
@@ -157,17 +93,7 @@ export async function inspectEnvironment(
   const bridge = await firstExecutable(bridgeCandidates);
   const pythonCandidates = input.binaryDirectories.map((directory) => join(directory, "python3"));
   if (input.configured) pythonCandidates.unshift(input.configured.python);
-  let python: string | null = null;
-  for (const candidate of pythonCandidates) {
-    const checked = await input.run({
-      executable: candidate,
-      args: ["-I", "-c", "import sys; raise SystemExit(sys.version_info < (3, 11))"],
-    });
-    if (checked.ok) {
-      python = candidate;
-      break;
-    }
-  }
+  const python = await firstSupportedPython(pythonCandidates, input.run);
   const tls = await inspectPythonTrust({
     python,
     platform: input.platform,
@@ -177,28 +103,74 @@ export async function inspectEnvironment(
   const docker = await firstExecutable(
     input.binaryDirectories.map((directory) => join(directory, "docker")),
   );
-  const endpoints = [
-    "unix:///var/run/docker.sock",
-    `unix://${input.userHome}/.docker/run/docker.sock`,
-    `unix://${input.userHome}/.colima/default/docker.sock`,
-  ];
-  const agent = input.agent ?? input.configured?.agent ?? "codex";
-  const imageRef =
-    input.agent === undefined || input.agent === input.configured?.agent
-      ? (input.configured?.agentImage ?? input.agentImage ?? CODEX_IMAGE)
-      : (input.agentImage ?? (agent === "claude-code" ? CLAUDE_CODE_IMAGE : CODEX_IMAGE));
+  const endpoints = backend
+    ? [backend.endpoint]
+    : [
+        "unix:///var/run/docker.sock",
+        `unix://${input.userHome}/.docker/run/docker.sock`,
+        `unix://${input.userHome}/.colima/default/docker.sock`,
+      ];
+  const imageRef = backend?.image ?? CODEX_IMAGE;
   const { endpoint, image } = await inspectDocker({ docker, endpoints, imageRef, run: input.run });
   const supported = input.platform === "darwin";
-  const checks = makeEnvironmentChecks({
-    agent,
-    supported,
-    source,
-    bridge,
-    python,
-    tlsReady: tls.ready,
-    endpoint,
-    image,
-  });
+  const checks: SandboxSetupSnapshot["checks"] = [
+    {
+      id: "platform",
+      label: "Credential storage",
+      ready: supported,
+      detail: supported
+        ? "macOS Keychain keeps credentials on this computer."
+        : "This setup currently requires macOS Keychain. Use the documented host configuration on other systems.",
+    },
+    {
+      id: "source",
+      label: "Circus runtime files",
+      ready: source !== null,
+      detail: source
+        ? "Circus source folder detected."
+        : "Select the Circus source folder to prepare the runtime.",
+    },
+    {
+      id: "bridge",
+      label: "Task runner",
+      ready: bridge !== null,
+      detail: bridge
+        ? "Task runner found."
+        : "Prepare the runtime. Rust 1.99.1 must be installed for this source build.",
+    },
+    {
+      id: "python",
+      label: "Model connector",
+      ready: python !== null,
+      detail: python
+        ? "Python 3.11 or later found."
+        : "Install Python 3.11 or later, then check again.",
+    },
+    {
+      id: "tls",
+      label: "Secure model connection",
+      ready: tls.ready,
+      detail: tls.ready
+        ? "Trusted certificates loaded. Model connections require HTTPS verification."
+        : "The model connector could not load trusted certificates. Repair Python's certificate store or the configured certificate bundle before saving.",
+    },
+    {
+      id: "docker",
+      label: "Sandbox engine",
+      ready: endpoint !== null,
+      detail: endpoint
+        ? "Local Linux Docker Engine is responding."
+        : "Install and open Docker Desktop, or start your local Linux Docker Engine, then check again.",
+    },
+    {
+      id: "image",
+      label: "Codex environment",
+      ready: image !== null,
+      detail: image
+        ? "Pinned Codex 0.164.0 image found."
+        : "Prepare the runtime to build the Codex environment. The first build needs internet access.",
+    },
+  ];
   return {
     source,
     bridge,

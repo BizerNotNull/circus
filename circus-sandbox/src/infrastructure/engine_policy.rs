@@ -344,7 +344,7 @@ fn expected_tmpfs(spec: &CreateSpec) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     fn spec() -> CreateSpec {
         CreateSpec {
@@ -403,6 +403,69 @@ mod tests {
     #[test]
     fn matching_report_verifies() {
         assert_eq!(verify(&spec(), &inspected()), Ok(()));
+    }
+
+    #[test]
+    fn create_body_is_exactly_what_verify_accepts() {
+        let spec = spec();
+        let body = create_body("sandbox-a", &spec);
+        assert_eq!(body.image.as_deref(), Some(spec.image.as_str()));
+        let user = format!("{}:{}", spec.guest_uid, spec.guest_gid);
+        assert_eq!(body.user.as_deref(), Some(user.as_str()));
+        assert_eq!(
+            body.working_dir.as_deref(),
+            Some(spec.workspace_path.as_str())
+        );
+        assert_eq!(body.network_disabled, Some(true));
+        let labels = body.labels.as_ref().expect("labels");
+        assert_eq!(
+            labels.get(OWNER_LABEL_KEY).map(String::as_str),
+            Some(spec.owner_label.as_str())
+        );
+        assert_eq!(
+            labels.get("circus.sandbox.name").map(String::as_str),
+            Some("sandbox-a")
+        );
+        let report = report_from(body.host_config);
+        assert_eq!(verify(&spec, &report), Ok(()));
+    }
+
+    #[test]
+    fn policy_mismatch_error_keeps_typed_policy() {
+        let mismatch = PolicyMismatch {
+            field: "network_mode",
+            expected: "none".to_string(),
+            actual: "bridge".to_string(),
+        };
+        let err = mismatch.clone().error();
+        assert!(err.message.contains("network_mode"), "{err:?}");
+        assert_eq!(err.policy.as_deref(), Some(&mismatch));
+        assert!(!err.not_found);
+        assert!(!err.create_pending);
+    }
+
+    #[test]
+    fn empty_reported_tmpfs_is_a_mismatch() {
+        let mut host = inspected();
+        host.tmpfs = Some(BTreeMap::new());
+        let mismatch = verify(&spec(), &host).unwrap_err();
+        assert_eq!(mismatch.field, "tmpfs");
+        assert_eq!(mismatch.actual, "empty");
+    }
+
+    #[test]
+    fn absent_scalar_fields_fail_closed() {
+        let mut host = inspected();
+        host.memory_bytes = None;
+        assert_eq!(verify(&spec(), &host).unwrap_err().actual, "not reported");
+
+        let mut host = inspected();
+        host.pids_limit = None;
+        assert_eq!(verify(&spec(), &host).unwrap_err().field, "pids_limit");
+
+        let mut host = inspected();
+        host.cap_drop = None;
+        assert_eq!(verify(&spec(), &host).unwrap_err().field, "cap_drop");
     }
 
     #[test]

@@ -569,6 +569,65 @@ mod tests {
     }
 
     #[test]
+    fn plan_and_step_accessors_expose_configured_bounds() {
+        let step = pinned(&["python3", "--version"], "3.12.1");
+        assert_eq!(
+            step.argv(),
+            &["python3".to_string(), "--version".to_string()]
+        );
+        assert_eq!(step.version().map(PinnedVersion::as_str), Some("3.12.1"));
+        assert!(step.is_pinned());
+        assert_eq!(step.timeout(), Duration::from_secs(5));
+        assert_eq!(step.output_limit_bytes(), 1024);
+        assert_eq!(PinnedVersion::new("3.12.1").unwrap().to_string(), "3.12.1");
+
+        let plan = EnvironmentPlan::new(request(), vec![step.clone()]).expect("valid plan");
+        assert_eq!(plan.image().reference(), request().reference());
+        assert_eq!(plan.steps().len(), 1);
+        assert_eq!(plan.steps()[0], step);
+
+        let observation = StepObservation::new(
+            0,
+            vec!["python3".into(), "--version".into()],
+            PinnedVersion::new("3.12.1").expect("version"),
+            0,
+            b"ok".to_vec(),
+            Vec::new(),
+            1024,
+        );
+        assert_eq!(observation.index(), 0);
+        assert_eq!(
+            observation.argv(),
+            &["python3".to_string(), "--version".to_string()]
+        );
+        assert_eq!(observation.version().as_str(), "3.12.1");
+        assert_eq!(observation.exit_code(), 0);
+        assert_eq!(observation.stdout(), b"ok");
+        assert!(observation.stderr().is_empty());
+        assert_eq!(observation.output_limit_bytes(), 1024);
+
+        let prepared = PreparedEnvironment::new(
+            PreparedImage {
+                id: "sha256:1111".into(),
+                repo_digests: vec!["python@sha256:2222".into()],
+                os: "linux".into(),
+                architecture: "amd64".into(),
+            },
+            platform(),
+            vec![step],
+            vec![observation],
+        );
+        assert_eq!(prepared.image().id(), "sha256:1111");
+        assert_eq!(prepared.platform(), &platform());
+        assert_eq!(prepared.steps().len(), 1);
+        assert_eq!(prepared.observations().len(), 1);
+        let identity = prepared
+            .identity(TenantDomain::new("tenant-a").expect("valid tenant"))
+            .expect("identity");
+        assert!(!format!("{identity:?}").contains("python"));
+    }
+
+    #[test]
     fn plan_identity_tracks_steps_and_tenant_without_host_paths() {
         let plan =
             EnvironmentPlan::new(request(), vec![pinned(&["python3", "--version"], "3.12.1")])

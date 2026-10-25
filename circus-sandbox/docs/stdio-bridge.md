@@ -29,8 +29,17 @@ Claude 的镜像与运行契约见 [Claude Code 适配器](claude-agent.md)。
 ```json
 {
   "version": 1,
-  "dockerEndpoint": "unix:///var/run/docker.sock",
-  "agentImage": "sha256:REPLACE_WITH_VERIFIED_IMAGE_DIGEST",
+  "backend": {
+    "kind": "docker",
+    "endpoint": "unix:///var/run/docker.sock",
+    "image": "sha256:REPLACE_WITH_VERIFIED_IMAGE_DIGEST",
+    "runtime": "runc"
+  },
+  "image": {
+    "platform": { "os": "linux", "architecture": "amd64" },
+    "pullPolicy": "local-only",
+    "prepareTimeoutMs": 30000
+  },
   "python": "/absolute/path/to/python3",
   "resources": {
     "memoryBytes": 536870912,
@@ -47,6 +56,46 @@ Claude 的镜像与运行契约见 [Claude Code 适配器](claude-agent.md)。
   }
 }
 ```
+
+配置仍标记 `version: 1`，但后端字段是破坏性迁移：删除旧顶层 `dockerEndpoint`、
+`agentImage`，改为上例的严格 tagged `backend`，并显式增加 `image`。
+不接受旧别名、未知字段或不同后端字段的混用。`image.platform` 必须指定
+`os: "linux"` 与 `architecture`，`variant` 可选；`pullPolicy` 只接受 `local-only` 或
+`if-missing`，`prepareTimeoutMs` 是正毫秒期限，不是连接重试配置。
+
+Linux containerd 构建须安装 `protobuf-compiler`，并使用：
+
+```bash
+cargo build --locked --features containerd -p circus-stdio-bridge
+```
+
+将 Docker 的 `backend` 整块替换为下列描述符，其余配置沿用同一契约：
+
+```json
+{
+  "kind": "containerd",
+  "socket": "/run/containerd/containerd.sock",
+  "namespace": "circus-agent",
+  "image": "your-verified-image-reference",
+  "runtime": "runc",
+  "snapshotter": "overlayfs"
+}
+```
+
+containerd 需要本地 Linux daemon、显式绝对 Unix socket、可访问的 namespace、`runc`
+与 `overlayfs`；平台与镜像内 CLI/Python 3 必须适配任务，创建期资源限制需要宿主 cgroup 支持。
+Docker 仍使用本地 Unix socket 或 Windows Linux Engine named pipe；两者均只支持 `runc`。
+缺失 feature、平台不支持、Kubernetes 或非法 runtime/snapshotter 等组合在 `ready` 和
+模型/MCP 凭据读取前拒绝，不连接另一个后端或静默降级。桌面设置仍仅管理 Docker 与
+macOS Keychain；遇到手写 containerd 配置应明确拒绝且不改写，不提供 containerd 设置向导。
+
+`ready` 只确认宿主配置完成，不连接 daemon 或准备镜像。镜像准备由运行器任务拥有：
+任务期限覆盖准备阶段，`prepareTimeoutMs` 也限制准备；取消、EOF 或任一期限先到时，
+准备不得在稍后继续创建沙箱。成功准备后才以不可变 Docker image ID 或同 namespace 的
+containerd digest-qualified alias 创建，不重新使用可变 tag。`local-only` 不访问 registry；
+`if-missing` 只在所选 daemon/namespace 确认缺失时允许一次无认证拉取，无隐式凭据、重试
+或后端回退。containerd local-only 仍可能注册 alias metadata；共享 cache/daemon transfer
+可能在取消或失败后继续改变，不承诺回滚，也不删除共享镜像。
 
 `caFile` 可省略，省略时使用宿主 Python 的证书信任。配置最多 64 KiB；key 文件最多 4098 字节，
 去掉末尾换行后交给运行器校验。配置、key、CA 和 Python 使用绝对路径；binary 由 Node 显式指定
@@ -167,6 +216,17 @@ cargo clippy --locked -p circus-stdio-bridge --all-targets -- -D warnings
 Rust 默认测试包含真实 stdio 二进制进程及不可用后端路径。Node 的
 `framing.test.ts`、`protocol.test.ts` 和 `stdio-client.posix.test.ts` 验证有界帧、子进程断流、任务关联、取消、
 清理重试、工作区路径/预算/会话字段边界和二进制文件往返；后者使用脚本协议对端，不是沙箱端到端验收。
+
+Linux + `protobuf-compiler` 下还需覆盖显式 feature 分支：
+
+```bash
+cargo test --locked --features containerd -p circus-agent-runner -p circus-stdio-bridge --all-targets
+```
+
+其中自有 Unix 协议对端不需要 root 或真实 daemon，只验证配置、准备与取消/期限契约。
+真实 daemon、固定 CLI 的离线 stdio 启动和脚本化 HTTPS peer 各有不同证据范围；它们不等于
+实际模型推理或真实 MCP 工具调用，也不提供 Kubernetes 或其他 agent 的离线端到端证据。
+实际 smoke 的环境、命令和观察结果必须另记在对应 PR，不能从 CI 步骤存在推断通过。
 
 真实 Docker 的取消与 EOF 用例在收到任务自己的实例标识后触发收尾，并独立 inspect 确认删除。
 它不访问模型，必须显式提供后端、已验证镜像和宿主 Python：

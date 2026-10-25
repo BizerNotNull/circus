@@ -216,3 +216,381 @@ fn from_snapshot(error: SnapshotError) -> ApiError {
         SnapshotError::Interrupted => ApiError::cancelled(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+    use std::path::PathBuf;
+
+    use crate::api::{
+        CleanupFailure, CommandError, OutputPhase, Ownership, SandboxError, SandboxOperation,
+        SandboxPhase, StagingError,
+    };
+    use crate::runtime::{BackendConfigError, ConfigError};
+    use crate::workspace::{PathRejectReason, SnapshotError, Workspace, WorkspaceError};
+
+    fn assert_maps(error: SandboxError, status: StatusCode, code: &str) {
+        let mapped = from_sandbox(error);
+        assert_eq!(mapped.code, code);
+        assert_eq!(mapped.into_response().status(), status);
+    }
+
+    #[test]
+    fn stable_api_errors_keep_fixed_codes() {
+        for (error, status, code) in [
+            (
+                ApiError::invalid_request(),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                ApiError::invalid_json(),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                ApiError::unauthorized(),
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+            ),
+            (ApiError::forbidden(), StatusCode::FORBIDDEN, "forbidden"),
+            (ApiError::not_found(), StatusCode::NOT_FOUND, "not_found"),
+            (
+                ApiError::method_not_allowed(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+            ),
+            (ApiError::conflict(), StatusCode::CONFLICT, "conflict"),
+            (
+                ApiError::limit_exceeded(),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "limit_exceeded",
+            ),
+            (
+                ApiError::cancelled(),
+                StatusCode::REQUEST_TIMEOUT,
+                "cancelled",
+            ),
+            (ApiError::timeout(), StatusCode::GATEWAY_TIMEOUT, "timeout"),
+            (
+                ApiError::cleanup_required(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cleanup_required",
+            ),
+            (
+                ApiError::backend_unavailable(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "backend_unavailable",
+            ),
+            (
+                ApiError::unsupported_backend(),
+                StatusCode::NOT_IMPLEMENTED,
+                "unsupported_backend",
+            ),
+            (
+                ApiError::internal_error(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+            ),
+        ] {
+            let response = error.into_response();
+            assert_eq!(response.status(), status);
+            assert_eq!(error.code, code);
+            assert!(!error.message.is_empty());
+        }
+    }
+
+    #[test]
+    fn sandbox_errors_map_to_stable_http_codes() {
+        assert_maps(
+            SandboxError::InvalidProcessRequest { reason: "bad" },
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        );
+        assert_maps(
+            SandboxError::Command(CommandError::EmptyArgv),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        );
+        assert_maps(
+            SandboxError::Config(ConfigError::InvalidWorkspacePath),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        );
+        assert_maps(
+            SandboxError::BackendConfig(BackendConfigError::ImageRequired),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        );
+        assert_maps(
+            SandboxError::RelativePath { reason: "absolute" },
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        );
+        assert_maps(
+            SandboxError::ProcessActive,
+            StatusCode::CONFLICT,
+            "conflict",
+        );
+        assert_maps(
+            SandboxError::InvalidPhase {
+                current: SandboxPhase::Destroyed,
+                operation: "start",
+            },
+            StatusCode::CONFLICT,
+            "conflict",
+        );
+        assert_maps(
+            SandboxError::Staging(StagingError::LimitExceeded {
+                limit: 1,
+                actual: 2,
+            }),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "limit_exceeded",
+        );
+        assert_maps(
+            SandboxError::Staging(StagingError::SizeOverflow {
+                accumulated: 1,
+                next: u64::MAX,
+                limit: 1,
+            }),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "limit_exceeded",
+        );
+        assert_maps(
+            SandboxError::BackendImageUnavailable {
+                image: "img".into(),
+            },
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backend_unavailable",
+        );
+        assert_maps(
+            SandboxError::Backend {
+                message: "down".into(),
+            },
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backend_unavailable",
+        );
+        assert_maps(
+            SandboxError::WorkerGone {
+                detail: "gone".into(),
+            },
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backend_unavailable",
+        );
+        assert_maps(
+            SandboxError::TimedOut {
+                instance_id: None,
+                ownership: Ownership::Unknown,
+                operation: SandboxOperation::Exec,
+                detail: "late".into(),
+            },
+            StatusCode::GATEWAY_TIMEOUT,
+            "timeout",
+        );
+        assert_maps(
+            SandboxError::Cancelled {
+                instance_id: None,
+                ownership: Ownership::Unknown,
+                operation: SandboxOperation::Exec,
+                detail: "stop".into(),
+            },
+            StatusCode::REQUEST_TIMEOUT,
+            "cancelled",
+        );
+        assert_maps(
+            SandboxError::OutputLimit {
+                limit: 8,
+                phase: OutputPhase::Stdout,
+                ownership: Ownership::ConfirmedAbsent,
+                detail: "cap".into(),
+            },
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "limit_exceeded",
+        );
+        assert_maps(
+            SandboxError::PolicyMismatch {
+                field: "network_mode".into(),
+                expected: "none".into(),
+                actual: "bridge".into(),
+            },
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+        );
+        assert_maps(
+            SandboxError::CleanupRequired {
+                instance_id: "id".into(),
+                ownership: Ownership::StillPresent,
+                detail: "retry".into(),
+                failure: CleanupFailure::Backend {
+                    message: "rm".into(),
+                },
+            },
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cleanup_required",
+        );
+        assert_maps(
+            SandboxError::UnsupportedCapability {
+                capability: "pause",
+            },
+            StatusCode::NOT_IMPLEMENTED,
+            "unsupported_backend",
+        );
+        assert_maps(
+            SandboxError::SnapshotInterrupted {
+                interruption: Box::new(SandboxError::TimedOut {
+                    instance_id: None,
+                    ownership: Ownership::Unknown,
+                    operation: SandboxOperation::CaptureWorkspaceSnapshot,
+                    detail: "late".into(),
+                }),
+                snapshot: Box::new(SnapshotError::Interrupted),
+            },
+            StatusCode::GATEWAY_TIMEOUT,
+            "timeout",
+        );
+    }
+
+    #[test]
+    fn workspace_and_snapshot_errors_map_through_sandbox() {
+        assert_maps(
+            SandboxError::Workspace(WorkspaceError::LimitExceeded {
+                limit: 1,
+                actual: 2,
+            }),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "limit_exceeded",
+        );
+        assert_maps(
+            SandboxError::Workspace(WorkspaceError::Closed),
+            StatusCode::CONFLICT,
+            "conflict",
+        );
+        assert_maps(
+            SandboxError::Workspace(WorkspaceError::InvalidLimit { max_file_bytes: 0 }),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        );
+        assert_maps(
+            SandboxError::Workspace(WorkspaceError::PathRejected {
+                path: PathBuf::from(".."),
+                reason: PathRejectReason::ParentComponent,
+            }),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        );
+        assert_maps(
+            SandboxError::Workspace(WorkspaceError::NotRegularFile {
+                path: PathBuf::from("fifo"),
+            }),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        );
+        assert_maps(
+            SandboxError::Workspace(WorkspaceError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                "missing",
+            ))),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        );
+        assert_maps(
+            SandboxError::Workspace(WorkspaceError::Io(io::Error::other("io"))),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+        );
+        assert_maps(
+            SandboxError::Snapshot(SnapshotError::EntryLimit {
+                limit: 1,
+                actual: 2,
+            }),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "limit_exceeded",
+        );
+        assert_maps(
+            SandboxError::Snapshot(SnapshotError::ByteLimit {
+                limit: 1,
+                actual: 2,
+            }),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "limit_exceeded",
+        );
+        assert_maps(
+            SandboxError::Snapshot(SnapshotError::InvalidArchive {
+                reason: "bad".into(),
+            }),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        );
+        assert_maps(
+            SandboxError::Snapshot(SnapshotError::InvalidArchiveLimit),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        );
+        assert_maps(
+            SandboxError::Snapshot(SnapshotError::InvalidBudget {
+                max_total_bytes: 0,
+                max_entries: 0,
+            }),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        );
+        assert_maps(
+            SandboxError::Snapshot(SnapshotError::Symlink {
+                path: PathBuf::from("link"),
+            }),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        );
+        assert_maps(
+            SandboxError::Snapshot(SnapshotError::NotRegular {
+                path: PathBuf::from("dev"),
+            }),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        );
+        assert_maps(
+            SandboxError::Snapshot(SnapshotError::NotPortable {
+                path: PathBuf::from("bad name"),
+            }),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        );
+        assert_maps(
+            SandboxError::Snapshot(SnapshotError::Workspace(WorkspaceError::Closed)),
+            StatusCode::CONFLICT,
+            "conflict",
+        );
+        assert_maps(
+            SandboxError::Snapshot(SnapshotError::Io {
+                operation: "open",
+                source: io::Error::new(io::ErrorKind::NotFound, "missing"),
+            }),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        );
+        assert_maps(
+            SandboxError::Snapshot(SnapshotError::Io {
+                operation: "write",
+                source: io::Error::other("io"),
+            }),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+        );
+        assert_maps(
+            SandboxError::Snapshot(SnapshotError::RestoreCleanup {
+                restore: Box::new(SnapshotError::Interrupted),
+                destination: Box::new(Workspace::new(64).expect("workspace")),
+                cleanup: WorkspaceError::Closed,
+            }),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cleanup_required",
+        );
+        assert_maps(
+            SandboxError::Snapshot(SnapshotError::Interrupted),
+            StatusCode::REQUEST_TIMEOUT,
+            "cancelled",
+        );
+    }
+}
