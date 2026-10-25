@@ -11,9 +11,9 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 ## Architecture & Data Flow
 
 - 现有 Paseo：移动端/Web/桌面/CLI → 客户端协议层 → Node.js daemon，负责 Agent 管理及实时输出；这不是已接入 Rust 沙箱的链路。
-- 当前沙箱：文件调用方 → `Workspace` → cap-std `Dir`；Docker 调用方 → `api` → 私有 `lifecycle` → `infrastructure::Engine` → 本地 Linux Docker Engine；containerd 调用方 → `api` → 私有 `lifecycle` → `infrastructure::Backend` → 本地 containerd；Kubernetes 调用方 → `api` → 私有 `lifecycle` → `infrastructure::Backend` → Kubernetes API（显式 kubeconfig，namespace 作用域）。交互进程调用方 → `Sandbox::spawn_process` → `lifecycle::process` → 后端 attach 传输（每沙箱一个进程，I/O 任务只报告结果，删除仍由 lifecycle 拥有；Kubernetes workload 不支持该能力）。`ResourceLimits` 校验请求值，Docker/containerd/Kubernetes 后端将显式资源与隔离配置映射到容器或 Pod；校验本身不构成强制、预留或聚合准入。
+- 当前沙箱：文件调用方 → `Workspace` → cap-std `Dir`；Docker 调用方 → `api` → 私有 `lifecycle` → `infrastructure::Engine` → 本地 Linux Docker Engine；containerd 调用方 → `api` → 私有 `lifecycle` → `infrastructure::Backend` → 本地 containerd；Kubernetes 调用方 → `api` → 私有 `lifecycle` → `infrastructure::Backend` → Kubernetes API（显式 kubeconfig，namespace 作用域）。交互进程调用方 → `Sandbox::spawn_process` → `lifecycle::process` → 后端 attach 传输（每沙箱一个进程，I/O 任务只报告结果，删除仍由 lifecycle 拥有；Docker/containerd 用原生 exec，Kubernetes 经 `pods/exec` 的 argv trampoline）。`ResourceLimits` 校验请求值，Docker/containerd/Kubernetes 后端将显式资源与隔离配置映射到容器或 Pod；校验本身不构成强制、预留或聚合准入。
 - 目标沙箱：统一 API → 生命周期管理 → 基础设施调度 → 运行时隔离；镜像环境、代码工作区提供执行资源，预启动/快照/沙箱池优化启动。
-- 目标约束：对外 API 屏蔽后端差异；领域层与部署、隔离适配器分离。生命周期统一拥有状态与回收逻辑，调用方不得绕过它直接操作后端。已实现：Docker/containerd 后端、Kubernetes workload Pod（创建/就绪/exec/有界文件/工作区文件快照/删除/池租约）、环境准备计划与稳定标识、固定提交 Git clone/worktree、工作区文件快照与预启动池、交互进程会话。Kubernetes 真正 pause/resume（B03）、gVisor、Kata、Firecracker、容器/VM 运行时快照（进程或客户机内存检查点）仍待实现；没有 RPC 或 Paseo 链路。
+- 目标约束：对外 API 屏蔽后端差异；领域层与部署、隔离适配器分离。生命周期统一拥有状态与回收逻辑，调用方不得绕过它直接操作后端。已实现：Docker/containerd 后端、Kubernetes workload Pod（创建/就绪/exec/有界文件/工作区文件快照/删除/池租约/交互进程）、环境准备计划与稳定标识、固定提交 Git clone/worktree、工作区文件快照与预启动池、交互进程会话。Kubernetes 真正 pause/resume（B03）、gVisor、Kata、Firecracker、容器/VM 运行时快照（进程或客户机内存检查点）仍待实现；没有 RPC 或 Paseo 链路。
 
 ## Key Directories
 

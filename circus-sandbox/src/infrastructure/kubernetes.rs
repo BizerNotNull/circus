@@ -13,9 +13,9 @@ use super::kubernetes_config::KubernetesConfig;
 use super::kubernetes_engine::KubernetesEngine;
 
 /// Real Kubernetes workload adapter. Workspace snapshots reuse the shared
-/// guest file transport; pause/resume and interactive processes are not
-/// implemented by this workload provider, and the capability report makes the
-/// lifecycle reject those operations before allocation.
+/// guest file transport; interactive processes attach over `pods/exec`.
+/// Pause/resume is not implemented by this workload provider, and the
+/// capability report makes the lifecycle reject it before allocation.
 pub(crate) struct KubernetesBackend {
     engine: KubernetesEngine,
     config: KubernetesConfig,
@@ -53,7 +53,7 @@ impl Backend for KubernetesBackend {
             pause_resume: false,
             file_transport: true,
             workspace_snapshot: true,
-            spawn_process: false,
+            spawn_process: true,
         }
     }
 
@@ -172,15 +172,10 @@ impl Backend for KubernetesBackend {
 
     fn spawn_process(
         &self,
-        _id: &InstanceId,
-        _spec: ProcessSpec<'_>,
+        id: &InstanceId,
+        spec: ProcessSpec<'_>,
     ) -> impl Future<Output = Result<BackendProcess, EngineError>> + Send {
-        async {
-            Err(super::kubernetes_engine::engine_error(
-                EngineErrorKind::Other,
-                "this workload provider cannot attach an interactive process",
-            ))
-        }
+        async move { self.engine.spawn_process(id.as_str(), spec).await }
     }
 
     fn host_report(

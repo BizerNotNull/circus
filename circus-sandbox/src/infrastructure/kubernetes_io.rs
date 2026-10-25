@@ -3,7 +3,9 @@
 //! Kubernetes exec has no working-directory or user parameter, so the adapter
 //! runs the configured command through a tiny argv-only Python trampoline that
 //! changes directory and then `execvp`s the requested program. The guest file
-//! protocol itself stays in `guest_transport`/`guest_files.py`.
+//! protocol itself stays in `guest_transport`/`guest_files.py`. The bounded
+//! attach buffer size and the status/stream error mapping are shared with the
+//! interactive process transport in `kubernetes_process`.
 
 use std::time::Duration;
 
@@ -19,7 +21,8 @@ use super::guest_transport::{
 };
 use super::kubernetes_engine::{KubernetesEngine, engine_error};
 
-const ATTACH_BUFFER_BYTES: usize = 64 * 1024;
+/// Bounded attach buffers shared with the interactive process transport.
+pub(super) const ATTACH_BUFFER_BYTES: usize = 64 * 1024;
 const CHDIR_EXEC: &str = "import os,sys\ntry:\n    os.chdir(sys.argv[1])\nexcept OSError as error:\n    sys.stderr.write(f\"circus: cannot change directory: {error}\\n\")\n    raise SystemExit(125)\nos.execvp(sys.argv[2], sys.argv[2:])";
 
 struct FileRequest<'a> {
@@ -440,7 +443,7 @@ async fn collect<O: AsyncRead + Unpin, E: AsyncRead + Unpin>(
     Ok(collector.finish())
 }
 
-fn stream_error(err: std::io::Error) -> EngineError {
+pub(super) fn stream_error(err: std::io::Error) -> EngineError {
     engine_error(EngineErrorKind::Protocol, err.to_string())
 }
 
@@ -453,7 +456,7 @@ fn limit_error(message: &'static str) -> EngineError {
 /// Kubernetes reports success directly and a non-zero status as
 /// `NonZeroExitCode` with an `ExitCode` cause. An absent status is reported as
 /// `-1` rather than assumed successful.
-fn exit_code(status: Option<&Status>) -> i64 {
+pub(super) fn exit_code(status: Option<&Status>) -> i64 {
     let Some(status) = status else {
         return -1;
     };

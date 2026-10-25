@@ -31,6 +31,8 @@ mod kubernetes_engine;
 mod kubernetes_io;
 #[cfg(feature = "kubernetes")]
 mod kubernetes_pod;
+#[cfg(feature = "kubernetes")]
+mod kubernetes_process;
 
 #[cfg(test)]
 pub(crate) use backend::Capabilities;

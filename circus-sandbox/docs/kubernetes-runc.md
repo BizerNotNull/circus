@@ -1,10 +1,10 @@
 # Kubernetes workload (runc) backend
 
-This document records the B02 Kubernetes workload adapter and the S03-kr
-workspace snapshot slice: what it actually does, the versions and commands used
-for the recorded run, least-privilege RBAC, security settings,
-cleanup/ownership, and what remains unverified. It does not claim true
-pause/resume or a VM runtime.
+This document records the B02 Kubernetes workload adapter, the S03-kr
+workspace snapshot slice, and the interactive-process slice: what it actually
+does, the versions and commands used for the recorded run, least-privilege
+RBAC, security settings, cleanup/ownership, and what remains unverified. It does
+not claim true pause/resume or a VM runtime.
 
 ## Scope
 
@@ -17,6 +17,11 @@ Implemented:
   server-side dry run, Pod create/start, argv exec, bounded guest file transport,
   inspected host reporting, ownership-verified deletion, and typed unsupported
   operations.
+- Interactive `spawn_process` sessions over `pods/exec`: an owned stdin writer, a
+  merged ordered stdout/stderr stream, and an exit future that joins the
+  transport before mapping the status. The capability report sets
+  `spawn_process: true`; lifecycle still owns the one-process limit, timeout,
+  output bounds, cancellation, and Pod cleanup.
 - Workspace file snapshot capture/restore over the same `pods/exec` guest file
   protocol used by Docker and containerd. The capability report sets
   `workspace_snapshot: true`.
@@ -32,7 +37,8 @@ Not implemented:
 - Pause/resume (B03 provider). `pause_resume` stays false.
 - Process or guest-memory checkpointing. Snapshots copy regular workspace files
   and directories only.
-- Interactive `spawn_process` sessions (`spawn_process` capability is false).
+- TTY allocation, terminal resize, process-group signals, and a detached
+  session/recovery protocol.
 - pids limits, RuntimeClass selection, image pull credentials, NetworkPolicy
   creation, or KVM/gVisor/Kata runtimes.
 
@@ -167,6 +173,52 @@ means the pod does not join the host network namespace.
   `seccomp:RuntimeDefault`), host-path bind count, and mount count. `runtime`,
   `network_mode`, `pids_limit`, and `tmpfs_workspace` stay `None`.
 
+## Interactive processes
+
+`Sandbox::spawn_process(ProcessRequest)` attaches through `pods/exec` with
+`stdin/stdout/stderr: true`, `tty: false`, the Pod's single container (no
+container override), and the same 64 KiB attach buffers as one-shot exec. The
+lifecycle layer is unchanged: one process per sandbox, a lifetime timeout,
+per-stream output bounds, cancellation, and cleanup remain its responsibility.
+A second process or one-shot `exec` returns `SandboxError::ProcessActive` while
+a session is attached. A normal exit (including a nonzero code) retains the Pod
+and workspace. Timeout, output overflow, transport failure, session drop, or
+`cancel` destroys the owned Pod and reports the observed `CleanupReport`; the
+process transport never deletes a Pod.
+
+Because `pods/exec` has no environment, user, or working-directory option, the
+command runs through a positional Python trampoline:
+
+```text
+python3 -I -B -c <trampoline> -- <absolute-workdir> <override-count> <KEY=VALUE>... <user-argv>...
+```
+
+The trampoline changes to the absolute workdir, merges the explicit overrides
+over the image environment (split at the first `=`, so values may contain `=`),
+and `execvpe`s the user command. It is not a shell and never evaluates the user
+argv as Python source: every value is a separate argv element after the
+standalone `--`. The Pod already runs as the sandbox guest uid/gid, so no setuid
+is attempted, and the `user` field is inert. Environment overrides are carried in
+the exec request and in the trampoline's argument list while it starts; after
+`exec` they are in the guest environment, readable by same-uid processes in the
+sandbox like any image environment variable. This adapter does not log argv or
+environment values. Startup failures use exit `125` for a chdir error and `127`
+for an exec error.
+
+Transport ownership and ordering:
+
+- Output is a single ordered `ProcessChunk` stream built with `stream::unfold`
+  over the two readers. Per-stream order is preserved; interleaving between
+  stdout and stderr is the transport's order. No detached reader task is
+  spawned, so dropping the stream stops reads.
+- The exit future owns `AttachedProcess`. It is awaited only after output ends,
+  joins the kube message loop first, and then maps the status channel through the
+  same `exit_code` helper as one-shot exec. A missing status maps to `-1` and is
+  never treated as success. Dropping the exit future drops `AttachedProcess`,
+  whose `Drop` aborts the message loop.
+- Dropping the stdin writer closes stdin (EOF) without stopping the Pod; the Pod
+  remains lifecycle-owned.
+
 ## Workspace snapshots and pool leases
 
 `Sandbox::capture_workspace_snapshot(budget, max_archive_bytes)` works on a Pod
@@ -271,7 +323,7 @@ cargo test --locked --features kubernetes --test kubernetes_pool -- \
   --ignored --test-threads=1
 ```
 
-Results on 2026-10-25:
+Results recorded before the interactive-process slice (2026-10-25):
 
 ```text
 running 7 tests
@@ -285,6 +337,14 @@ test kubernetes_unsupported_operations_are_typed ... ok
 
 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.49s
 ```
+
+The interactive-process slice adds two cases that are not covered by the run
+above: `kubernetes_interactive_process_round_trip_and_nonzero_exit` (two-way
+stdin/stdout, stderr, absolute workdir, `a=b` environment value, exit 7, retained
+Pod and workspace) and `kubernetes_interactive_process_cancellation_cleans_up`
+(`ProcessTermination::Cancelled`, `Ownership::ConfirmedAbsent`, destroyed sandbox,
+Pod absence). Run the same suite command to record them on a real cluster; no
+result is claimed here for them.
 
 ```text
 running 4 tests
@@ -337,9 +397,19 @@ Environment overrides:
 - Pool claims are per-Pod leases, not warm process/memory images: every lease
   still pulls nothing (kubelet uses `IfNotPresent`) but does start a fresh Pod,
   and no Pod is reused after `release`, TTL expiry, or `shutdown`.
-- Interactive process sessions, pids limits, RuntimeClass selection, gVisor,
-  Kata, Firecracker/KVM, registry authentication, image pull policy changes,
-  multi-node scheduling behavior, and CNI/NetworkPolicy isolation.
+- Interactive process scope: no TTY, terminal resize, process-group signal, or
+  detached recovery exists. Cancellation destroys the whole Pod rather than
+  signalling one guest process. Environment overrides and the working directory
+  are applied by the argv trampoline because `pods/exec` has no such fields, so
+  override values are visible to same-Pod processes through the guest process
+  list; they are never logged by this adapter. Exit status depends on the API
+  server's exec status channel; an absent status maps to `-1`, matching one-shot
+  `exec`, and is never treated as success. Stdin EOF relies on the exec
+  stream-close channel negotiated by kube 4.2; if an API server does not support
+  it, the client closes the websocket instead, which can drop trailing output.
+- pids limits, RuntimeClass selection, gVisor, Kata, Firecracker/KVM, registry
+  authentication, image pull policy changes, multi-node scheduling behavior, and
+  CNI/NetworkPolicy isolation.
 - Node-level cgroup readback. `enforcement` reports the Pod spec, not the
   kubelet's effective cgroup values.
 - Tenant isolation across namespaces. The adapter scopes to one configured
