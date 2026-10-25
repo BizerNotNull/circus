@@ -208,6 +208,10 @@ fn from_snapshot(error: SnapshotError) -> ApiError {
         | SnapshotError::NotRegular { .. }
         | SnapshotError::NotPortable { .. } => ApiError::invalid_request(),
         SnapshotError::Workspace(error) => from_workspace(error),
+        SnapshotError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            ApiError::not_found()
+        }
+        SnapshotError::Io { .. } => ApiError::internal_error(),
         SnapshotError::RestoreCleanup { .. } => ApiError::cleanup_required(),
         SnapshotError::Interrupted => ApiError::cancelled(),
     }

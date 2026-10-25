@@ -665,6 +665,8 @@ fn read_regular_into(
 }
 
 #[cfg(test)]
+mod snapshot_file_tests;
+#[cfg(test)]
 mod snapshot_tests;
 
 #[doc(inline)]
