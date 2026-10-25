@@ -93,7 +93,7 @@ OCI spec 的安全设置：
 
 - `root.readonly = true`。
 - `process.capabilities` 的 bounding/effective/inheritable/permitted/ambient 全为空；`noNewPrivileges = true`。
-- 新建 pid/ipc/uts/mount/network/cgroup namespace；network namespace 没有任何接口，因此没有网络连通性。
+- 新建 pid/ipc/uts/mount/network/cgroup namespace；network 项没有 `path`，不是继承宿主或加入已有 namespace。适配器不调用 CNI、不安装 OCI hooks，因此新 namespace 只有 loopback，没有外部接口或路由。
 - workspace 为 tmpfs：`rw,nosuid,nodev,uid=<guest_uid>,gid=<guest_gid>,mode=0755,size=<workspace_bytes>`，不是 host bind。
 - 额外挂载 `/proc`、`/dev`、`/dev/pts`、`/dev/shm`、`/sys`、`/sys/fs/cgroup`；`maskedPaths`/`readonlyPaths` 与 Docker 默认集合一致。
 - 设备 cgroup：默认拒绝，再显式允许标准伪设备（null/zero/full/random/urandom/tty/console/ptmx/pts、loop、tun、fuse）。缺少该 allow list 时 cgroup v2 设备控制器会拒绝 runc 重新打开 `/dev/null`。
@@ -116,15 +116,23 @@ exec 与交互进程通过 runc shim 的 FIFO：
 
 ## 未验证 / 未实现
 
-- containerd 的 API 不暴露 cgroup 控制器生效值。`SandboxStatus::enforcement` 只报告从**存储的 OCI spec** 读回的结构事实（runtime handler、readonly root、capability 全空、no-new-privileges、private network namespace、0 个 bind mount、workspace tmpfs 选项）。`memory_bytes`、`nano_cpus`、`pids_limit` 保持 `None`，不能当作内核已强制。
+- containerd 的 API 不暴露 cgroup 控制器生效值。`SandboxStatus::enforcement` 只报告从**存储的 OCI spec** 读回的结构事实（runtime handler、readonly root、capability 全空、no-new-privileges、network namespace、0 个 bind mount、workspace tmpfs 选项）。`network_mode` 仅对唯一、无 `path`、无 hooks 的新网络 namespace 报告 `"none"`；加入已有路径为 `"private"`，没有 network 项为 `"host"`，重复、损坏或带 hooks 的离线候选不报告该值。它不监控宿主特权进程在创建后的修改。`memory_bytes`、`nano_cpus`、`pids_limit` 保持 `None`，不能当作内核已强制。
 - 没有 seccomp 过滤、user namespace、AppArmor/SELinux profile、TTY、进程组信号或 detached recovery。
-- 网络 namespace 为空，但没有 bandwith/连接审计；不能把它当作网络策略。
+- 离线网络不等于可配置的网络策略；没有 bandwidth 限制或连接审计。运行器仍要求 `network_mode = "none"`，不会接受任意 `"private"` 网络作为禁网证明。
 - image 解包路径只在 committed snapshot 缺失时执行。真实 daemon 测试现在使用全新 namespace，实际执行 `Prepare`/`Diff.Apply`/`Commit`，并验证 guest 可启动、可 exec、清理后无 snapshot 残留。
 - 外部进程并发解包同一 chain 时，各进程使用独立的随机 extraction key；Commit 以 chain id 命名，先完成者胜出，后完成者的 `AlreadyExists` 被当作成功并只删除自己的 extraction snapshot。没有跨进程锁。
 - 未验证 Kubernetes/CRI、Kata、Firecracker、gVisor（`runsc` 在本机不可用）、VM/内存检查点与 registry 认证。显式 image transfer 的新行为需单独提供真实 daemon 验证，不沿用上面的旧运行记录。
 - Windows 主机不编译 containerd 适配器；在非 Unix 主机上选择 `BackendConfig::Containerd` 会在连接前返回 typed backend error。
 
 ## 测试
+
+`containerd_network_is_offline` 属于已有 `containerd_sandbox` 套件和 CI：宿主先连接本机监听端点作为正对照，guest 验证只有 loopback、没有 IPv4 路由、IPv6 路由仅指向 loopback，且无法连接同一宿主端点；最后确认容器和自有 snapshot 已移除。不依赖外部站点或公网连通性。WSL2/containerd 2.2.1/runc 环境已实际执行该用例并通过。
+
+```bash
+CIRCUS_CONTAINERD=1 cargo test --locked --features containerd \
+  --test containerd_sandbox containerd_network_is_offline \
+  -- --ignored --exact --nocapture --test-threads=1
+```
 
 新增镜像准备测试与下方历史运行记录分开验收。确定性 `containerd_image_policy` 使用 Unix + `containerd` feature 的具体本地 gRPC peer，不需要真实 daemon；它验证协议/策略边界，不是真实 registry 或隔离证据：
 
