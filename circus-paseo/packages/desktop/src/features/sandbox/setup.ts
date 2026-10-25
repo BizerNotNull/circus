@@ -575,6 +575,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
         delete model.apiKeyFile;
         if (environment.modelCaFile) model.caFile = environment.modelCaFile;
         const next: RunnerConfig = {
+          ...config,
           version: 1,
           agent: input.agent,
           backend: { kind: "docker", endpoint, image, runtime: "runc" },
