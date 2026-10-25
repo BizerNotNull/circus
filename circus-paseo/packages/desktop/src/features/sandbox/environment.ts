@@ -15,10 +15,9 @@ export interface SandboxEnvironment {
   checks: SandboxSetupSnapshot["checks"];
 }
 
-// Fully qualify the built-in tag: some local Engines fail short-name inspection even when
-// their image listing contains it. Save still pins the inspected immutable image ID.
+// Fully qualify built-in image tags because some local Engines fail short-name inspection.
 export const CODEX_IMAGE = "docker.io/library/circus-agent-codex:0.164.0";
-
+export const CLAUDE_CODE_IMAGE = "docker.io/library/circus-agent-claude-code:2.1.310";
 export async function exists(path: string, mode = constants.R_OK): Promise<boolean> {
   try {
     await access(path, mode);
@@ -46,10 +45,10 @@ async function firstSupportedPython(candidates: string[], run: RunCommand): Prom
   return null;
 }
 
-async function findSource(candidates: string[]): Promise<string | null> {
+async function findSource(candidates: string[], agent: "codex" | "claude-code"): Promise<string | null> {
   for (let candidate of candidates) {
     for (let depth = 0; depth < 6; depth += 1) {
-      if (await exists(join(candidate, "circus-sandbox/images/codex/Dockerfile"))) return candidate;
+      if (await exists(join(candidate, `circus-sandbox/images/${agent === "claude-code" ? "claude-code" : "codex"}/Dockerfile`))) return candidate;
       const parent = dirname(candidate);
       if (parent === candidate) break;
       candidate = parent;
@@ -69,9 +68,12 @@ interface InspectEnvironmentInput {
       | { kind: "docker"; endpoint: string; image: string }
       | { kind: "containerd"; image: string };
     model?: { caFile?: string };
+    agent?: "codex" | "claude-code";
   };
   configuredBridge?: string;
   binaryDirectories: string[];
+  agent?: "codex" | "claude-code";
+  agentImage?: string;
 }
 
 export async function inspectEnvironment(
@@ -80,7 +82,8 @@ export async function inspectEnvironment(
   const backend = input.configured?.backend;
   if (backend && backend.kind !== "docker")
     throw new Error("Desktop setup only inspects Docker backends.");
-  const source = await findSource(input.sourceCandidates);
+  const agent = input.agent ?? input.configured?.agent ?? "codex";
+  const source = await findSource(input.sourceCandidates, agent);
   const bridgeCandidates = input.binaryDirectories.map((directory) =>
     join(directory, "circus-stdio-bridge"),
   );
@@ -110,7 +113,10 @@ export async function inspectEnvironment(
         `unix://${input.userHome}/.docker/run/docker.sock`,
         `unix://${input.userHome}/.colima/default/docker.sock`,
       ];
-  const imageRef = backend?.image ?? CODEX_IMAGE;
+  const imageRef =
+    input.agent === undefined || input.agent === input.configured?.agent
+      ? (backend?.image ?? input.agentImage ?? CODEX_IMAGE)
+      : (input.agentImage ?? (agent === "claude-code" ? CLAUDE_CODE_IMAGE : CODEX_IMAGE));
   const { endpoint, image } = await inspectDocker({ docker, endpoints, imageRef, run: input.run });
   const supported = input.platform === "darwin";
   const checks: SandboxSetupSnapshot["checks"] = [
@@ -164,11 +170,13 @@ export async function inspectEnvironment(
     },
     {
       id: "image",
-      label: "Codex environment",
+      label: agent === "claude-code" ? "Claude Code environment" : "Codex environment",
       ready: image !== null,
       detail: image
-        ? "Pinned Codex 0.164.0 image found."
-        : "Prepare the runtime to build the Codex environment. The first build needs internet access.",
+        ? agent === "claude-code"
+          ? "Pinned Claude Code image found."
+          : "Pinned Codex 0.164.0 image found."
+        : `Prepare the runtime to build the ${agent === "claude-code" ? "Claude Code" : "Codex"} environment. The first build needs internet access.`,
     },
   ];
   return {
