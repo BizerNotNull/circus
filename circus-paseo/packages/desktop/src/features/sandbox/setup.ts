@@ -258,6 +258,8 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       candidates.unshift(selected);
     }
     const sameConfiguredAgent = selectedAgent === (stored.config?.agent ?? "codex");
+    const defaultAgentImage =
+      selectedAgent === "claude-code" ? CLAUDE_CODE_IMAGE : CODEX_IMAGE;
     const environment = await inspectEnvironment({
       platform: deps.platform,
       userHome: deps.userHome,
@@ -268,9 +270,8 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
       configuredBridge: stored.provider?.command?.[0],
       agent: selectedAgent,
       agentImage: sameConfiguredAgent
-        ? (stored.config?.backend.image ??
-          (selectedAgent === "claude-code" ? CLAUDE_CODE_IMAGE : CODEX_IMAGE))
-        : (selectedAgent === "claude-code" ? CLAUDE_CODE_IMAGE : CODEX_IMAGE),
+        ? (stored.config?.backend.image ?? defaultAgentImage)
+        : defaultAgentImage,
     });
     return { ...stored, environment, agent: selectedAgent };
   }
@@ -574,6 +575,7 @@ export function createSandboxSetup(deps: SandboxSetupDependencies) {
         delete model.apiKeyFile;
         if (environment.modelCaFile) model.caFile = environment.modelCaFile;
         const next: RunnerConfig = {
+          version: 1,
           agent: input.agent,
           backend: { kind: "docker", endpoint, image, runtime: "runc" },
           image: {
