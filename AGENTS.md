@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心，`circus-paseo` 是尚未接入的前端调用方。沙箱目前提供 workspace 文件库、受预算约束的进程内代码快照、资源请求校验、本地 OCI 镜像解析与有界预启动池、固定提交 Git clone/worktree、Docker 工作区文件快照，以及显式配置的本地 Linux Docker Engine + `runc` 异步后端（含每沙箱一个交互进程会话）；不要把完整交付规划写成现有能力。
+Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心，`circus-paseo` 是尚未接入的前端调用方。沙箱目前提供 workspace 文件库、受预算约束的进程内代码快照及其版本化有界文件归档、资源请求校验、本地 OCI 镜像解析与有界预启动池、固定提交 Git clone/worktree、Docker 工作区文件快照，以及显式配置的本地 Linux Docker Engine + `runc` 异步后端（含每沙箱一个交互进程会话）；不要把完整交付规划写成现有能力。
 
 - **当前开发阶段**：工作聚焦 `circus-sandbox` 的功能开发；现有工程门禁继续适用，不为新增功能重复建设工程基础设施。除非用户明确要求，不主动修改 `circus-paseo`。
 - **Paseo 暂不开发**：说明与开发规则见 [circus-paseo/CLAUDE.md](circus-paseo/CLAUDE.md)。除非任务明确要求，不修改其源码、依赖或配置。
@@ -19,7 +19,7 @@ Circus 是面向 AI Agents 的沙箱项目：`circus-sandbox` 承担 Rust 核心
 
 | 路径                    | 用途                                                                                                                                                                                                                                                                              |
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `circus-sandbox/`       | Rust library crate；workspace、进程内代码快照、资源/配置校验与 Linux Docker / containerd + runc、Kubernetes workload API，及对应 examples/tests、许可证策略。                                                                                                                     |
+| `circus-sandbox/`       | Rust library crate；workspace、进程内代码快照及其有界文件归档、资源/配置校验与 Linux Docker / containerd + runc、Kubernetes workload API，及对应 examples/tests、许可证策略。                                                                                                     |
 | `circus-sandbox/src/`   | 公开 `api`、`runtime` 及根门面；私有 workspace、lifecycle、infrastructure 实现。其余领域目录不代表能力已交付。                                                                                                                                                                    |
 | `circus-sandbox/tests/` | 公开文件、代码快照与配置测试；Docker、containerd 与 Kubernetes 集成测试默认忽略，须显式连接真实 daemon 或集群。                                                                                                                                                                   |
 | `circus-sandbox/docs/`  | 交付计划与工程事实。架构细节不在根指南复制。                                                                                                                                                                                                                                      |

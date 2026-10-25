@@ -56,13 +56,16 @@ cargo run --locked --example workspace
 
 在 `circus-sandbox/` 目录执行。rustup 会按该目录的 `rust-toolchain.toml` 选择 1.99.1。
 
-## 进程内代码快照
+## 代码快照与有界文件归档
 
-公开入口为 `Workspace::capture_code_snapshot(SnapshotBudget::new(max_total_bytes, max_entries)?)`，返回 `CodeSnapshot`；调用其 `restore()` 创建独立的新 `Workspace`，不会覆盖源工作区。
+公开入口为 `Workspace::capture_code_snapshot(SnapshotBudget::new(max_total_bytes, max_entries)?)`，返回 `CodeSnapshot`；调用其 `restore()` 创建独立的新 `Workspace`，不会覆盖源工作区。`CodeSnapshot::save_file(path)` 把同一快照原子发布到调用方指定的宿主路径，`CodeSnapshot::load_file(path, max_file_bytes, budget)` 用调用方预算读回。
 
-- 两项预算必须为正：字节预算只计算文件内容，条目预算计算文件和目录，不包括根目录；单文件仍受 workspace 的读写上限约束。这是一次捕获的预算，不是之后写入的工作区配额。
+- 两项预算必须为正：字节预算只计算文件内容，条目预算计算文件和目录，不包括根目录；单文件仍受 workspace 的读写上限约束。这是一次捕获、保存或加载的预算，不是之后写入的工作区配额。
 - 捕获保留普通文件与空目录，拒绝符号链接、特殊节点和不符合可移植相对路径规则的名称；失败返回类型化 `SnapshotError`。
-- 快照只保存在当前进程内存中，不序列化、不持久化，不是进程/内存检查点、Docker commit、容器或 VM 快照，也不是池已实现的证据。恢复失败且清理也失败时，`RestoreCleanup` 返回目标 workspace 供调用方重试清理。
+- 归档格式版本化、确定性且自定界：路径必须是以 `/` 分隔的规范 UTF-8 相对路径，条目按路径字节排序，拒绝重复/无序/非规范路径、非 UTF-8 名称、未知类型、截断、尾随字节、超长路径/载荷/计数和不可移植路径。加载按实际剩余字节、调用方 `max_file_bytes` 和预算逐项校验后才分配，不信任头部的声明长度。
+- 保存要求目标父目录已存在；临时文件在同一父目录中写入、flush、sync 后 rename 覆盖目录项，因此覆盖符号链接时替换链接本身而不写穿目标。加载用 `symlink_metadata` 拒绝符号链接、目录和其他非普通节点，不跟随。`SnapshotError::Io { operation, source }` 不携带宿主路径。
+- 归档只保存普通文件内容与目录结构，不保存权限、所有权、时间戳、进程或内存状态；不是进程/内存/VM 检查点、Docker commit、工作区总配额、加密、保留策略或租户隔离机制。调用方拥有路径、存储、保留和租户范围。需要恢复的 agent 原生会话文件必须位于被捕获的 workspace 内。
+- 内存中的 `CodeSnapshot` 仍不是持久对象；只有调用方显式保存的文件才跨进程存活。恢复失败且清理也失败时，`RestoreCleanup` 返回目标 workspace 供调用方重试清理。
 
 示例为 `examples/code_snapshot.rs`，公开 API 测试在 `tests/code_snapshot.rs`。
 

@@ -1,7 +1,11 @@
-//! In-memory capture of a [`Workspace`] into a new workspace.
+//! In-memory capture of a [`Workspace`] into a new workspace, and a bounded
+//! durable file format for a caller-supplied host path.
 //!
-//! The snapshot is a process-local value. It is not a process or memory
-//! checkpoint, not a Docker commit, and not durable after this process exits.
+//! A [`CodeSnapshot`] can be written with [`CodeSnapshot::save_file`] and read
+//! back with [`CodeSnapshot::load_file`]. The archive stores regular-file bytes
+//! and directories only. It is not a process or memory checkpoint, not a Docker
+//! commit, not a workspace quota, and not encryption, retention, or tenant
+//! scoping. The caller owns the host path, its storage, and its lifecycle.
 
 use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
@@ -13,7 +17,9 @@ use cap_std::fs::{Dir, File, OpenOptions};
 
 use super::{Workspace, WorkspaceError, check_path, lock_poisoned};
 
-/// Why a code-snapshot capture or restore failed.
+mod archive;
+
+/// Why a code-snapshot capture, restore, save, or load failed.
 ///
 /// This is not a workspace quota error. [`SnapshotBudget`] is a bound on one
 /// capture. [`WorkspaceError`] stays the file-operation error.
@@ -28,9 +34,24 @@ pub enum SnapshotError {
         reason: String,
     },
 
-    /// A transport, manifest, or restore limit was zero.
+    /// A transport, manifest, restore, or durable-file limit was zero or
+    /// otherwise outside the supported range.
     #[error("invalid archive limit")]
     InvalidArchiveLimit,
+
+    /// A host filesystem operation on a caller-supplied snapshot archive failed.
+    ///
+    /// `operation` names the failed step, such as `open`, `read`, `create
+    /// temporary file`, `write`, `sync`, or `rename`. It never contains the
+    /// host path, and neither does `source`.
+    #[error("snapshot {operation} failed: {source}")]
+    Io {
+        /// Failed step.
+        operation: &'static str,
+        /// Underlying host error.
+        #[source]
+        source: io::Error,
+    },
 
     /// Snapshot operation was interrupted before staging commit.
     #[error("snapshot operation interrupted before staging commit")]
@@ -125,12 +146,13 @@ impl From<io::Error> for SnapshotError {
     }
 }
 
-/// Caller-supplied bound for one [`Workspace::capture_code_snapshot`] or
-/// [`super::CodeSource::copy_to_workspace`] operation.
+/// Caller-supplied bound for one [`Workspace::capture_code_snapshot`],
+/// [`super::CodeSource::copy_to_workspace`], or
+/// [`super::CodeSnapshot::load_file`] operation.
 ///
 /// `max_total_bytes` counts file contents only. `max_entries` counts files and
 /// directories, not the root. Both must be positive. This operation budget
-/// bounds one capture or copy. It is not a workspace total, file-count quota,
+/// bounds one capture, copy, or archive load. It is not a workspace total, file-count quota,
 /// or host disk quota, and it is not enforced on later writes. There is still
 /// no workspace total-quota API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,10 +189,13 @@ impl SnapshotBudget {
 
 /// Owned, immutable copy of regular files and directories.
 ///
-/// Bytes live in this process only. Drop frees that memory; it does not delete
-/// a workspace. The value is not a process or memory checkpoint and is not
-/// serialized. The Docker backend builds this value from a guest workspace
-/// enumeration and per-file reads.
+/// Bytes normally live in this process only; [`Self::save_file`] optionally
+/// publishes them to a caller-supplied host path and [`Self::load_file`] reads
+/// that bounded format back. Drop frees memory; it does not delete a workspace
+/// or an archive. The value is not a process or memory checkpoint, not a
+/// quota, and carries no encryption, retention, or tenant scoping. The Docker
+/// backend builds this value from a guest workspace enumeration and per-file
+/// reads.
 ///
 /// [`Self::restore`] creates a new [`Workspace`]. It does not overwrite the
 /// workspace that was captured.

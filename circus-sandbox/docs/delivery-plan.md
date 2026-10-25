@@ -11,7 +11,7 @@
 - 安全文档与最小权限跟进见 [PR #7](https://github.com/BizerNotNull/circus/pull/7)，以该 PR 的实际合并状态和证据为准。安全扫描约定统一见 [安全说明](../../.github/sandbox-security.md)。
 - `main` 基准提交 `1b4c005` 已含本地 Linux Docker + runc 的进程内创建、启动、执行、文件、暂停、恢复、销毁路径，以及显式配置和资源值校验；公开类型不泄露 Bollard，但入口仍是 Docker 专用，不等于后端中立 API 已完成。范围以 [Docker + runc 文档](docker-linux-runc.md) 和源码为准。
 - 命令/暂存类型化错误 C01 已由 [PR #18](https://github.com/BizerNotNull/circus/pull/18) 合并到 `main`（`73bc190`）；验收和运行证据见该 PR。后续矩阵中的 C01 保留为契约与验收索引，不再作为待实现前置项。
-- 已有 `Workspace::capture_code_snapshot`、`CodeSnapshot`、预算与新工作区恢复，是进程内存中的代码文件快照，不是容器/VM 快照、持久化存储或池。文件库、资源请求校验也不等于总配额执行或宿主隔离。
+- 已有 `Workspace::capture_code_snapshot`、`CodeSnapshot`、预算与新工作区恢复，是进程内存中的代码文件快照；`CodeSnapshot::save_file`/`load_file` 另提供显式、有界、版本化的普通文件/目录归档，宿主路径由调用方提供并负责存储、保留与租户范围。它不是容器/VM 快照、进程/内存检查点、工作区总配额、加密或保留策略，也不是池。文件库、资源请求校验也不等于总配额执行或宿主隔离。
 - Docker + runc、containerd + runc 与 Kubernetes workload（B02 的创建/就绪/exec/交互进程/文件/删除切片，S03-kr 工作区快照，P02 池租约）已实现；Kubernetes 真正 pause/resume provider（B03）、containerd+gVisor/Kata、gVisor、Kata、Firecracker、OCI 环境准备、Git 工作区、运行时快照（进程/客户机内存检查点）和运行指标仍待实现；HTTP/认证/OpenAPI（H01–H02）已在 `src/http` 与 `docs/http-api.md` 实现，仍需以 CI 和真实后端运行证据为准。Kubernetes workload 不实现 RuntimeClass 选择、NetworkPolicy 或节点 cgroup 读回，因此 B02 中“网络/RuntimeClass 实际生效”的验收仍未完成。Docker 现有路径还需要下文审计正确性切片；局部测试通过不能关闭这些项。
 - 本地 Docker 测试、工具安装或宿主资源可达只证明各自观察，不能证明七领域交付完成。具体命令、环境、提交和运行结果保留在产生证据的 PR/报告，不为本计划编辑预填 CI 或合并结果。
 
@@ -159,7 +159,7 @@ Docker + runc 保留并满足 C/A 各项，不再新建空的 Docker 基线。Ku
 
 #### 3.5 三种快照语义、预启动与池
 
-已有内存代码快照不需要重建。它按字节/条目预算捕获普通文件/目录、拒绝符号链接和特殊节点，恢复成独立 workspace；进程退出后不持久存在。它不是执行会话继续、容器镜像、客户机内存或进程检查点。
+已有内存代码快照不需要重建。它按字节/条目预算捕获普通文件/目录、拒绝符号链接和特殊节点，恢复成独立 workspace；进程退出后内存值不持久存在。新增的 `save_file`/`load_file` 只把同一内容发布为调用方指定宿主路径上的有界、版本化、自定界文件归档：加载按实际剩余字节、调用方单文件上限和预算校验后分配，拒绝重复/不可移植路径、未知类型、截断与尾随字节。归档不是执行会话继续、容器镜像、客户机内存或进程检查点，也不含配额、加密、保留或租户隔离；调用方拥有路径、存储和租户范围，agent 原生会话文件必须位于被捕获的 workspace 内。Paseo 接入仍未实现。
 
 当前 Docker 使用只读根与有界 tmpfs 工作区，`docker commit` 不包含 tmpfs 写入；不能沿用“提交容器可写层即可恢复代码”的承诺。运行时文件快照必须对声明范围做受限归档/恢复，或选择经证明包含该范围的真实机制，恢复失败必须失败关闭。进程/VM 内存检查点只能由另有实现和证据的能力声明，不由本计划文件快照暗示支持。
 

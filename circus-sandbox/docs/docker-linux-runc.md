@@ -85,7 +85,7 @@ Both APIs serialize with all other sandbox operations and use the configured fil
 
 The deadline initiates cancellation, not a guarantee of cleanup-completion time. Already-started bounded local filesystem work is drained rather than detached, and produced replacement staging is explicitly removed before container cleanup. Guest enumeration and payload reads can be dropped promptly. Only the lifecycle worker installs staging, never a detached filesystem task. `SandboxError::SnapshotInterrupted { interruption, snapshot }` preserves a timeout/cancellation or lifecycle failure together with a domain failure and its cleanup-owned workspace.
 
-These are process-local file snapshots, not durable serialization, process/memory state, VM checkpointing, CRIU or Docker commits. The readonly root and tmpfs workspace mean Docker commit would omit workspace writes; reading the tmpfs through the guest helper is required.
+Snapshot values remain process-local. `CodeSnapshot::save_file` and `load_file` optionally add a bounded, versioned durable file archive for a trusted caller-supplied host path; that archive contains regular-file contents and directories only and validates caller budgets before allocation. It is not process/memory state, VM checkpointing, CRIU, Docker commits, a quota, encryption, retention, or tenant scoping, and this backend does not use it implicitly. The readonly root and tmpfs workspace mean Docker commit would omit workspace writes; reading the tmpfs through the guest helper is required.
 
 ## Prestarted single-use sandbox pool
 

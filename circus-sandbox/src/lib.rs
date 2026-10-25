@@ -9,8 +9,12 @@
 //! callers do not name backend SDK types.
 //!
 //! [`CodeSource`] copies an explicitly authorized source directory into a fresh
-//! owned workspace. [`CodeSnapshot`] captures workspace contents in memory;
-//! sandbox snapshots capture and restore tmpfs workspace files, including
+//! owned workspace. [`CodeSnapshot`] captures workspace contents in memory and
+//! can publish that content as a bounded, versioned file archive with
+//! [`CodeSnapshot::save_file`] or read it back with
+//! [`CodeSnapshot::load_file`]; the archive stores regular files and directories
+//! only and is not a process, memory, VM, or Docker-commit checkpoint. Sandbox
+//! snapshots capture and restore tmpfs workspace files, including
 //! running writes, but are not process, memory, VM, or Docker-commit
 //! checkpoints. [`environment::prepare_docker_image`] resolves an explicit
 //! reference to an immutable image identity, defaulting to local-only inspection;
