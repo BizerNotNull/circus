@@ -50,9 +50,17 @@ rustix = { version = "1.1", default-features = false, features = ["std", "proces
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tokio = { workspace = true, features = ["process"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+tonic = { version = "0.14", default-features = false, features = ["server"] }
+tonic-prost = { version = "0.14", default-features = false }
+
 [[example]]
 name = "http_api"
 required-features = ["http"]
+
+[[example]]
+name = "containerd_image_environment"
+required-features = ["containerd"]
 
 [workspace]
 members = ["agent-runner", "stdio-bridge"]
