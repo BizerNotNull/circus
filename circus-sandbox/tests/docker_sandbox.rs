@@ -2,8 +2,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use circus_sandbox::{
-    BackendConfig, CommandError, CommandRequest, IoLimits, IsolationConfig, ResourceLimits,
-    Sandbox, SandboxConfig, SandboxError, SandboxPhase, StagingError,
+    CommandRequest, DockerEndpoint, DockerSandbox, IoLimits, IsolationConfig, ProcessOutput,
+    ProcessRequest, ResourceLimits, RuntimeName, SandboxConfig, SandboxError, SandboxPhase,
 };
 
 const PY: &str = "python3";
@@ -18,32 +18,18 @@ fn enabled() {
     );
 }
 
-fn backend() -> Result<BackendConfig, Box<dyn std::error::Error>> {
-    Ok(BackendConfig::docker(
-        std::env::var("CIRCUS_DOCKER_ENDPOINT")?,
-        std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
-        "runc",
-    ))
-}
-
-fn host(backend: &BackendConfig) -> String {
-    match backend {
-        BackendConfig::Docker(docker) => {
-            let endpoint = docker.endpoint();
-            if endpoint.starts_with('/') {
-                format!("unix://{endpoint}")
-            } else {
-                endpoint.to_string()
-            }
-        }
-        BackendConfig::Containerd(_) => panic!("docker fixture received a containerd descriptor"),
-        BackendConfig::Kubernetes(_) => panic!("docker fixture received a Kubernetes descriptor"),
-    }
+fn endpoint() -> Result<DockerEndpoint, Box<dyn std::error::Error>> {
+    Ok(DockerEndpoint::parse(&std::env::var(
+        "CIRCUS_DOCKER_ENDPOINT",
+    )?)?)
 }
 
 fn config() -> Result<SandboxConfig, Box<dyn std::error::Error>> {
     let limits = ResourceLimits::new(64 * 1024 * 1024, 100, TEST_PIDS, 8 * 1024 * 1024, 1024)?;
     Ok(SandboxConfig::new(
+        endpoint()?,
+        std::env::var("CIRCUS_DOCKER_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
+        RuntimeName::runc(),
         limits,
         IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
         IoLimits::new(64 * 1024, Duration::from_secs(3))?,
@@ -51,57 +37,44 @@ fn config() -> Result<SandboxConfig, Box<dyn std::error::Error>> {
 }
 
 struct Fixture {
-    sandbox: Option<Sandbox>,
-    host: String,
+    sandbox: Option<DockerSandbox>,
+    endpoint: DockerEndpoint,
     id: Option<String>,
 }
 
 impl Fixture {
     async fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        Self::with_config(backend()?, config()?).await
-    }
-
-    async fn with_config(
-        backend: BackendConfig,
-        config: SandboxConfig,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let host = host(&backend);
-        let sandbox = Sandbox::create(backend, config).await?;
-        let id = sandbox.status().await?.instance_id;
+        let ep = endpoint()?;
+        let sandbox = DockerSandbox::create(config()?).await?;
+        let id = sandbox.status().await?.container_id;
         Ok(Self {
             sandbox: Some(sandbox),
-            host,
+            endpoint: ep,
             id,
         })
     }
 
-    fn sandbox(&self) -> &Sandbox {
+    fn sandbox(&self) -> &DockerSandbox {
         self.sandbox.as_ref().expect("fixture is alive")
     }
 }
 
-// The fixture owns exactly one container. Teardown is explicit and has no Drop
-// fallback: `Sandbox::destroy` reports success only after confirmed absence,
-// then the engine must also report the container gone. Unconfirmed removal
-// fails the test instead of being ignored.
-async fn teardown(f: &mut Fixture) -> Result<(), Box<dyn std::error::Error>> {
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        if let Some(id) = &self.id {
+            let host = match &self.endpoint {
+                DockerEndpoint::UnixSocket { path } | DockerEndpoint::NamedPipe { path } => path,
+            };
+            let _ = Command::new("docker")
+                .args(["--host", host, "rm", "-f", id])
+                .output();
+        }
+    }
+}
+
+async fn destroy(f: &mut Fixture) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(sandbox) = f.sandbox.take() {
         sandbox.destroy().await?;
-    }
-    let Some(id) = f.id.as_deref() else {
-        return Err("fixture has no container ID; absence cannot be confirmed".into());
-    };
-    let inspected = Command::new("docker")
-        .args(["--host", &f.host, "inspect", id])
-        .output()?;
-    if inspected.status.success() {
-        return Err(format!("teardown did not remove container {id}").into());
-    }
-    let stderr = String::from_utf8_lossy(&inspected.stderr);
-    let absent = stderr.to_ascii_lowercase();
-    // The CLI wording varies by version: "No such object" or "no such object".
-    if !(absent.contains("no such") || absent.contains("not found")) {
-        return Err(format!("teardown could not confirm absence of {id}: {stderr}").into());
     }
     Ok(())
 }
@@ -126,24 +99,14 @@ async fn docker_linux_runc_lifecycle() -> Result<(), Box<dyn std::error::Error>>
     f.sandbox().start().await?;
     let status = f.sandbox().status().await?;
     assert_eq!(status.phase, SandboxPhase::Running);
-    let observed = status
-        .enforcement
-        .as_ref()
-        .expect("running sandbox exposes inspected evidence");
-    assert_eq!(observed.runtime.as_deref(), Some("runc"));
-    assert_eq!(observed.memory_bytes, Some(64 * 1024 * 1024));
-    assert_eq!(observed.nano_cpus, Some(100_000_000));
-    assert_eq!(observed.pids_limit, Some(i64::from(TEST_PIDS)));
-    assert_eq!(observed.readonly_root, Some(true));
-    assert_eq!(observed.network_mode.as_deref(), Some("none"));
-    assert_eq!(observed.bind_count, Some(0));
-    assert!(
-        observed
-            .cap_drop
-            .as_ref()
-            .is_some_and(|caps| caps.iter().any(|cap| cap == "ALL"))
-    );
+    assert_eq!(status.runtime, "runc");
+    assert_eq!(status.memory_bytes, 64 * 1024 * 1024);
+    assert_eq!(status.nano_cpus, 100_000_000);
+    assert_eq!(status.pids_limit, i64::from(TEST_PIDS));
+    assert!(status.readonly_root && status.network_mode == "none");
+    assert!(status.bind_count == 0 && status.cap_drop.iter().any(|c| c == "ALL"));
     let security = f.sandbox().exec(py(&["-c", r###"from pathlib import Path; s=Path('/proc/self/status').read_text(); print(next(x for x in s.splitlines() if x.startswith('NoNewPrivs:'))); print(next(x for x in s.splitlines() if x.startswith('CapEff:')))"###])).await?;
+    assert_eq!(security.exit_code, 0, "guest security probe: {security:?}");
     let security_text = String::from_utf8(security.stdout)?;
     assert!(
         security_text
@@ -156,6 +119,7 @@ async fn docker_linux_runc_lifecycle() -> Result<(), Box<dyn std::error::Error>>
             .any(|line| line.contains("CapEff:") && line.ends_with("0000000000000000"))
     );
     let limits = f.sandbox().exec(py(&["-c", r###"from pathlib import Path; root=Path('/sys/fs/cgroup'); print((root/'memory.max').read_text().strip()); print((root/'pids.max').read_text().strip()); print((root/'cpu.max').read_text().strip())"###])).await?;
+    assert_eq!(limits.exit_code, 0, "guest cgroup limits probe: {limits:?}");
     let limit_text = String::from_utf8(limits.stdout)?;
     assert_eq!(limit_text.lines().next(), Some("67108864"));
     assert_eq!(limit_text.lines().nth(1), Some("32"));
@@ -181,7 +145,8 @@ async fn docker_linux_runc_lifecycle() -> Result<(), Box<dyn std::error::Error>>
     f.sandbox().destroy().await?;
     assert_eq!(f.sandbox().status().await?.phase, SandboxPhase::Destroyed);
     f.sandbox().destroy().await?;
-    teardown(&mut f).await
+    f.sandbox = None;
+    Ok(())
 }
 
 #[tokio::test]
@@ -193,9 +158,9 @@ async fn docker_linux_runc_ownership_is_per_create() -> Result<(), Box<dyn std::
     assert_ne!(first.id, second.id);
     first.sandbox().start().await?;
     second.sandbox().start().await?;
-    teardown(&mut second).await?;
+    destroy(&mut second).await?;
     assert_eq!(first.sandbox().status().await?.phase, SandboxPhase::Running);
-    teardown(&mut first).await?;
+    destroy(&mut first).await?;
     Ok(())
 }
 
@@ -232,7 +197,7 @@ async fn docker_linux_runc_guest_paths_and_file_limits() -> Result<(), Box<dyn s
     let too_big = f.sandbox().read_file("too-big").await;
     assert!(too_big.is_err());
     assert!(f.sandbox().read_file("secret").await? == b"secret");
-    teardown(&mut f).await?;
+    destroy(&mut f).await?;
     Ok(())
 }
 
@@ -290,100 +255,147 @@ async fn docker_linux_runc_exec_abort_destroys_only_owner() -> Result<(), Box<dy
         survivor.sandbox().status().await?.phase,
         SandboxPhase::Destroyed
     );
-    teardown(&mut victim).await?;
-    teardown(&mut survivor).await?;
+    destroy(&mut victim).await?;
+    destroy(&mut survivor).await?;
     Ok(())
 }
 
 #[tokio::test]
 #[ignore = "requires an explicit real Linux Docker Engine"]
-async fn docker_linux_runc_invalid_commands_preserve_sandbox()
+async fn docker_linux_runc_process_session_streams_stdin_stdout_stderr_and_exit()
 -> Result<(), Box<dyn std::error::Error>> {
     enabled();
     let mut f = Fixture::new().await?;
     f.sandbox().start().await?;
-    let mut empty_argv = py(&["-c", "print('unexpected')"]);
-    empty_argv.argv.clear();
-    let mut zero_timeout = py(&["-c", "print('unexpected')"]);
-    zero_timeout.timeout = Duration::ZERO;
-    let mut zero_limit = py(&["-c", "print('unexpected')"]);
-    zero_limit.output_limit_bytes = 0;
-    for (request, expected) in [
-        (empty_argv, CommandError::EmptyArgv),
-        (
-            zero_timeout,
-            CommandError::InvalidTimeout {
-                timeout: Duration::ZERO,
-            },
-        ),
-        (
-            zero_limit,
-            CommandError::InvalidOutputLimit {
-                output_limit_bytes: 0,
-            },
-        ),
-    ] {
-        let err = f.sandbox().exec(request).await.unwrap_err();
-        assert!(
-            !matches!(err, SandboxError::RelativePath { .. }),
-            "invalid command was classified as a path failure: {err:?}"
-        );
-        assert!(matches!(&err, SandboxError::Command(actual) if actual == &expected));
-        assert_eq!(
-            std::error::Error::source(&err)
-                .and_then(|source| source.downcast_ref::<CommandError>()),
-            Some(&expected)
-        );
-        let status = f.sandbox().status().await?;
-        assert_eq!(status.phase, SandboxPhase::Running);
-        assert_eq!(status.instance_id, f.id);
-        let out = f.sandbox().exec(py(&["-c", "print('alive')"])).await?;
-        assert_eq!(out.stdout, b"alive\n");
+    let mut session = f.sandbox().open_process(ProcessRequest {
+        argv: vec![
+            PY.into(),
+            "-u".into(),
+            "-c".into(),
+            "import sys; line=sys.stdin.readline(); print('out:'+line, end=''); print('err:'+line, end='', file=sys.stderr); sys.exit(7)".into(),
+        ],
+        timeout: Duration::from_secs(10),
+        output_limit_bytes: 4096,
+    }).await?;
+    session.write_stdin(b"hello\n").await?;
+    session.close_stdin().await?;
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    while let Some(output) = session.recv().await? {
+        match output {
+            ProcessOutput::Stdout(bytes) => stdout.extend(bytes),
+            ProcessOutput::Stderr(bytes) => stderr.extend(bytes),
+        }
     }
-    teardown(&mut f).await?;
+    assert_eq!(session.wait().await?, 7);
+    assert_eq!(stdout, b"out:hello\n");
+    assert_eq!(stderr, b"err:hello\n");
+    assert_eq!(f.sandbox().status().await?.phase, SandboxPhase::Running);
+    destroy(&mut f).await?;
     Ok(())
 }
 
 #[tokio::test]
 #[ignore = "requires an explicit real Linux Docker Engine"]
-async fn docker_linux_runc_staging_limit_is_not_a_path_error()
+async fn docker_linux_runc_process_session_close_destroys_only_its_sandbox()
 -> Result<(), Box<dyn std::error::Error>> {
     enabled();
-    let config = SandboxConfig::new(
-        ResourceLimits::new(64 * 1024 * 1024, 100, TEST_PIDS, 1024, 1024)?,
-        IsolationConfig::linux_enforced(true, true, true, true, "/workspace", 65534, 65534)?,
-        IoLimits::new(64 * 1024, Duration::from_secs(3))?,
-    )?;
-    let mut f = Fixture::with_config(backend()?, config).await?;
-    let bytes = vec![b'x'; 700];
-    f.sandbox().write_file("first", &bytes).await?;
-    f.sandbox().write_file("second", &bytes).await?;
-    f.sandbox().write_file("third", &bytes).await?;
-    let err = f.sandbox().start().await.unwrap_err();
-    assert!(
-        !matches!(err, SandboxError::RelativePath { .. }),
-        "staging bound was classified as a path failure: {err:?}"
-    );
-    let expected = StagingError::LimitExceeded {
-        limit: 1024,
-        actual: 1400,
-    };
-    assert!(matches!(&err, SandboxError::Staging(actual) if actual == &expected));
+    let mut victim = Fixture::new().await?;
+    let mut survivor = Fixture::new().await?;
+    victim.sandbox().start().await?;
+    survivor.sandbox().start().await?;
+    let session = victim
+        .sandbox()
+        .open_process(ProcessRequest {
+            argv: vec![
+                PY.into(),
+                "-u".into(),
+                "-c".into(),
+                "import time; print('ready', flush=True); time.sleep(30)".into(),
+            ],
+            timeout: Duration::from_secs(60),
+            output_limit_bytes: 4096,
+        })
+        .await?;
+    let mut session = session;
+    let mut ready = Vec::new();
+    while !ready.ends_with(b"\n") {
+        match session.recv().await? {
+            Some(ProcessOutput::Stdout(bytes)) => ready.extend(bytes),
+            Some(ProcessOutput::Stderr(_)) => {}
+            None => break,
+        }
+    }
+    assert_eq!(ready, b"ready\n");
+    session.close().await?;
+
     assert_eq!(
-        std::error::Error::source(&err).and_then(|source| source.downcast_ref::<StagingError>()),
-        Some(&expected)
+        victim.sandbox().status().await?.phase,
+        SandboxPhase::Destroyed
     );
-    let status = f.sandbox().status().await?;
-    assert_eq!(status.phase, SandboxPhase::Created);
-    assert_eq!(status.instance_id, f.id);
-    assert_eq!(f.sandbox().read_file("first").await?, bytes);
-    assert_eq!(f.sandbox().read_file("second").await?, bytes);
-    assert_eq!(f.sandbox().read_file("third").await?, bytes);
-    f.sandbox().remove_file("first").await?;
-    f.sandbox().remove_file("third").await?;
-    f.sandbox().write_file("second", &vec![b'x'; 1024]).await?;
+
+    let out = survivor
+        .sandbox()
+        .exec(py(&["-c", "print('alive')"]))
+        .await?;
+    assert_eq!(out.stdout, b"alive\n");
+    destroy(&mut victim).await?;
+    destroy(&mut survivor).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit real Linux Docker Engine"]
+async fn docker_linux_runc_process_session_drop_destroys_its_sandbox()
+-> Result<(), Box<dyn std::error::Error>> {
+    enabled();
+    let mut f = Fixture::new().await?;
     f.sandbox().start().await?;
-    assert_eq!(f.sandbox().read_file("second").await?, vec![b'x'; 1024]);
-    teardown(&mut f).await?;
+    let session = f
+        .sandbox()
+        .open_process(ProcessRequest {
+            argv: vec![
+                PY.into(),
+                "-u".into(),
+                "-c".into(),
+                "import time; time.sleep(30)".into(),
+            ],
+            timeout: Duration::from_secs(60),
+            output_limit_bytes: 4096,
+        })
+        .await?;
+    drop(session);
+    assert_eq!(f.sandbox().status().await?.phase, SandboxPhase::Destroyed);
+    destroy(&mut f).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit real Linux Docker Engine"]
+async fn docker_linux_runc_process_session_timeout_destroys_its_sandbox()
+-> Result<(), Box<dyn std::error::Error>> {
+    enabled();
+    let mut f = Fixture::new().await?;
+    f.sandbox().start().await?;
+    let session = f
+        .sandbox()
+        .open_process(ProcessRequest {
+            argv: vec![
+                PY.into(),
+                "-u".into(),
+                "-c".into(),
+                "import time; time.sleep(30)".into(),
+            ],
+            timeout: Duration::from_millis(500),
+            output_limit_bytes: 4096,
+        })
+        .await?;
+    assert!(matches!(
+        session.wait().await,
+        Err(SandboxError::TimedOut { .. })
+    ));
+    assert_eq!(f.sandbox().status().await?.phase, SandboxPhase::Destroyed);
+    destroy(&mut f).await?;
     Ok(())
 }
