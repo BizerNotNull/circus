@@ -113,7 +113,7 @@ impl ContainerdEngine {
         nonce: &str,
     ) -> Result<String, EngineError> {
         let _snapshot = SNAPSHOT_LOCK.lock().await;
-        let parent = ensure_rootfs(
+        let (parent, image_env) = ensure_rootfs(
             &self.channel,
             &self.namespace,
             &self.snapshotter,
@@ -121,13 +121,14 @@ impl ContainerdEngine {
         )
         .await
         .map_err(without_ownership)?;
+        let container_spec =
+            container_any(spec, CONTAINER_HOSTNAME, &image_env).map_err(without_ownership)?;
         let labels = owner_labels(name, nonce);
         let mounts = self
             .prepare_snapshot(name, &parent, &labels)
             .await
             .map_err(|error| with_ownership(error, Some(name.to_string())))?;
         let identity = Some(name.to_string());
-        let container_spec = container_any(spec, CONTAINER_HOSTNAME);
         let mut client = ContainersClient::new(self.channel.clone());
         let mut request = with_namespace!(
             CreateContainerRequest {
@@ -321,9 +322,10 @@ impl ContainerdEngine {
         env: &[String],
         io: ExecIo<'_>,
     ) -> Result<ExecDone, EngineError> {
+        let container = self.get_container(id).await?;
+        let spec = process_any(user, workdir, argv, env, container.spec.as_ref())?;
         let fifo = FifoDir::create()?;
         let exec_id = format!("exec-{}", uuid::Uuid::new_v4());
-        let spec = process_any(user, workdir, argv, env)?;
         let stdin_path = if io.stdin.attached() {
             fifo.stdin()
         } else {
@@ -461,9 +463,16 @@ impl ContainerdEngine {
         id: &str,
         spec: ProcessSpec<'_>,
     ) -> Result<EngineProcess, EngineError> {
+        let container = self.get_container(id).await?;
+        let process = process_any(
+            spec.user,
+            spec.workdir,
+            spec.argv,
+            &spec.env,
+            container.spec.as_ref(),
+        )?;
         let fifo = FifoDir::create()?;
         let exec_id = format!("exec-{}", uuid::Uuid::new_v4());
-        let process = process_any(spec.user, spec.workdir, spec.argv, &spec.env)?;
         let mut client = TasksClient::new(self.channel.clone());
         let mut request = with_namespace!(
             ExecProcessRequest {
@@ -688,19 +697,24 @@ impl ContainerdEngine {
         decode_manifest(&bytes)
     }
 
-    pub(crate) async fn host_report(&self, id: &str) -> Result<HostReport, EngineError> {
+    async fn get_container(&self, id: &str) -> Result<Container, EngineError> {
         let mut client = ContainersClient::new(self.channel.clone());
-        let request = with_namespace!(
+        let mut request = with_namespace!(
             GetContainerRequest { id: id.to_string() },
             self.namespace.as_str()
         );
-        let container = client
+        request.set_timeout(RPC_TIMEOUT);
+        client
             .get(request)
             .await
             .map_err(map_status)?
             .into_inner()
             .container
-            .ok_or_else(|| local_error("containerd get returned no container"))?;
+            .ok_or_else(|| local_error("containerd get returned no container"))
+    }
+
+    pub(crate) async fn host_report(&self, id: &str) -> Result<HostReport, EngineError> {
+        let container = self.get_container(id).await?;
         let runtime = container.runtime.map(|runtime| runtime.name);
         Ok(report_from_any(runtime, container.spec.as_ref()))
     }

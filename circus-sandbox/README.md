@@ -339,6 +339,12 @@ npm --prefix circus-sandbox/qa run architecture
 
 ## 变更
 
+### 未发布：containerd 镜像环境继承修复
+
+- containerd 从创建时选定的同一份 image config 读取 `config.Env`，持久到容器 OCI process spec；初始化进程、`ProcessSession` 与一次性 `exec` 继承镜像环境，不复制宿主环境。交互请求的显式环境按变量名覆盖镜像值，固定 `PATH` / `LANG` 只在缺失时补齐；非法环境元数据失败关闭。
+- guest uid/gid、workspace 工作目录与初始化 argv 仍由 lifecycle 拥有，不采用镜像的 `USER`、`WORKDIR` 或 `ENTRYPOINT` / `CMD`；本修复不改变隔离策略或 agent/Paseo 接入范围。
+- `containerd_process` 新增默认忽略的真实回归：以官方 `python:3.12-slim` 的 `PYTHON_VERSION` 对照实际解释器版本，覆盖交互进程与一次性 exec 继承、含 `=` 的显式覆盖、宿主 opt-in 标志不泄漏及输出/退出码；输出断言前显式清理。fixture 要求与运行入口见 [containerd 文档](docs/containerd-runc.md#测试)，新增用例未在本次编辑中执行。
+
 ### 未发布：Kubernetes 交互进程
 
 - `KubernetesBackend` 现在报告 `spawn_process: true`，`Sandbox::spawn_process` 在 Pod 上经 `pods/exec` 附加，复用 lifecycle 的单进程限制、超时、输出上限、取消与整体清理语义；进程 I/O 任务仍不删除 Pod。

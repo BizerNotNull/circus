@@ -1,5 +1,5 @@
-//! Real containerd interactive process suite: streaming, stdin, exit, and
-//! whole-container termination outcomes.
+//! Real containerd interactive process suite: image environment inheritance,
+//! streaming, stdin, exit, and whole-container termination outcomes.
 
 mod containerd_support;
 
@@ -100,6 +100,93 @@ async fn containerd_interactive_process_round_trip() -> support::Result {
     assert_eq!(sandbox.read_file("while-running.txt").await?, b"parallel");
 
     support::destroy_and_assert(&sandbox, &id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires real containerd and an official Python image environment"]
+async fn containerd_process_inherits_image_environment() -> support::Result {
+    // This also requires the host flag to be exactly "1", providing a positive
+    // control without changing the process-global host environment.
+    support::enabled();
+    let sandbox = support::create().await?;
+    let mut id = None;
+    let result: support::Result<_> = async {
+        id = sandbox.status().await?.instance_id;
+        if id.is_none() {
+            return Err("missing id".into());
+        }
+        sandbox.start().await?;
+        let script = r#"import json, os, sys
+print(json.dumps({
+    'image_version': os.environ.get('PYTHON_VERSION'),
+    'runtime_version': sys.version.split()[0],
+    'host_flag': os.environ.get('CIRCUS_CONTAINERD'),
+    'custom_value': os.environ.get('CIRCUS_CONTAINERD_ENV_REGRESSION'),
+}))
+print('environment-diagnostic', file=sys.stderr)
+sys.exit(7)
+"#;
+        let mut outputs = Vec::with_capacity(2);
+        for env in [
+            BTreeMap::new(),
+            BTreeMap::from([
+                (
+                    "PYTHON_VERSION".to_string(),
+                    "request=version=override".to_string(),
+                ),
+                (
+                    "CIRCUS_CONTAINERD_ENV_REGRESSION".to_string(),
+                    "request=value=with=equals".to_string(),
+                ),
+            ]),
+        ] {
+            let mut request = process_request(script, 64 * 1024, Duration::from_secs(20));
+            request.env = env;
+            let process = sandbox.spawn_process(request).await?;
+            process.close_stdin().await?;
+            let (stdout, stderr) = drain(&process).await;
+            outputs.push((stdout, stderr, process.wait().await?));
+        }
+        // CommandRequest has no explicit env field, but exec inherits the same
+        // stored image environment after both interactive sessions finish.
+        let synchronous = sandbox.exec(support::python(&["-c", script])).await?;
+        Ok((outputs, synchronous))
+    }
+    .await;
+    // Cleanup runs before propagating operation errors or checking guest output.
+    sandbox.destroy().await?;
+    if let Some(id) = id {
+        support::assert_absent(&support::namespace(), &id)?;
+    }
+    let (outputs, synchronous) = result?;
+    assert_eq!(synchronous.exit_code, 7);
+    assert_eq!(synchronous.stderr, b"environment-diagnostic\n");
+    let synchronous_stdout: serde_json::Value = serde_json::from_slice(&synchronous.stdout)?;
+    let runtime_version = synchronous_stdout["runtime_version"]
+        .as_str()
+        .ok_or("missing interpreter version")?;
+    let inherited = serde_json::json!({
+        "image_version": runtime_version,
+        "runtime_version": runtime_version,
+        "host_flag": null,
+        "custom_value": null,
+    });
+    assert_eq!(synchronous_stdout, inherited);
+    let overridden = serde_json::json!({
+        "image_version": "request=version=override",
+        "runtime_version": runtime_version,
+        "host_flag": null,
+        "custom_value": "request=value=with=equals",
+    });
+    for ((stdout, stderr, exit), expected) in outputs.into_iter().zip([inherited, overridden]) {
+        assert_eq!(exit, ProcessExit::Exited { exit_code: 7 });
+        assert_eq!(stderr, b"environment-diagnostic\n");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&stdout)?,
+            expected
+        );
+    }
     Ok(())
 }
 
