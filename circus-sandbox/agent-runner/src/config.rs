@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use circus_sandbox::{BackendConfig, ResourceLimits};
+use circus_sandbox::{BackendConfig, ResourceLimits, SnapshotBudget};
 
 use crate::TaskError;
 
@@ -77,6 +77,44 @@ pub struct RunnerConfig {
     pub python: PathBuf,
 }
 
+/// Caller-owned durable workspace archive for sequential tasks.
+///
+/// The archive is a plaintext [`circus_sandbox::CodeSnapshot`] file on the host.
+/// The first task may omit it (missing path means "start empty"); every task
+/// with this value restores the archive into its `Created` sandbox before
+/// staging the bridge and input files, and captures the workspace back after the
+/// turn. The sandbox itself is recreated per task: this is durable files, not an
+/// in-flight process or turn checkpoint.
+#[derive(Clone)]
+pub struct TaskWorkspace {
+    /// Host path owned by the caller. Never passed to the guest or logged.
+    pub archive: PathBuf,
+    /// Bounds for both archive load and workspace capture.
+    pub budget: SnapshotBudget,
+}
+
+impl std::fmt::Debug for TaskWorkspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskWorkspace")
+            .field("archive", &"[caller-owned host path]")
+            .field("budget", &self.budget)
+            .finish()
+    }
+}
+
+impl TaskWorkspace {
+    /// Manifest metadata allowance derived from the caller's entry budget.
+    /// Every entry has a bounded path plus record headers.
+    pub(crate) fn manifest_bytes(&self) -> u64 {
+        const MAX_PATH_BYTES: u64 = 4096;
+        const RECORD_OVERHEAD: u64 = 8;
+        u64::try_from(self.budget.max_entries())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(MAX_PATH_BYTES + RECORD_OVERHEAD)
+            .saturating_add(64)
+    }
+}
+
 /// One task over a fresh sandbox. Paths are relative to `/workspace/project`.
 /// Inputs and artifacts are bounded bytes, not grants to host filesystem paths.
 pub struct TaskRequest {
@@ -85,6 +123,10 @@ pub struct TaskRequest {
     pub output_paths: Vec<String>,
     /// Execution deadline; owned creation and cleanup must settle even after it.
     pub timeout: Duration,
+    /// Durable workspace for sequential turns. Each task still owns a new sandbox.
+    pub workspace: Option<TaskWorkspace>,
+    /// Native agent thread to resume. Codex only; Claude Code fails closed.
+    pub agent_session: Option<String>,
 }
 
 impl TaskRequest {
@@ -120,8 +162,33 @@ impl TaskRequest {
                 return Err(TaskError::Invalid("duplicate artifact path"));
             }
         }
+        if let Some(workspace) = &self.workspace
+            && (workspace.archive.as_os_str().is_empty()
+                || workspace
+                    .archive
+                    .as_os_str()
+                    .to_string_lossy()
+                    .chars()
+                    .any(char::is_control))
+        {
+            return Err(TaskError::Invalid("workspace archive path"));
+        }
+        if let Some(session) = &self.agent_session
+            && !valid_session_id(session)
+        {
+            return Err(TaskError::Invalid("agent session id"));
+        }
         Ok(())
     }
+}
+
+/// Codex thread ids are opaque but bounded; the bridge applies the same rule.
+pub(crate) fn valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 pub(crate) fn project_path(path: &str) -> Result<String, TaskError> {

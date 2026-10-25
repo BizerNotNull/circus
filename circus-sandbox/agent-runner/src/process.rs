@@ -44,6 +44,7 @@ pub(crate) async fn exchange(
     controller: &str,
     mcp_config: &str,
     token: &str,
+    agent_session: Option<&str>,
     deadline: Instant,
     cancel: &CancellationToken,
     events: &mut Events,
@@ -75,6 +76,9 @@ pub(crate) async fn exchange(
         .kill_on_drop(true);
     if let Some(path) = &config.model.ca_file {
         command.env("CIRCUS_MODEL_CA_FILE", path);
+    }
+    if let Some(id) = agent_session {
+        command.env("CIRCUS_RESUME_THREAD", id);
     }
     for name in ["PATH", "SYSTEMROOT"] {
         if let Some(value) = std::env::var_os(name) {

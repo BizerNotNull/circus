@@ -131,6 +131,14 @@ def required(name, limit):
     return value
 
 
+def thread_id(value):
+    """Native agent thread ids are opaque, bounded and never path-like."""
+    if (not isinstance(value, str) or not 1 <= len(value) <= 128
+            or not all(c.isascii() and (c.isalnum() or c in "-_") for c in value)):
+        raise BridgeError("invalid agent thread id")
+    return value
+
+
 class ModelEndpoint:
     def __init__(self, base_url, key, ca_file=None):
         try:
@@ -182,8 +190,9 @@ class ModelEndpoint:
 
 
 class HostController:
-    def __init__(self, provider, model, token, prompt):
+    def __init__(self, provider, model, token, prompt, resume=None):
         self.provider, self.model, self.token, self.prompt = provider, model, token, prompt
+        self.resume = thread_id(resume) if resume is not None else None
         self.thread_id = self.turn_id = None
         self.finished = False
         self.seen = set()
@@ -271,14 +280,29 @@ class HostController:
                 if not result.get("userAgent"):
                     raise BridgeError("invalid initialize response")
                 self.rpc(None, "initialized", {})
-                self.rpc(2, "thread/start", {
-                    "model": self.model, "modelProvider": "circus", "cwd": "/workspace/project",
-                    "approvalPolicy": "never", "ephemeral": True,
-                })
+                if self.resume is None:
+                    self.rpc(2, "thread/start", {
+                        "model": self.model, "modelProvider": "circus", "cwd": "/workspace/project",
+                        "approvalPolicy": "never",
+                    })
+                else:
+                    # A persisted thread already carries its model, provider, cwd
+                    # and sandbox policy; only the bounded id crosses this seam.
+                    self.rpc(2, "thread/resume", {"threadId": self.resume})
             elif message["id"] == 2:
-                self.thread_id = result.get("thread", {}).get("id")
-                if not isinstance(self.thread_id, str) or not self.thread_id:
+                thread = result.get("thread")
+                if thread is not None and not isinstance(thread, dict):
+                    raise BridgeError("invalid thread response")
+                actual = thread.get("id") if isinstance(thread, dict) else None
+                if self.resume is not None:
+                    if actual is None:
+                        actual = self.resume
+                    elif actual != self.resume:
+                        raise BridgeError("mismatched resumed thread")
+                if not isinstance(actual, str) or not actual:
                     raise BridgeError("missing thread id")
+                self.thread_id = thread_id(actual)
+                event("agent_session", id=self.thread_id)
                 self.rpc(3, "turn/start", {
                     "threadId": self.thread_id, "input": [{"type": "text", "text": self.prompt}],
                     "approvalPolicy": "never",
@@ -384,7 +408,8 @@ def main_host(provider=None):
             provider = ModelEndpoint(required("CIRCUS_MODEL_BASE_URL", 2048),
                                      required("CIRCUS_MODEL_API_KEY", 4096),
                                      os.environ.get("CIRCUS_MODEL_CA_FILE"))
-        controller = HostController(provider, model, token, prompt)
+        controller = HostController(provider, model, token, prompt,
+                                    os.environ.get("CIRCUS_RESUME_THREAD") or None)
         mcp_config = decode_json(os.environ.get("CIRCUS_MCP_CONFIG", "[]"))
         if mcp_config:
             controller.mcp = McpBroker(mcp_config, controller.revoked)
@@ -553,10 +578,14 @@ def guest_config(port):
 def main_guest():
     token = required("CIRCUS_TASK_TOKEN", 256)
     server = GuestServer(token)
-    # The fixed image creates a fresh CODEX_HOME. Store the allocated numeric port
-    # as TOML data; executable and argv are fixed. Exclusive creation rejects an
-    # existing file or symlink, and the config never contains the real API key.
-    with open("/workspace/.circus/home/.codex/config.toml", "x", encoding="utf-8") as config:
+    # The fixed image creates a fresh CODEX_HOME. A restored workspace archive
+    # can contain the previous run's config, so replace that regular file in
+    # place. O_NOFOLLOW rejects the only ambiguous node the archive cannot carry
+    # anyway (a symlink), and mode 0600 keeps the token-free config private.
+    path = "/workspace/.circus/home/.codex/config.toml"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as config:
         config.write(guest_config(server.server_address[1]))
     with subprocess.Popen(["codex", "app-server", "--listen", "stdio://"],
                           shell=False, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

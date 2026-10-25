@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use circus_sandbox::{
-    IoLimits, IsolationConfig, ProcessExit, ProcessRequest, Sandbox, SandboxConfig, SandboxError,
+    CodeSnapshot, IoLimits, IsolationConfig, ProcessExit, ProcessRequest, ProcessSession, Sandbox,
+    SandboxConfig, SandboxError, SandboxPhase, SnapshotError,
 };
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::Instant;
@@ -15,7 +16,7 @@ use crate::events::{EVENT_QUEUE, Events};
 use crate::model::CleanupOwner;
 use crate::{
     AgentKind, CleanupHandle, RunnerConfig, TaskError, TaskEvent, TaskFailure, TaskOutcome,
-    TaskOutput, TaskPhase, TaskRequest,
+    TaskOutput, TaskPhase, TaskRequest, TaskWorkspace,
 };
 
 pub(crate) const BRIDGE: &str = include_str!("codex_bridge.py");
@@ -92,6 +93,11 @@ impl AgentRunner {
         mcp_config: String,
     ) -> Result<AgentTask, TaskError> {
         request.validate(self.config.resources.max_file_bytes())?;
+        if request.agent_session.is_some() && self.agent != AgentKind::Codex {
+            return Err(TaskError::Invalid(
+                "agent session resume is unsupported for this agent",
+            ));
+        }
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| TaskError::NoRuntime)?;
         let id = uuid::Uuid::new_v4().to_string();
         let cancel = CancellationToken::new();
@@ -194,6 +200,110 @@ fn sandbox_error(phase: TaskPhase, source: SandboxError) -> TaskError {
     }
 }
 
+fn workspace_error(phase: TaskPhase, source: SandboxError) -> TaskError {
+    TaskError::Workspace {
+        phase,
+        task: None,
+        source: Box::new(source),
+    }
+}
+
+fn with_task(error: TaskError, task: Option<TaskError>) -> TaskError {
+    match error {
+        TaskError::Workspace { phase, source, .. } => TaskError::Workspace {
+            phase,
+            task: task.map(Box::new),
+            source,
+        },
+        other => other,
+    }
+}
+
+/// Loads and restores the caller archive while the sandbox is still `Created`.
+///
+/// A missing archive is a first turn, not an error: only an archive path that
+/// exists and fails validation is typed as a workspace failure. Input staging
+/// runs afterwards in [`execute`], so caller inputs always win over archived
+/// copies.
+async fn restore_workspace(
+    sandbox: &Sandbox,
+    config: &RunnerConfig,
+    request: &TaskRequest,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Result<(), TaskError> {
+    let Some(workspace) = &request.workspace else {
+        return Ok(());
+    };
+    let path = workspace.archive.clone();
+    let budget = workspace.budget;
+    let max_file_bytes = config.resources.max_file_bytes();
+    let load = tokio::task::spawn_blocking(move || match std::fs::symlink_metadata(&path) {
+        Ok(_) => CodeSnapshot::load_file(&path, max_file_bytes, budget).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(SnapshotError::from(error)),
+    });
+    let loaded = guarded(load, deadline, cancel)
+        .await?
+        .map_err(|_| TaskError::WorkerGone)?
+        .map_err(|source| workspace_error(TaskPhase::Preparing, source.into()))?;
+    if let Some(snapshot) = loaded {
+        guarded(
+            sandbox.restore_workspace_snapshot(Arc::new(snapshot)),
+            deadline,
+            cancel,
+        )
+        .await?
+        .map_err(|source| workspace_error(TaskPhase::Preparing, source))?;
+    }
+    Ok(())
+}
+
+/// Persists the workspace before destruction. Cancellation and deadlines never
+/// skip this attempt; only a sandbox that never reached `Running` has nothing
+/// durable to capture. A capture/save failure is returned as a typed workspace
+/// error while the caller still destroys the sandbox.
+async fn persist_workspace(
+    sandbox: &Sandbox,
+    workspace: Option<&TaskWorkspace>,
+    result: Result<TaskOutput, TaskError>,
+) -> Result<TaskOutput, TaskError> {
+    let Some(workspace) = workspace else {
+        return result;
+    };
+    let status = match sandbox.status().await {
+        Ok(status) => status,
+        Err(source) => {
+            return Err(with_task(
+                workspace_error(TaskPhase::Exporting, source),
+                result.err(),
+            ));
+        }
+    };
+    if status.phase != SandboxPhase::Running {
+        return result;
+    }
+    let archive = workspace.archive.clone();
+    let saved = match sandbox
+        .capture_workspace_snapshot(workspace.budget, workspace.manifest_bytes())
+        .await
+    {
+        Ok(snapshot) => tokio::task::spawn_blocking(move || snapshot.save_file(&archive))
+            .await
+            .map_err(|_| TaskError::WorkerGone)
+            .and_then(|saved| {
+                saved.map_err(|source| {
+                    workspace_error(TaskPhase::Exporting, SandboxError::from(source))
+                })
+            }),
+        Err(source) => Err(workspace_error(TaskPhase::Exporting, source)),
+    };
+    match saved {
+        Ok(()) => result,
+        Err(error) => Err(with_task(error, result.err())),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run(
     id: &str,
@@ -250,10 +360,28 @@ async fn run(
             });
         }
     };
+    let workspace = request.workspace.clone();
+    let mut process = None;
     let result = execute(
-        id, &sandbox, config, request, controller, guest, mcp_config, deadline, cancel, events,
+        id,
+        &sandbox,
+        config,
+        request,
+        controller,
+        guest,
+        mcp_config,
+        deadline,
+        cancel,
+        events,
+        &mut process,
     )
     .await;
+    // A successful start is the only state in which a captured archive is
+    // meaningful. Persist before destroy so a failed save still cleans up.
+    let result = persist_workspace(&sandbox, workspace.as_ref(), result).await;
+    // The guest session still owns cancellation until the archive attempt has
+    // finished; dropping it here requests the same cleanup as before.
+    drop(process);
     // Event backpressure may fail execution but must never suppress cleanup.
     let _ = events.send(TaskEvent::Phase(TaskPhase::Cleaning));
     match sandbox.destroy().await {
@@ -283,6 +411,7 @@ async fn execute(
     deadline: Instant,
     cancel: &CancellationToken,
     events: &mut Events,
+    live: &mut Option<ProcessSession>,
 ) -> Result<TaskOutput, TaskError> {
     let prepare = async {
         let status = sandbox.status().await?;
@@ -294,6 +423,7 @@ async fn execute(
     {
         events.send(TaskEvent::SandboxCreated { instance_id })?;
     }
+    restore_workspace(sandbox, config, &request, deadline, cancel).await?;
     let staging = async {
         sandbox.create_dir_all("project").await?;
         sandbox.write_file("bridge.py", guest.as_bytes()).await?;
@@ -309,10 +439,15 @@ async fn execute(
             }
             sandbox.write_file(&path, data).await?;
         }
-        sandbox.start().await?;
-        sandbox.status().await
+        Ok::<_, SandboxError>(())
     };
-    let status = guarded(staging, deadline, cancel)
+    guarded(staging, deadline, cancel)
+        .await?
+        .map_err(|e| sandbox_error(TaskPhase::Preparing, e))?;
+    guarded(sandbox.start(), deadline, cancel)
+        .await?
+        .map_err(|e| sandbox_error(TaskPhase::Preparing, e))?;
+    let status = guarded(sandbox.status(), deadline, cancel)
         .await?
         .map_err(|e| sandbox_error(TaskPhase::Preparing, e))?;
     let policy = status.enforcement.ok_or(TaskError::Protocol)?;
@@ -348,22 +483,23 @@ async fn execute(
     let session = guarded(sandbox.spawn_process(process), deadline, cancel)
         .await?
         .map_err(|e| sandbox_error(TaskPhase::Running, e))?;
-    if let Err(error) = crate::process::exchange(
-        &session,
+    // Keep the session alive until the caller has attempted the archive; its
+    // Drop requests lifecycle cleanup, which would otherwise close the window.
+    *live = Some(session);
+    let session = live.as_ref().ok_or(TaskError::WorkerGone)?;
+    crate::process::exchange(
+        session,
         config,
         &request.prompt,
         controller,
         mcp_config,
         &token,
+        request.agent_session.as_deref(),
         deadline,
         cancel,
         events,
     )
-    .await
-    {
-        session.cancel();
-        return Err(error);
-    }
+    .await?;
     match guarded(session.wait(), deadline, cancel)
         .await?
         .map_err(|_| TaskError::Process)?
@@ -389,5 +525,6 @@ async fn execute(
     Ok(TaskOutput {
         task_id: id.into(),
         artifacts,
+        agent_session: events.agent_session().map(str::to_owned),
     })
 }

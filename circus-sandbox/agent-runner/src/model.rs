@@ -102,6 +102,16 @@ pub enum TaskError {
         #[source]
         source: Box<SandboxError>,
     },
+    /// Loading, restoring, capturing, or saving a caller-owned workspace
+    /// archive failed. `task` retains a preceding execution error; cleanup still
+    /// runs and is reported separately if it also fails.
+    #[error("workspace archive failed during {phase:?}: {source}; task error: {task:?}")]
+    Workspace {
+        phase: TaskPhase,
+        task: Option<Box<TaskError>>,
+        #[source]
+        source: Box<SandboxError>,
+    },
     #[error("runner worker ended before reporting an outcome")]
     WorkerGone,
 }
@@ -141,6 +151,9 @@ pub struct TaskOutput {
     pub task_id: String,
     /// Exact requested project-relative paths; no implicit host write-back.
     pub artifacts: BTreeMap<String, Vec<u8>>,
+    /// Native agent thread id to pass as `TaskRequest::agent_session` next time.
+    /// `None` when the adapter did not report one.
+    pub agent_session: Option<String>,
 }
 
 impl std::fmt::Debug for TaskOutput {
@@ -148,6 +161,7 @@ impl std::fmt::Debug for TaskOutput {
         f.debug_struct("TaskOutput")
             .field("task_id", &self.task_id)
             .field("artifact_count", &self.artifacts.len())
+            .field("agent_session", &self.agent_session.is_some())
             .finish_non_exhaustive()
     }
 }
