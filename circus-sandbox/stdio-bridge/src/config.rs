@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn config_selects_opencode_without_changing_default_agent() {
-        let base = r#"{"version":1,"image":"image","python":"/usr/bin/python3","resources":{"memoryBytes":1,"cpuMillis":1,"maxProcesses":1,"workspaceBytes":1,"maxFileBytes":1},"model":{"baseUrl":"https://example.invalid/v1","model":"gpt-4.1"}}"#;
+        let base = r#"{"version":1,"image":{"platform":{"os":"linux","architecture":"amd64"},"pullPolicy":"local-only","prepareTimeoutMs":30000},"python":"/usr/bin/python3","resources":{"memoryBytes":1,"cpuMillis":1,"maxProcesses":1,"workspaceBytes":1,"maxFileBytes":1},"model":{"baseUrl":"https://example.invalid/v1","model":"gpt-4.1"}}"#;
         let default: Config = sonic_rs::from_str(base).unwrap();
         assert!(matches!(default.agent, Agent::Codex));
 
