@@ -144,7 +144,7 @@ cargo run --locked --example resource_policy
 
 [Claude Code 适配器](docs/claude-agent.md) 使用独立的固定镜像与 Anthropic Messages 通道，复用任务、事件、产物和回收契约；真实模型 key 仍只在宿主。它不复用 Codex 的 Responses 协议或个人 Claude 登录。
 
-[Agent 单任务运行器](docs/codex-agent.md) 是独立的 `circus-agent-runner` crate：提供任务输入、实时事件、取消、产物导出和清理结果。它通过 `ProcessSession` 转发受限模型请求，保持容器禁网、上游密钥留在宿主；需要显式配置支持 Responses 的模型服务。[stdio 桥接](docs/stdio-bridge.md) 提供同机 Rust 子进程入口和 Node 客户端；[Paseo sandbox provider](../circus-paseo/public-docs/supported-providers.md#sandbox-codex) 提供任务表单、执行状态与产物预览/下载，需在宿主显式配置。脚本化模型对端测试不代表真实模型验收。
+[Agent 单任务运行器](docs/codex-agent.md) 是独立的 `circus-agent-runner` crate：提供任务输入、实时事件、取消、产物导出和清理结果。它通过 `ProcessSession` 转发受限模型请求，保持容器禁网、上游密钥留在宿主；需要显式配置支持 Responses 的模型服务。[stdio 桥接](docs/stdio-bridge.md) 提供同机 Rust 子进程入口和 Node 客户端；[进程代理](sandbox-exec/README.md) 的 `circus-sandbox-exec` 让既有 provider 命令以原始 stdio 进入沙箱、恢复工作区并在退出时确认清理，不修改 Paseo 源码；[Paseo sandbox provider](../circus-paseo/public-docs/supported-providers.md#sandbox-codex) 提供任务表单、执行状态与产物预览/下载，需在宿主显式配置。脚本化模型对端测试不代表真实模型验收。
 
 交互进程入口为后端中立的 `Sandbox::spawn_process(ProcessRequest)`：先用 `Sandbox::create(BackendConfig::docker(endpoint, image, "runc"), SandboxConfig::new(limits, isolation, io))` 创建。返回的 `ProcessSession` 支持持续 stdin、分开的 stdout/stderr 流、EOF、退出通知和取消；每个沙箱同时允许一个交互进程，运行时仍可读写文件、查询状态及销毁。请求在入队前校验 argv、工作目录、环境变量名/值和输出上限，失败为 `SandboxError::InvalidProcessRequest`；已有一个交互进程时再次 `spawn_process` 或执行一次性 `exec` 返回 `SandboxError::ProcessActive`。输出背压、超时、取消与工作区保留语义见下述后端文档。Kubernetes 使用同一入口并保留这些语义：`pods/exec` 没有 env 参数，因此显式环境覆盖与工作目录由一段独立的 Python `-I -B -c` trampoline 应用后再 `execvpe` 用户 argv；覆盖值会随 exec 请求与 trampoline 参数传递，`exec` 后位于 guest 环境（同一沙箱的同 uid 进程可像普通镜像环境变量一样读取），本 crate 不记录 argv 或环境值。可运行示例为 `examples/interactive_process.rs`。
 

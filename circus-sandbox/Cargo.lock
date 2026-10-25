@@ -328,6 +328,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "circus-sandbox-exec"
+version = "0.1.0"
+dependencies = [
+ "circus-sandbox",
+ "serde",
+ "sonic-rs",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "circus-stdio-bridge"
 version = "0.1.0"
 dependencies = [
