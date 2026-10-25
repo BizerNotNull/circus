@@ -25,6 +25,78 @@ pub enum Ownership {
     Unknown,
 }
 
+/// Caller-persistable identity for one owned backend instance.
+///
+/// A value is exactly 36 bytes: lowercase hexadecimal digits with hyphens at
+/// positions 8, 13, 18, and 23. [`generate`](Self::generate) uses a random
+/// UUID v4. The value is a stable label, not a secret or an authentication
+/// token; its `Debug` output therefore shows the string.
+///
+/// Persist the value together with the backend descriptor before calling
+/// [`Sandbox::create_with_recovery_id`](crate::Sandbox::create_with_recovery_id),
+/// and obtain generated values from
+/// [`Sandbox::recovery_id`](crate::Sandbox::recovery_id). An ID identifies the
+/// name `circus-sandbox-{id}` and the owner label; it is not a capability that
+/// authorizes deletion by itself. Recovery is best effort and reports
+/// [`Ownership::StillPresent`] or [`Ownership::Unknown`] instead of claiming
+/// success.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecoveryId(String);
+
+/// Why a [`RecoveryId`] was rejected.
+///
+/// The invalid input is never echoed, so a rejected value cannot smuggle
+/// arbitrary text into an error report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("recovery id must be a canonical lowercase hyphenated UUID")]
+pub struct RecoveryIdError;
+
+impl RecoveryId {
+    /// Generates a random UUID v4 in canonical form.
+    #[must_use]
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    /// Parses a canonical 36-byte lowercase hyphenated UUID.
+    ///
+    /// Non-canonical spellings (uppercase, missing hyphens, `urn:` or brace
+    /// prefixes, whitespace, or path characters) are rejected before any
+    /// backend is contacted.
+    pub fn parse(value: &str) -> Result<Self, RecoveryIdError> {
+        match uuid::Uuid::parse_str(value) {
+            Ok(uuid) if uuid.hyphenated().to_string() == value => Ok(Self(value.to_string())),
+            _ => Err(RecoveryIdError),
+        }
+    }
+
+    /// Canonical string form used in the instance name and owner label.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for RecoveryId {
+    type Err = RecoveryIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl AsRef<str> for RecoveryId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for RecoveryId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Operation a caller-visible deadline or cancellation is attributed to.
 ///
 /// This distinguishes which configured deadline fired. See

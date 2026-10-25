@@ -9,6 +9,7 @@ async fn rejected_without_worker(request: CommandRequest, expected: CommandError
         shutdown: CancellationToken::new(),
         cleanup: cleanup::channel("unused-test-instance".to_string()).1,
         max_file_bytes: 1024,
+        recovery_id: RecoveryId::generate(),
     };
     let err = tokio::time::timeout(Duration::from_secs(1), sandbox.exec(request))
         .await
@@ -91,6 +92,8 @@ use crate::workspace::{SnapshotBudget, Workspace, WorkspaceError};
 
 use super::staging::TransferFailure;
 
+type RecordedRecovery = (String, String, Option<String>);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RecordedSource {
     Directory,
@@ -109,6 +112,9 @@ struct FakeBackend {
     capabilities: Capabilities,
     recoveries: Arc<Mutex<VecDeque<Recovered>>>,
     recover_calls: Arc<AtomicUsize>,
+    recover_requests: Arc<Mutex<Vec<RecordedRecovery>>>,
+    prepare_calls: Arc<AtomicUsize>,
+    create_requests: Arc<Mutex<Vec<(String, String)>>>,
     start_calls: Arc<AtomicUsize>,
     create_error: Arc<Mutex<Option<EngineError>>>,
     exec_result: Arc<Mutex<Option<Result<ExecDone, EngineError>>>>,
@@ -132,6 +138,9 @@ impl FakeBackend {
             },
             recoveries: Arc::new(Mutex::new(VecDeque::new())),
             recover_calls: Arc::new(AtomicUsize::new(0)),
+            recover_requests: Arc::new(Mutex::new(Vec::new())),
+            prepare_calls: Arc::new(AtomicUsize::new(0)),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
             start_calls: Arc::new(AtomicUsize::new(0)),
             create_error: Arc::new(Mutex::new(None)),
             exec_result: Arc::new(Mutex::new(None)),
@@ -202,15 +211,20 @@ impl Backend for FakeBackend {
     }
 
     fn prepare(&self) -> impl Future<Output = Result<(), PrepareError>> + Send {
+        self.prepare_calls.fetch_add(1, Ordering::SeqCst);
         async { Ok(()) }
     }
 
     fn create_owned(
         &self,
-        _name: &str,
+        name: &str,
         _spec: &CommonSpec,
-        _nonce: &str,
+        nonce: &str,
     ) -> impl Future<Output = Result<InstanceId, EngineError>> + Send {
+        self.create_requests
+            .lock()
+            .expect("create requests lock")
+            .push((name.to_string(), nonce.to_string()));
         let failure = self.create_error.lock().expect("create lock").take();
         async move {
             match failure {
@@ -222,11 +236,19 @@ impl Backend for FakeBackend {
 
     fn recover_owned(
         &self,
-        _name: &str,
-        _nonce: &str,
-        _retained_id: Option<&InstanceId>,
+        name: &str,
+        nonce: &str,
+        retained_id: Option<&InstanceId>,
     ) -> impl Future<Output = Recovered> + Send {
         self.recover_calls.fetch_add(1, Ordering::SeqCst);
+        self.recover_requests
+            .lock()
+            .expect("recover requests lock")
+            .push((
+                name.to_string(),
+                nonce.to_string(),
+                retained_id.map(|id| id.as_str().to_string()),
+            ));
         let outcome = self
             .recoveries
             .lock()
@@ -534,10 +556,15 @@ async fn concurrent_destroy_calls_never_report_false_success() {
     }
     backend.push_recovery(Recovered::Removed);
     let (config, spec) = sandbox_config_and_spec();
-    let sandbox =
-        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
-            .await
-            .expect("fake creation");
+    let sandbox = Sandbox::create_with_backend(
+        backend.clone(),
+        spec,
+        config,
+        SandboxMetrics::disabled(),
+        RecoveryId::generate(),
+    )
+    .await
+    .expect("fake creation");
 
     let (first, second) = tokio::join!(sandbox.destroy(), sandbox.destroy());
     for result in [first, second] {
@@ -569,10 +596,15 @@ async fn aggregate_output_limit_reports_stream_and_reclaims_instance() {
     }));
     backend.push_recovery(Recovered::Removed);
     let (config, spec) = sandbox_config_and_spec();
-    let sandbox =
-        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
-            .await
-            .expect("fake creation");
+    let sandbox = Sandbox::create_with_backend(
+        backend.clone(),
+        spec,
+        config,
+        SandboxMetrics::disabled(),
+        RecoveryId::generate(),
+    )
+    .await
+    .expect("fake creation");
     sandbox.start().await.expect("fake start");
 
     let error = sandbox
@@ -603,10 +635,15 @@ async fn aggregate_output_limit_reports_stream_and_reclaims_instance() {
 async fn request_over_configured_output_bound_is_not_started_or_destroyed() {
     let backend = FakeBackend::new();
     let (config, spec) = sandbox_config_and_spec();
-    let sandbox =
-        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
-            .await
-            .expect("fake creation");
+    let sandbox = Sandbox::create_with_backend(
+        backend.clone(),
+        spec,
+        config,
+        SandboxMetrics::disabled(),
+        RecoveryId::generate(),
+    )
+    .await
+    .expect("fake creation");
     sandbox.start().await.expect("fake start");
 
     match sandbox
@@ -637,10 +674,15 @@ async fn status_timeout_preserves_phase_and_ownership() {
     let backend = FakeBackend::new();
     backend.sleep_next_report();
     let (config, spec) = sandbox_config_and_spec();
-    let sandbox =
-        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
-            .await
-            .expect("fake creation");
+    let sandbox = Sandbox::create_with_backend(
+        backend.clone(),
+        spec,
+        config,
+        SandboxMetrics::disabled(),
+        RecoveryId::generate(),
+    )
+    .await
+    .expect("fake creation");
     sandbox.start().await.expect("fake start");
 
     let error = tokio::time::timeout(Duration::from_secs(2), sandbox.status())
@@ -684,10 +726,15 @@ async fn policy_mismatch_fails_creation_and_destroys_the_instance() {
     backend.push_recovery(Recovered::Removed);
     let (config, spec) = sandbox_config_and_spec();
 
-    let error =
-        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
-            .await
-            .expect_err("mismatched policy must not create a sandbox");
+    let error = Sandbox::create_with_backend(
+        backend.clone(),
+        spec,
+        config,
+        SandboxMetrics::disabled(),
+        RecoveryId::generate(),
+    )
+    .await
+    .expect_err("mismatched policy must not create a sandbox");
     match error {
         SandboxError::PolicyMismatch {
             field,
@@ -721,10 +768,15 @@ async fn policy_mismatch_retains_cleanup_ownership_when_removal_is_unconfirmed()
     backend.push_recovery(Recovered::Removed);
     let (config, spec) = sandbox_config_and_spec();
 
-    let error =
-        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
-            .await
-            .expect_err("mismatched policy must not create a sandbox");
+    let error = Sandbox::create_with_backend(
+        backend.clone(),
+        spec,
+        config,
+        SandboxMetrics::disabled(),
+        RecoveryId::generate(),
+    )
+    .await
+    .expect_err("mismatched policy must not create a sandbox");
     match error {
         SandboxError::CreationCleanupRequired {
             instance_id,
@@ -761,10 +813,15 @@ async fn cancelled_cleanup_wait_does_not_stop_owned_retry() {
     backend.push_recovery(Recovered::Removed);
     let (config, spec) = sandbox_config_and_spec();
 
-    let error =
-        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
-            .await
-            .expect_err("mismatched policy must not create a sandbox");
+    let error = Sandbox::create_with_backend(
+        backend.clone(),
+        spec,
+        config,
+        SandboxMetrics::disabled(),
+        RecoveryId::generate(),
+    )
+    .await
+    .expect_err("mismatched policy must not create a sandbox");
     let SandboxError::CreationCleanupRequired { cleanup, .. } = error else {
         panic!("expected a creation cleanup receipt");
     };
@@ -964,10 +1021,15 @@ async fn timed_out_start_transfer_never_reports_running_and_retains_cleanup() {
     let backend = FakeBackend::new();
     backend.slow_next_upload();
     let (config, spec) = sandbox_config_and_spec();
-    let sandbox =
-        Sandbox::create_with_backend(backend.clone(), spec, config, SandboxMetrics::disabled())
-            .await
-            .expect("fake creation succeeds");
+    let sandbox = Sandbox::create_with_backend(
+        backend.clone(),
+        spec,
+        config,
+        SandboxMetrics::disabled(),
+        RecoveryId::generate(),
+    )
+    .await
+    .expect("fake creation succeeds");
     sandbox
         .write_file("slow", b"payload")
         .await
@@ -1089,3 +1151,5 @@ async fn backend_without_file_transport_is_rejected_before_allocation() {
         }
     ));
 }
+
+mod recovery_tests;

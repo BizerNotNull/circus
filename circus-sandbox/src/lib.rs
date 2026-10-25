@@ -43,8 +43,16 @@
 //! containerd, and Kubernetes attach through their native exec transports; the
 //! Kubernetes trampoline passes explicit environment values in argv because
 //! `pods/exec` has no environment option. A session is not a TTY, process-group
-//! signal API, or detached recovery mechanism. Not implemented: true
-//! pause/resume, gVisor, Kata, Firecracker, and registry authentication.
+//! signal API, or detached recovery mechanism.
+//!
+//! A caller that must survive loss of the in-process handle can persist a
+//! [`RecoveryId`], create with [`Sandbox::create_with_recovery_id`], and later
+//! call [`Sandbox::recover_orphan`]. Recovery connects only the selected
+//! backend, never prepares an image or creates an instance, and removes only a
+//! name whose owner label matches; the returned [`Ownership`] is best effort
+//! and may remain unconfirmed. There is no list-all API or durable registry.
+//! Not implemented: true pause/resume, gVisor, Kata, Firecracker, and registry
+//! authentication.
 //!
 //! The optional `http` feature (enabled by default) adds an authenticated JSON
 //! transport over the same [`Sandbox`] API (`http::HttpServer`). It requires an
@@ -121,8 +129,8 @@ pub use api::{
     CommandOutput, CommandRequest, ConfigError, ContainerdBackendConfig, DockerBackendConfig,
     EnforcementReport, IoLimits, IsolationConfig, KubernetesBackendConfig, OutputPhase, Ownership,
     ProcessError, ProcessExit, ProcessOutput, ProcessRequest, ProcessSession, ProcessTermination,
-    Sandbox, SandboxConfig, SandboxError, SandboxOperation, SandboxPhase, SandboxStatus,
-    StagingError,
+    RecoveryId, RecoveryIdError, Sandbox, SandboxConfig, SandboxError, SandboxOperation,
+    SandboxPhase, SandboxStatus, StagingError,
 };
 #[doc(inline)]
 pub use workspace::{

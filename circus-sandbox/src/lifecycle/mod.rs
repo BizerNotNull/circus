@@ -6,6 +6,7 @@ mod input;
 mod model;
 mod operations;
 mod process;
+mod recovery;
 mod snapshot;
 mod staging;
 
@@ -13,7 +14,8 @@ pub use cleanup::CleanupReceipt;
 pub use input::{CommandError, StagingError};
 pub use model::{
     CleanupFailure, CleanupReport, CommandOutput, CommandRequest, EnforcementReport, OutputPhase,
-    Ownership, SandboxError, SandboxOperation, SandboxPhase, SandboxStatus,
+    Ownership, RecoveryId, RecoveryIdError, SandboxError, SandboxOperation, SandboxPhase,
+    SandboxStatus,
 };
 pub use process::{
     ProcessError, ProcessExit, ProcessOutput, ProcessRequest, ProcessSession, ProcessTermination,
@@ -26,14 +28,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(all(unix, feature = "containerd"))]
-use crate::infrastructure::ContainerdBackend;
-use crate::infrastructure::{
-    Backend, CommonSpec, DockerBackend, DockerConfig, DockerConfigError, InstanceId, PrepareError,
-};
-#[cfg(all(unix, feature = "containerd"))]
-use crate::infrastructure::{ContainerdConfig, ContainerdConfigError};
+use crate::infrastructure::ContainerdConfigError;
 #[cfg(feature = "kubernetes")]
-use crate::infrastructure::{KubernetesBackend, KubernetesConfig, KubernetesConfigError};
+use crate::infrastructure::KubernetesConfigError;
+use crate::infrastructure::{Backend, CommonSpec, DockerConfigError, InstanceId, PrepareError};
 use crate::observability::{OperationKind, OperationOutcome, SandboxMetrics, events};
 use crate::runtime::{BackendConfig, BackendConfigError, SandboxConfig};
 use crate::workspace::Workspace;
@@ -42,6 +40,7 @@ use cleanup::{cleanup_until_done, failed_creation};
 use operations::{
     common_spec, destroy_report, engine_err, path_text, require_capabilities, spawn_block,
 };
+use recovery::{ConnectedBackend, connect_backend};
 
 const QUEUE: usize = 8;
 
@@ -112,6 +111,7 @@ pub struct Sandbox {
     shutdown: CancellationToken,
     cleanup: CleanupReceipt,
     max_file_bytes: usize,
+    recovery_id: RecoveryId,
 }
 
 impl Sandbox {
@@ -119,6 +119,16 @@ impl Sandbox {
     pub(crate) fn revoke(&self) -> CleanupReceipt {
         self.shutdown.cancel();
         self.cleanup.clone()
+    }
+
+    /// Returns the identity used for this instance's name and owner label.
+    ///
+    /// Persist this value if the instance may outlive the in-process handle.
+    /// [`recover_orphan`](Self::recover_orphan) accepts it later and never
+    /// removes an instance until the backend confirms the matching owner label.
+    #[must_use]
+    pub fn recovery_id(&self) -> &RecoveryId {
+        &self.recovery_id
     }
 
     /// Validates `backend` and `config`, prepares the backend, and creates one
@@ -160,6 +170,28 @@ impl Sandbox {
         Self::create_with_metrics(backend, config, SandboxMetrics::disabled()).await
     }
 
+    /// Same contract as [`create`](Self::create), using a caller-supplied
+    /// [`RecoveryId`] for the instance name and owner label.
+    ///
+    /// The caller should persist the ID together with the backend descriptor
+    /// **before** calling this method, so an orphan can be inspected after a
+    /// process restart. The ID is opaque and validates at construction:
+    /// [`RecoveryId::generate`] creates a random UUID v4 and
+    /// [`RecoveryId::parse`] accepts only canonical values, so malformed names
+    /// cannot reach a backend.
+    ///
+    /// Reusing an ID is not deduplicated: a second create may conflict at the
+    /// backend, and it never adopts or deletes an existing instance. Pass the
+    /// ID to [`recover_orphan`](Self::recover_orphan) only when the original
+    /// handle is gone.
+    pub async fn create_with_recovery_id(
+        backend: BackendConfig,
+        config: SandboxConfig,
+        recovery_id: RecoveryId,
+    ) -> Result<Self, SandboxError> {
+        Self::create_observed(backend, config, SandboxMetrics::disabled(), recovery_id).await
+    }
+
     /// Same contract as [`create`](Self::create), with caller-owned counters
     /// and structured tracing events.
     ///
@@ -174,6 +206,15 @@ impl Sandbox {
         config: SandboxConfig,
         metrics: SandboxMetrics,
     ) -> Result<Self, SandboxError> {
+        Self::create_observed(backend, config, metrics, RecoveryId::generate()).await
+    }
+
+    async fn create_observed(
+        backend: BackendConfig,
+        config: SandboxConfig,
+        metrics: SandboxMetrics,
+        recovery_id: RecoveryId,
+    ) -> Result<Self, SandboxError> {
         let backend_kind = match &backend {
             BackendConfig::Docker(_) => "docker",
             BackendConfig::Containerd(_) => "containerd",
@@ -184,7 +225,7 @@ impl Sandbox {
             let _entered = span.enter();
             events::create_started(backend_kind);
         }
-        let result = Self::create_inner(backend, config, metrics.clone()).await;
+        let result = Self::create_inner(backend, config, metrics.clone(), recovery_id).await;
         {
             let _entered = span.enter();
             match &result {
@@ -210,90 +251,23 @@ impl Sandbox {
         backend: BackendConfig,
         config: SandboxConfig,
         metrics: SandboxMetrics,
+        recovery_id: RecoveryId,
     ) -> Result<Self, SandboxError> {
         let spec = common_spec(&config);
-        match backend {
-            BackendConfig::Docker(descriptor) => {
-                let docker = DockerConfig::new(
-                    descriptor.endpoint(),
-                    descriptor.image(),
-                    descriptor.runtime(),
-                )
-                .map_err(|err| SandboxError::BackendConfig(map_docker_config(err)))?;
-                docker
-                    .validate_common(&spec)
-                    .map_err(|err| SandboxError::BackendConfig(map_docker_config(err)))?;
-                let backend = DockerBackend::connect(docker)
-                    .await
-                    .map_err(|err| engine_err(*err))?;
-                Self::create_with_backend(backend, spec, config, metrics).await
+        let connected = connect_backend(backend, Some(&spec), config.lifecycle_timeout()).await?;
+        match connected {
+            ConnectedBackend::Docker(backend) => {
+                Self::create_with_backend(backend, spec, config, metrics, recovery_id).await
             }
-            BackendConfig::Containerd(descriptor) => {
-                #[cfg(all(unix, feature = "containerd"))]
-                {
-                    let containerd = ContainerdConfig::new(
-                        descriptor.socket(),
-                        descriptor.namespace(),
-                        descriptor.image(),
-                        descriptor.runtime(),
-                        descriptor.snapshotter(),
-                    )
-                    .map_err(|err| SandboxError::BackendConfig(map_containerd_config(err)))?;
-                    Self::create_containerd(containerd, spec, config, metrics).await
-                }
-                #[cfg(not(all(unix, feature = "containerd")))]
-                {
-                    let _ = descriptor;
-                    Err(SandboxError::UnsupportedCapability {
-                        capability: "containerd backend feature not compiled",
-                    })
-                }
+            #[cfg(all(unix, feature = "containerd"))]
+            ConnectedBackend::Containerd(backend) => {
+                Self::create_with_backend(backend, spec, config, metrics, recovery_id).await
             }
-            BackendConfig::Kubernetes(descriptor) => {
-                #[cfg(feature = "kubernetes")]
-                {
-                    let kubernetes = KubernetesConfig::new(
-                        descriptor.kubeconfig(),
-                        descriptor.context(),
-                        descriptor.namespace(),
-                        descriptor.image(),
-                        descriptor.service_account(),
-                    )
-                    .map_err(|err| SandboxError::BackendConfig(map_kubernetes_config(err)))?;
-                    kubernetes
-                        .validate_common(&spec)
-                        .map_err(|err| SandboxError::BackendConfig(map_kubernetes_config(err)))?;
-                    let backend = KubernetesBackend::connect(
-                        kubernetes,
-                        spec.clone(),
-                        config.lifecycle_timeout(),
-                    )
-                    .await
-                    .map_err(|err| engine_err(*err))?;
-                    Self::create_with_backend(backend, spec, config, metrics).await
-                }
-                #[cfg(not(feature = "kubernetes"))]
-                {
-                    let _ = (descriptor, spec, config, metrics);
-                    Err(SandboxError::UnsupportedCapability {
-                        capability: "kubernetes backend feature not compiled",
-                    })
-                }
+            #[cfg(feature = "kubernetes")]
+            ConnectedBackend::Kubernetes(backend) => {
+                Self::create_with_backend(backend, spec, config, metrics, recovery_id).await
             }
         }
-    }
-
-    #[cfg(all(unix, feature = "containerd"))]
-    async fn create_containerd(
-        containerd: ContainerdConfig,
-        spec: CommonSpec,
-        config: SandboxConfig,
-        metrics: SandboxMetrics,
-    ) -> Result<Self, SandboxError> {
-        let backend = ContainerdBackend::connect(containerd)
-            .await
-            .map_err(|err| engine_err(*err))?;
-        Self::create_with_backend(backend, spec, config, metrics).await
     }
 
     async fn create_with_backend<B: Backend>(
@@ -301,6 +275,7 @@ impl Sandbox {
         spec: CommonSpec,
         config: SandboxConfig,
         metrics: SandboxMetrics,
+        recovery_id: RecoveryId,
     ) -> Result<Self, SandboxError> {
         events::backend_selected(backend.kind());
         require_capabilities(&backend)?;
@@ -311,7 +286,7 @@ impl Sandbox {
             }
             Err(PrepareError::Engine(err)) => return Err(engine_err(err)),
         }
-        let nonce = uuid::Uuid::new_v4().to_string();
+        let nonce = recovery_id.as_str().to_string();
         let name = format!("circus-sandbox-{nonce}");
         let max_file = config.limits().max_file_bytes();
         let workspace = spawn_block(move || Workspace::new(max_file)).await??;
@@ -355,6 +330,7 @@ impl Sandbox {
             shutdown,
             cleanup,
             max_file_bytes: max_file,
+            recovery_id,
         })
     }
 
@@ -576,6 +552,7 @@ impl Drop for Sandbox {
 impl std::fmt::Debug for Sandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Sandbox")
+            .field("recovery_id", &self.recovery_id)
             .field("max_file_bytes", &self.max_file_bytes)
             .finish_non_exhaustive()
     }
@@ -1053,7 +1030,14 @@ impl Sandbox {
         config: SandboxConfig,
     ) -> Result<Self, SandboxError> {
         let spec = common_spec(&config);
-        Self::create_with_backend(backend, spec, config, SandboxMetrics::disabled()).await
+        Self::create_with_backend(
+            backend,
+            spec,
+            config,
+            SandboxMetrics::disabled(),
+            RecoveryId::generate(),
+        )
+        .await
     }
 }
 
