@@ -2,6 +2,7 @@
 
 mod containerd_support;
 
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::time::Duration;
 
 use circus_sandbox::{Sandbox, SandboxError, SandboxPhase, WorkspaceError};
@@ -28,7 +29,7 @@ async fn containerd_linux_runc_lifecycle() -> support::Result {
         .expect("running sandbox exposes inspected spec evidence");
     assert_eq!(observed.runtime.as_deref(), Some("io.containerd.runc.v2"));
     assert_eq!(observed.readonly_root, Some(true));
-    assert_eq!(observed.network_mode.as_deref(), Some("private"));
+    assert_eq!(observed.network_mode.as_deref(), Some("none"));
     assert_eq!(observed.cap_drop, Some(vec!["ALL".to_string()]));
     assert!(
         observed
@@ -97,6 +98,68 @@ async fn containerd_linux_runc_lifecycle() -> support::Result {
     let after = sandbox.status().await?;
     assert_eq!(after.phase, SandboxPhase::Destroyed);
     assert_eq!(after.instance_id, None);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit real containerd daemon"]
+async fn containerd_network_is_offline() -> support::Result {
+    support::enabled();
+    // UDP connect selects a host interface without sending any packet. The
+    // positive TCP control is entirely local, not an Internet availability test.
+    let route = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+    route.connect((Ipv4Addr::new(192, 0, 2, 1), 9))?;
+    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+    let endpoint = SocketAddr::new(route.local_addr()?.ip(), listener.local_addr()?.port());
+    TcpStream::connect_timeout(&endpoint, Duration::from_secs(2))?;
+    let sandbox = support::create().await?;
+    let id = sandbox.status().await?.instance_id.ok_or("missing id")?;
+    let result: support::Result<_> = async {
+        sandbox.start().await?;
+        let mode = sandbox
+            .status()
+            .await?
+            .enforcement
+            .and_then(|e| e.network_mode);
+        let script = format!(
+            r#"import json, pathlib, socket
+names = [name for _, name in socket.if_nameindex()]
+assert names == ['lo'], names
+routes = pathlib.Path('/proc/net/route').read_text().splitlines()[1:]
+assert not routes, routes
+routes6 = pathlib.Path('/proc/net/ipv6_route').read_text().splitlines()
+assert all(line.split()[-1] == 'lo' for line in routes6), routes6
+try:
+    connection = socket.create_connection(('{ip}', {port}), timeout=1)
+except OSError:
+    pass
+else:
+    connection.close()
+    raise AssertionError('guest reached host listener')
+print(json.dumps({{'interfaces': names, 'host_endpoint': 'blocked'}}))
+"#,
+            ip = endpoint.ip(),
+            port = endpoint.port(),
+        );
+        let output = sandbox.exec(support::python(&["-c", &script])).await?;
+        Ok((mode, output))
+    }
+    .await;
+    let cleanup = sandbox.destroy().await;
+    let (mode, output) = result?;
+    cleanup?;
+    support::assert_absent(&support::namespace(), &id)?;
+    assert_eq!(mode.as_deref(), Some("none"));
+    assert_eq!(
+        output.exit_code,
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)?,
+        serde_json::json!({"interfaces":["lo"],"host_endpoint":"blocked"})
+    );
     Ok(())
 }
 
