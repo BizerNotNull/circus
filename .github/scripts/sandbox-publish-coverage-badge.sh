@@ -98,11 +98,6 @@ branch_code=$(
     "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/badges"
 )
 if [[ "${branch_code}" == "404" ]]; then
-  main_sha=$(
-    curl -sS "${auth[@]}" \
-      "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
-      | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])'
-  )
   empty_tree=$(
     curl -sS "${auth[@]}" \
       -X POST "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/trees" \
