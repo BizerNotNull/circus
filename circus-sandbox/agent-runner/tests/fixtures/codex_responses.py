@@ -23,15 +23,18 @@ import os
 import socket
 assert 'CIRCUS_MODEL_API_KEY' not in os.environ
 assert not any('host-only-test-sentinel' in value for value in os.environ.values())
-for _, name in socket.if_nameindex():
-    if name != 'lo':
-        flags = int(Path(f'/sys/class/net/{name}/flags').read_text().strip(), 16)
-        assert not flags & 1, f'active external interface: {name}'
+interfaces = {name for _, name in socket.if_nameindex()}
+# Docker Desktop's Linux kernel may expose inactive tunnel devices in a fresh
+# network namespace. None may be UP or have a route out of this sandbox.
+for name in interfaces - {'lo'}:
+    flags = int(Path(f'/sys/class/net/{name}/flags').read_text().strip(), 16)
+    assert not flags & 1, f'active external interface: {name}'
 assert all(row.split()[0] == 'lo' for row in Path('/proc/net/route').read_text().splitlines()[1:])
 assert all(row.split()[-1] == 'lo' for row in Path('/proc/net/ipv6_route').read_text().splitlines())
 with socket.socket() as probe:
     probe.settimeout(0.2)
     assert probe.connect_ex(('192.0.2.1', 443)) == errno.ENETUNREACH
+assert Path('answer.py').read_text() == 'def add(a, b): return a - b\\n'
 Path('answer.py').write_text('def add(a, b): return a + b\\n')
 exec(Path('answer.py').read_text())
 assert add(20, 22) == 42
@@ -72,6 +75,17 @@ print('tests passed')
             for offset in range(0, len(data), 37):
                 emit("http_chunk", data[offset:offset + 37])
         emit("http_end", None)
+
+
+# This peer contains only public fixture data. Surface its assertion and protocol
+# diagnostics to the test collector; production still emits only safe categories.
+_report_failure = failure
+
+
+def failure(error):
+    if isinstance(error, (AssertionError, BridgeError)):
+        event("text", text=f"fixture failure: {error}")
+    _report_failure(error)
 
 
 main_host(ScriptedResponses())

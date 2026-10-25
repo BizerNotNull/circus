@@ -10,7 +10,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-SOURCE = Path(__file__).resolve().parents[1] / "examples/codex_agent/bridge.py"
+SOURCE = Path(__file__).resolve().parents[1] / "src/codex_bridge.py"
 SPEC = importlib.util.spec_from_file_location("circus_codex_https", SOURCE)
 bridge = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(bridge)
@@ -32,6 +32,7 @@ class HttpsTests(unittest.TestCase):
         cls.client_context = ssl.create_default_context(cafile=str(cert))
         cls.server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         cls.server_context.load_cert_chain(cert, key)
+        cls.cert = str(cert)
 
     def setUp(self):
         test = self
@@ -70,10 +71,10 @@ class HttpsTests(unittest.TestCase):
         self.assertEqual(self.requests, [])
 
     def test_verified_stream_uses_only_host_route_and_credentials(self):
-        self.content_type = "Text/Event-Stream; charset=utf-8"
         chunks = []
-        with patch.object(bridge.ssl, "create_default_context", return_value=self.client_context):
-            self.endpoint.forward(b'{"stream":true}', lambda kind, data: chunks.append((kind, data)))
+        self.endpoint.ca_file = self.cert
+        self.content_type = "Text/Event-Stream; charset=utf-8"
+        self.endpoint.forward(b'{"stream":true}', lambda kind, data: chunks.append((kind, data)))
         self.assertEqual(chunks[0], ("http_start", None))
         self.assertEqual(chunks[-1], ("http_end", None))
         self.assertEqual(b"".join(data for kind, data in chunks if kind == "http_chunk"), self.payload)

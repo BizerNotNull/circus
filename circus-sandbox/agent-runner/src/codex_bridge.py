@@ -1,4 +1,4 @@
-"""Example-only Codex/model bridge. Loaded with an explicit host or guest entrypoint.
+"""Private Codex/model adapter. Loaded with an explicit host or guest entrypoint.
 
 The guest has no external network. The host accepts only bounded Responses requests
 to its operator-configured HTTPS endpoint; the upstream key never crosses the pipe.
@@ -24,39 +24,53 @@ MAX_TOTAL_RESPONSE = 16 * 1024 * 1024
 MAX_REQUESTS = 16
 CHUNK = 8192
 WRITE_LOCK = threading.Lock()
+EVENT_LOCK = threading.Lock()
 
 
 class BridgeError(Exception):
     """Only fixed, non-sensitive diagnostics may be exposed to the operator."""
 
-
-class ModelFailure(BridgeError):
-    def __init__(self, category, status=None):
-        super().__init__("model service rejected the request" if category == "rejected"
-                         else "model request or response budget exceeded")
-        self.category, self.status = category, status
+    def __init__(self, message, code="protocol", status=None):
+        super().__init__(message)
+        self.code, self.status = code, status
 
 
-def report_failure(error):
-    # Never interpolate exception messages: HTTP libraries and providers can
-    # include request headers, credentials or response content in those strings.
-    status = None
-    if isinstance(error, ModelFailure):
-        category = error.category if error.category in ("rejected", "budget") else "protocol"
-        if category == "rejected" and type(error.status) is int and 100 <= error.status <= 599:
-            status = error.status
+def event(kind, **fields):
+    """The host's stderr is a private typed event pipe, never arbitrary logs."""
+    secrets = [os.environ.get(name, "") for name in ("CIRCUS_MODEL_API_KEY", "CIRCUS_TASK_TOKEN")]
+    for name, value in fields.items():
+        if isinstance(value, str):
+            for secret in secrets:
+                if secret:
+                    value = value.replace(secret, "[REDACTED]")
+            fields[name] = value
+    wire = json.dumps({"kind": kind, **fields}, separators=(",", ":"), allow_nan=False).encode() + b"\n"
+    if len(wire) > 64 * 1024:
+        raise BridgeError("event frame exceeded its budget", "budget")
+    with EVENT_LOCK:
+        sys.stderr.buffer.write(wire)
+        sys.stderr.buffer.flush()
+
+
+def failure(error):
+    if isinstance(error, BridgeError):
+        code, status = error.code, error.status
     elif isinstance(error, ssl.SSLError):
-        category = "tls"
+        code, status = "tls", None
     elif isinstance(error, TimeoutError):
-        category = "timeout"
+        code, status = "timeout", None
     elif isinstance(error, (OSError, http.client.HTTPException)):
-        category = "transport"
-    elif isinstance(error, BridgeError):
-        category = "protocol"
+        code, status = "transport", None
     else:
-        category = "controller"
-    print("model channel failed: " + json.dumps({"category": category, "status": status}),
-          file=sys.stderr, flush=True)
+        code, status = "controller", None
+    event("failure", code=code, status=status)
+
+
+def text_events(kind, text, **fields):
+    if not isinstance(text, str):
+        raise BridgeError("invalid text event")
+    for offset in range(0, len(text), 4096):
+        event(kind, text=text[offset:offset + 4096], **fields)
 
 
 def unique_object(pairs):
@@ -118,7 +132,7 @@ def required(name, limit):
 
 
 class ModelEndpoint:
-    def __init__(self, base_url, key):
+    def __init__(self, base_url, key, ca_file=None):
         try:
             url = urlsplit(base_url)
             port = url.port or 443
@@ -133,12 +147,16 @@ class ModelEndpoint:
         self.host, self.port = url.hostname, port
         self.path = url.path.rstrip("/") + "/responses"
         self.key = key
+        self.ca_file = ca_file
 
     def forward(self, body, emit):
         # http.client does not follow redirects or read environment proxy settings.
         # Destination and Authorization come exclusively from host configuration.
-        connection = http.client.HTTPSConnection(
-            self.host, self.port, timeout=30, context=ssl.create_default_context())
+        try:
+            context = ssl.create_default_context(cafile=self.ca_file)
+        except (OSError, ssl.SSLError) as error:
+            raise BridgeError("model trust configuration failed", "tls") from error
+        connection = http.client.HTTPSConnection(self.host, self.port, timeout=30, context=context)
         try:
             connection.request("POST", self.path, body=body, headers={
                 "Authorization": "Bearer " + self.key,
@@ -147,7 +165,7 @@ class ModelEndpoint:
             response = connection.getresponse()
             if response.status != 200:
                 # Never echo upstream errors, headers or redirects into guest logs.
-                raise ModelFailure("rejected", response.status)
+                raise BridgeError("model service rejected the request", "rejected", response.status)
             if response.getheader("Content-Type", "").split(";", 1)[0].strip().lower() != "text/event-stream":
                 raise BridgeError("model service must return a Responses event stream")
             emit("http_start", None)
@@ -155,7 +173,7 @@ class ModelEndpoint:
             while chunk := response.read1(CHUNK):
                 total += len(chunk)
                 if total > MAX_RESPONSE:
-                    raise ModelFailure("budget")
+                    raise BridgeError("model response exceeded its budget", "budget")
                 emit("http_chunk", chunk)
             emit("http_end", None)
         finally:
@@ -171,6 +189,8 @@ class HostController:
         self.total = 0
         self.worker = None
         self.revoked = threading.Event()
+        self.text_seen = set()
+        self.output_seen = set()
 
     def rpc(self, request_id, method, params):
         message = {"method": method, "params": params}
@@ -182,7 +202,7 @@ class HostController:
         request_id = message.get("id")
         if (type(request_id) is not int or request_id <= 0 or request_id in self.seen
                 or len(self.seen) >= MAX_REQUESTS):
-            raise BridgeError("invalid model request id or request budget exhausted")
+            raise BridgeError("invalid model request id or request budget exhausted", "budget")
         if message.get("method") != "POST" or message.get("path") != "/v1/responses":
             raise BridgeError("model route is not allowed")
         token = message.get("token")
@@ -217,7 +237,7 @@ class HostController:
             if chunk is not None:
                 self.total += len(chunk)
                 if self.total > MAX_TOTAL_RESPONSE:
-                    raise ModelFailure("budget")
+                    raise BridgeError("task response budget exhausted", "budget")
                 response["body"] = base64.b64encode(chunk).decode("ascii")
             send(response)
 
@@ -226,8 +246,11 @@ class HostController:
                 self.provider.forward(body, emit)
             except Exception as error:
                 if not self.revoked.is_set():
-                    report_failure(error)
-                    send({"channel": "http_error", "id": request_id})
+                    failure(error)
+                    try:
+                        send({"channel": "http_error", "id": request_id})
+                    except OSError:
+                        pass
 
         self.worker = threading.Thread(target=forward, daemon=True)
         self.worker.start()
@@ -238,7 +261,7 @@ class HostController:
         if "id" in message:
             if "method" in message:
                 # This unattended example never grants an unexpected server request.
-                raise BridgeError("app-server requested unsupported client interaction")
+                raise BridgeError("app-server requested unsupported client interaction", "unsupported_interaction")
             if "error" in message:
                 raise BridgeError("app-server rejected a request")
             result = message.get("result", {})
@@ -275,12 +298,50 @@ class HostController:
                     or (self.turn_id is not None and self.turn_id != turn_id)):
                 raise BridgeError("mismatched turn notification")
             self.turn_id = turn_id
+            if message["method"] == "turn/started":
+                event("running")
             if message["method"] == "turn/completed":
                 if turn.get("status") != "completed":
-                    raise BridgeError("agent turn did not complete successfully")
+                    raise BridgeError("agent turn did not complete successfully", "agent_failed")
                 self.finished = True
                 self.revoked.set()
+                event("turn_completed")
                 send({"channel": "shutdown"})
+        elif message.get("method") in ("item/agentMessage/delta", "item/commandExecution/outputDelta",
+                                        "item/started", "item/completed"):
+            self.on_item(message)
+
+    def on_item(self, message):
+        params = message.get("params", {})
+        if (params.get("threadId") != self.thread_id or self.turn_id is None
+                or params.get("turnId") != self.turn_id or self.finished):
+            raise BridgeError("mismatched item notification")
+        method = message["method"]
+        if method.endswith("/delta") or method.endswith("/outputDelta"):
+            item_id = params.get("itemId")
+            if not isinstance(item_id, str) or not 0 < len(item_id) <= 256:
+                raise BridgeError("invalid item id")
+            if method == "item/agentMessage/delta":
+                self.text_seen.add(item_id)
+                text_events("text", params.get("delta"))
+            else:
+                self.output_seen.add(item_id)
+                text_events("tool_output", params.get("delta"), id=item_id)
+            return
+        item = params.get("item", {})
+        item_id, kind = item.get("id"), item.get("type")
+        if not isinstance(item_id, str) or not 0 < len(item_id) <= 256:
+            raise BridgeError("invalid item id")
+        if kind == "agentMessage" and method == "item/completed" and item_id not in self.text_seen:
+            text_events("text", item.get("text", ""))
+        elif kind in ("commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "collabAgentToolCall"):
+            if kind == "commandExecution" and method == "item/completed" and item_id not in self.output_seen:
+                text_events("tool_output", item.get("aggregatedOutput") or "", id=item_id)
+            code = item.get("exitCode")
+            if code is not None and (type(code) is not int or not -(2**63) <= code < 2**63):
+                raise BridgeError("invalid tool exit code")
+            event("tool", id=item_id, tool=kind,
+                  phase="started" if method == "item/started" else "completed", exit_code=code)
 
     def run(self):
         self.rpc(1, "initialize", {"clientInfo": {"name": "circus_agent_example", "version": "0.1.0"}})
@@ -313,13 +374,13 @@ def main_host(provider=None):
             raise BridgeError("invalid prompt size")
         if provider is None:
             provider = ModelEndpoint(required("CIRCUS_MODEL_BASE_URL", 2048),
-                                     required("CIRCUS_MODEL_API_KEY", 4096))
+                                     required("CIRCUS_MODEL_API_KEY", 4096),
+                                     os.environ.get("CIRCUS_MODEL_CA_FILE"))
         controller = HostController(provider, model, token, prompt)
         controller.run()
-        print("Codex turn completed; model channel revoked", file=sys.stderr)
     except Exception as error:
         # Upstream/client/library errors may include credentials or response content.
-        print(str(error) if isinstance(error, BridgeError) else "agent controller failed", file=sys.stderr)
+        failure(error)
         raise SystemExit(1) from None
     finally:
         if controller:
@@ -405,10 +466,9 @@ def guest_config(port):
 def main_guest():
     token = required("CIRCUS_TASK_TOKEN", 256)
     server = GuestServer(token)
-    # The fixed image's circus-agent entrypoint creates this fresh CODEX_HOME.
-    # Keep the allocated numeric port in TOML data; executable and argv are fixed.
-    # Exclusive creation refuses an existing config or symlink. No real key is
-    # written here: Codex reads only the per-task token from its environment.
+    # The fixed image creates a fresh CODEX_HOME. Store the allocated numeric port
+    # as TOML data; executable and argv are fixed. Exclusive creation rejects an
+    # existing file or symlink, and the config never contains the real API key.
     with open("/workspace/.circus/home/.codex/config.toml", "x", encoding="utf-8") as config:
         config.write(guest_config(server.server_address[1]))
     with subprocess.Popen(["codex", "app-server", "--listen", "stdio://"],

@@ -1,0 +1,148 @@
+# 单任务 stdio 桥接
+
+`circus-stdio-bridge` 是 `circus-agent-runner` 的同机子进程入口。Node 客户端位于
+`circus-paseo/plugins/sandbox-provider/server/bridge/stdio-client.ts`，只依赖 Paseo 插件 SDK、
+Zod 与 Node 内置模块。它不启动 HTTP 服务，不注册 provider，也不增加另一套沙箱生命周期。
+Provider 与 UI 由 [Paseo sandbox provider](../../circus-paseo/public-docs/supported-providers.md#sandbox-codex) 提供；运行器能力和限制见 [Agent 运行器](codex-agent.md)。
+
+每个客户端启动一个 Rust 进程，只提交一个任务。结束后创建新客户端；不保留多轮会话、不恢复
+已退出进程的任务，也没有跨连接按 taskId 查询或取消的入口。
+
+## 宿主配置
+
+在 `circus-sandbox/` 构建：
+
+```bash
+cargo build --locked -p circus-stdio-bridge
+```
+
+启动参数固定为 `circus-stdio-bridge --config /absolute/config.json`。配置只由可信宿主准备，
+不能从任务 prompt、文件内容、providerOptions 或远端任务消息中生成。
+
+```json
+{
+  "version": 1,
+  "dockerEndpoint": "unix:///var/run/docker.sock",
+  "agentImage": "sha256:REPLACE_WITH_VERIFIED_IMAGE_DIGEST",
+  "python": "/absolute/path/to/python3",
+  "resources": {
+    "memoryBytes": 536870912,
+    "cpuMillis": 1000,
+    "maxProcesses": 128,
+    "workspaceBytes": 134217728,
+    "maxFileBytes": 2097152
+  },
+  "model": {
+    "baseUrl": "https://approved-gateway.example/v1",
+    "model": "approved-model",
+    "apiKeyFile": "/absolute/private/model-key",
+    "caFile": "/absolute/path/to/trusted-ca.pem"
+  }
+}
+```
+
+`caFile` 可省略，省略时使用宿主 Python 的证书信任。配置最多 64 KiB；key 文件最多 4098 字节，
+去掉末尾换行后交给运行器校验。配置、key、CA 和 Python 使用绝对路径；binary 由 Node 显式指定
+绝对路径且拒绝 `.cmd` / `.bat`。Node 只传调用方提供的环境，不自动继承 `process.env`。
+key 文件应只允许运行 daemon 的宿主账户读取。Node 不读取 key，Rust 不把真实 key 放入协议、
+沙箱环境或工作区。stdout 仅输出协议；stderr 只输出静态诊断，不输出配置、上游正文或错误链。
+
+## TypeScript 调用契约
+
+从 `stdio-client.ts` 导入 `CircusStdioClient` 及 `CircusTaskRequest`、`CircusTask`、
+`CircusTaskEvent`、`CircusTaskResult`、`CleanupStatus`、`CircusBridgeError`。
+
+```typescript
+const client = new CircusStdioClient({ executable, configFile, env });
+try {
+  const task = await client.start({
+    prompt: "Fix answer.py and export result.txt",
+    inputFiles: { "answer.py": new TextEncoder().encode(source) },
+    outputPaths: ["answer.py", "result.txt"],
+    timeoutMs: 180000,
+  });
+  for await (const event of task.events) renderUntrustedEvent(event);
+  const result = await task.result;
+  if (result.cleanup === "pending") await task.retryCleanup();
+  consumeResult(result);
+} finally {
+  await client.close();
+}
+```
+
+`start` 在收到 Rust 的 `accepted` 后返回。`events` 是单消费者异步流；应与任务一起持续消费。
+`cancel()` 等待取消请求确认，终止和清理结论仍须等待 `result`。成功结果包含原始产物字节，
+桥接不自动写回宿主。输入与产物路径只是沙箱项目相对名称，不能赋予宿主文件访问权限。
+
+任务失败/取消在 `result` 中返回 `failed` / `cancelled` 和安全错误类别；协议、断流、进程退出、
+消费拥塞等传输失败以 `CircusBridgeError` 拒绝 Promise。传输错误的 `cleanup` 为 `unknown`。
+`close()` 发送 EOF 并等待进程收尾，默认 120 秒，允许显式设置 1..300000 毫秒。
+超时才强制结束进程并拒绝，不能把强杀当作已清理。调用者需要处理 `close()` 的错误。
+
+## Wire v1
+
+双向使用 UTF-8 JSON Lines，一帧一个 JSON 对象加 LF。所有帧带 `v: 1`，拒绝未知字段、
+未知版本、空帧、无效 UTF-8、超限帧、EOF 中的半帧和非法消息状态。
+TypeScript 的严格 Zod schema 位于 `bridge/protocol.ts`，Rust 模型位于 `stdio-bridge/src/protocol.rs`。
+
+| 方向        | type             | 字段与语义                                                             |
+| ----------- | ---------------- | ---------------------------------------------------------------------- |
+| Rust → Node | `ready`          | `maxFrameBytes: 12582912`，配置完成，尚未创建任务                      |
+| Node → Rust | `start`          | `requestId`、`request: { prompt, inputFiles, outputPaths, timeoutMs }` |
+| Rust → Node | `accepted`       | `requestId`、Rust 分配的 `taskId`                                      |
+| Rust → Node | `event`          | `requestId`、`taskId`、从 1 连续递增的 `seq`、`event`                  |
+| Node → Rust | `cancel`         | `requestId`、`taskId`，只作用于本连接任务                              |
+| Rust → Node | `cancel_ack`     | 相同关联字段；仅确认请求，未确认回收                                   |
+| Rust → Node | `result`         | 相同关联字段和 `result`，一次且在全部事件之后                          |
+| Node → Rust | `cleanup_retry`  | 相同关联字段，仅任务结束后可调用                                       |
+| Rust → Node | `cleanup_result` | 相同关联字段、`cleanup`                                                |
+| Rust → Node | `error`          | `code`、静态 `message`，连接失败并退出非零                             |
+
+Wire 文件使用 `{ "path": "relative/name", "data": "canonical padded base64" }` 数组，
+拒绝重复路径。请求没有命令、宿主 cwd、模型端点、环境、凭证或可复用沙箱标识字段。
+`requestId` / `taskId` 只允许 1..64 个 ASCII 字母、数字或连字符。
+
+事件 `kind` 为 `phase`、`sandbox_created`、`text_delta`、`tool` 或 `tool_output`。
+`tool.exitCode` 是整数或 null。事件和产物都是不可信内容；展示或下载不等于执行权限。
+
+`result.status` 为 `succeeded`、`failed` 或 `cancelled`。成功时 `cleanup` 必须是 `confirmed`，
+并且 `artifacts` 与请求的输出集合完全一致；失败/取消包含 `error: { code, message }`。
+`cleanup` 可为 `confirmed`、`pending` 或 `unknown`。`pending` 保留运行器清理句柄，客户端可以
+显式重试。EOF 时也尝试一次重试；仍未确认则退出非零。`WorkerGone` 不被当作清理成功。
+重试不会把原任务失败改成成功。
+
+## 上限与退出
+
+- 每帧最多 12 MiB，不含 LF；事件帧最多 512 KiB，覆盖 JSON 转义开销。
+- prompt 最多 64 KiB；输入最多 64 个文件、解码后合计 8 MiB；产物最多 32 个，合计 8 MiB。
+  每文件另受宿主资源配置限制。项目路径最多 1024 个 UTF-8 字节，拒绝路径越界和不可移植形式。
+- 任务期限 1..3600000 毫秒。Node 就绪等待 10 秒；任务响应预算为任务期限加收尾预算。
+- Rust 输入队列与输出队列各最多一帧，stdout 单次写入等待最多 5 秒。Node 事件队列最多
+  256 项且最多 8 MiB；消费超限会关闭连接并请求取消，最终结果不能冒充成功。
+- EOF、非法帧、错误任务关联、SIGINT、SIGTERM、stdout 失败均触发本连接任务取消，随后等待
+  运行器的权威结果。清理只调用运行器接口；stdio 层不直接操作容器或另建生命周期。
+- 断线前未交付结果时，即使执行恰好完成，也返回取消而非成功。进程崩溃、SIGKILL、宿主重启后
+  没有持久化回收服务；`unknown` 需要宿主运维核查，不能用任务事件推断清理完成。
+
+## 验证边界
+
+```bash
+cargo test --locked -p circus-stdio-bridge
+cargo clippy --locked -p circus-stdio-bridge --all-targets -- -D warnings
+```
+
+Rust 默认测试包含真实 stdio 二进制进程及不可用后端路径。Node 的
+`framing.test.ts` 和 `stdio-client.posix.test.ts` 验证有界帧、子进程断流、任务关联、取消、
+清理重试和二进制文件往返；后者使用脚本协议对端，不是沙箱端到端验收。
+
+真实 Docker 的取消与 EOF 用例在收到任务自己的实例标识后触发收尾，并独立 inspect 确认删除。
+它不访问模型，必须显式提供后端、已验证镜像和宿主 Python：
+
+```bash
+CIRCUS_DOCKER_SANDBOX=1 \
+CIRCUS_DOCKER_ENDPOINT=unix:///var/run/docker.sock \
+CIRCUS_AGENT_IMAGE=your-verified-image \
+CIRCUS_HOST_PYTHON=/absolute/path/to/python3 \
+  cargo test --locked -p circus-stdio-bridge --test transport \
+  docker_cancellation_and_eof_confirm_owned_container_removal -- --ignored --nocapture
+```

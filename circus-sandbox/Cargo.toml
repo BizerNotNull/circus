@@ -34,25 +34,38 @@ kube = { version = "4.2.0", default-features = false, features = ["client", "con
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = "1"
 sha2 = { version = "0.10", default-features = false }
-tempfile = "3.27.0"
-thiserror = "2.0.21"
-tokio = { version = "1.47", default-features = false, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "process", "signal", "fs"] }
-tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "process", "signal", "fs"] }
+tokio-util = { workspace = true, features = ["rt"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
-uuid = { version = "1", default-features = false, features = ["v4", "std"] }
+uuid = { workspace = true, features = ["v4", "std"] }
 process-wrap = { version = "=10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
-url = "2.5"
+url.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
-tokio = { version = "1.47", default-features = false, features = ["process"] }
+tokio = { workspace = true, features = ["process"] }
 
 [[example]]
 name = "http_api"
 required-features = ["http"]
+
+[workspace]
+members = ["agent-runner", "stdio-bridge"]
+default-members = [".", "agent-runner", "stdio-bridge"]
+resolver = "3"
+
+[workspace.dependencies]
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = { version = "1.47", default-features = false }
+tokio-util = { version = "0.7", default-features = false }
+url = "2.5"
+uuid = { version = "1", default-features = false }
 
 [lints.rust]
 unsafe_code = "forbid"
