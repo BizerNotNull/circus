@@ -48,7 +48,7 @@ Paseo MCP 工具和引导功能不可用。你自己为 `agy` 配置的 MCP 服�
 
 命令和环境变量覆盖见[自定义 Provider](/docs/custom-providers)。
 
-## Sandbox (Codex / Claude Code) {#sandbox-codex}
+## Sandbox Codex
 
 Circus 沙箱 Provider 需要显式启用。主机配置选择 Codex 或 Claude Code，并配置对应的固定镜像和模型协议。macOS 桌面端的 **Sandbox setup** 可选择 Agent、检查依赖、准备镜像、测试对应模型 API，并将 API key 保存到 Keychain。手动配置需要在 daemon 主机安装 Circus Rust bridge，配置 Docker 端点、资源限制和模型渠道。Paseo 不会读取个人 Agent 登录，也不会把主目录、代理设置、MCP 服务器、系统提示词或 Agent 环境变量传给任务。
 

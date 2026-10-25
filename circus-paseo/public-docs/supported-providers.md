@@ -58,7 +58,7 @@ for provider-specific environment variables:
 
 See [Custom providers](/docs/custom-providers) for command and environment overrides.
 
-## Sandbox (Codex and Claude Code) {#sandbox-codex}
+## Sandbox Codex
 
 Circus's **Sandbox** provider is opt-in. The host configuration selects Codex or Claude Code with
 its matching pinned image and model protocol. On macOS, open the local desktop host settings and use
