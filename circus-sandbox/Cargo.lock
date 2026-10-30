@@ -301,7 +301,7 @@ name = "circus-sandbox"
 version = "0.1.0"
 dependencies = [
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bollard",
  "cap-fs-ext",
  "cap-std",
@@ -344,7 +344,7 @@ dependencies = [
 name = "circus-stdio-bridge"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "cap-fs-ext",
  "cap-std",
  "circus-agent-runner",

@@ -12,7 +12,7 @@ containerd = ["circus-agent-runner/containerd", "circus-sandbox/containerd"]
 [dependencies]
 circus-agent-runner = { version = "0.1.0", path = "../agent-runner" }
 circus-sandbox = { version = "0.1.0", path = ".." }
-base64 = "0.22"
+base64 = "0.23"
 cap-std = { version = "=4.0.3", default-features = false }
 cap-fs-ext = { version = "=4.0.3", default-features = false }
 serde = { version = "1", features = ["derive"] }
