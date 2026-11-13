@@ -15,7 +15,7 @@
   "dependencies": {
     "dotparser": "1.1.1",
     "github-slugger": "2.0.0",
-    "markdownlint": "0.42.0",
+    "markdownlint": "0.42.1",
     "mdast-util-from-markdown": "2.1.0",
     "prettier": "3.9.10"
   },
