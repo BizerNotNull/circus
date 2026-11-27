@@ -56,7 +56,7 @@ jobs:
         # (2031cfc080254a8a887f58cffee85186f0e49e48), not used.
         # Public repository: dependency review does not need GitHub Code Security.
         # warn-only stays false. No pull-requests: write, so no PR comment.
-        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        uses: actions/dependency-review-action@bbc44d14a204704ccc493733616cd1e93a0321ec # v5.0.1
         with:
           fail-on-severity: low
           fail-on-scopes: runtime,development
@@ -86,7 +86,7 @@ jobs:
         # languages is actions only. No javascript-typescript: this change has
         # no circus-sandbox/qa source, and circus-paseo is out of scope.
         # No rust language. Rust CodeQL is a separate change.
-        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           languages: actions
           build-mode: none
@@ -94,6 +94,6 @@ jobs:
           queries: security-extended
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           category: /language:actions
